@@ -1,4 +1,4 @@
-# 지금 할 일 (2026-10-26 15:47 기준)
+# 지금 할 일 (2026-10-26 16:00 기준)
 
 단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → **JU-1A** → JU-1B → JU-1C → JU-1c Desktop
 (JU-1A/1B/1C는 로컬 commit을 나누고, 1C까지 로컬 Build/Smoke 후 함께 push — ChatGPT 보정 R1)
@@ -6,7 +6,9 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT | 다음 단계 지시: 보안 정리(juproject `appsettings.Development.json` Seed 평문 → user-secrets) / JU-1A |
+| ChatGPT | SEC-01 검토: [reviews/claude/2026-10-26_sec-01_result.md](../reviews/claude/2026-10-26_sec-01_result.md) |
+| ChatGPT | JU-1A 사전 조사 검토 → 지시: [reviews/claude/2026-10-26_ju-1a_precheck.md](../reviews/claude/2026-10-26_ju-1a_precheck.md) |
+| 사용자 | **juproject `admin` 비밀번호 변경** (공개됐던 값과 동일) / SEC-01 commit·push 승인 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
 ## 미커밋 변경의 위치
@@ -14,6 +16,7 @@
 |---|---|---|
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 재사용 후보. PC-A 미적용 |
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
+| SEC-01 | PC-A juproject `chore/sys-seed-secret` 미커밋 | 빌드·로그인 smoke PASS, 검토 대기 |
 
 ## 최근 확인
 - 2026-10-26 10:31 PC-A `feature/env-0`: 환경검사 PASS 30 / WARN 4 / FAIL 0, 로컬 빌드 5종 PASS, `global.json` → SDK 10.0.402
