@@ -19,8 +19,8 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 ## 지금 진행 중
 
 1. ChatGPT 재설계 v1.3 → Claude 역검토 → **ChatGPT 승인 (8개 보정)**
-2. **ENV-0 구현 완료 (미커밋)**: [reviews/claude/2026-10-26_env-0_result.md](reviews/claude/2026-10-26_env-0_result.md) — 환경검사 FAIL 0, 로컬 빌드 5종 PASS
-3. 다음: ChatGPT diff 검토 → Jenkins `JU_TOMCAT_HOME` 추가 → 사용자 commit/push → Jenkins `main` 확인 → JU-0A
+2. ENV-0: ChatGPT 승인, PC-A `main` 로컬 commit — push 대기
+3. **JU-0A 구현 완료 (미커밋)**: [reviews/claude/2026-10-26_ju-0a_result.md](reviews/claude/2026-10-26_ju-0a_result.md)
 
 ## 제품 저장소
 
