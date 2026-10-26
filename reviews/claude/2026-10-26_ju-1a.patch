@@ -1,0 +1,966 @@
+diff --git a/juprovider.backend/pom.xml b/juprovider.backend/pom.xml
+index b3313e7..0427240 100644
+--- a/juprovider.backend/pom.xml
++++ b/juprovider.backend/pom.xml
+@@ -82,6 +82,12 @@
+             <artifactId>spring-boot-starter-security</artifactId>
+         </dependency>
+ 
++        <!-- JWT 발급/검증 (Nimbus, 버전은 Spring Boot BOM 관리) -->
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
++        </dependency>
++
+ 
+         <!-- =====================================================
+              Spring Data JPA
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/config/JwtConfig.java b/juprovider.backend/src/main/java/com/asdp/juprovider/config/JwtConfig.java
+new file mode 100644
+index 0000000..e9f686a
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/config/JwtConfig.java
+@@ -0,0 +1,80 @@
++package com.asdp.juprovider.config;
++
++import java.nio.charset.StandardCharsets;
++import java.security.SecureRandom;
++
++import javax.crypto.SecretKey;
++import javax.crypto.spec.SecretKeySpec;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
++import org.springframework.security.oauth2.jwt.JwtDecoder;
++import org.springframework.security.oauth2.jwt.JwtEncoder;
++import org.springframework.security.oauth2.jwt.JwtValidators;
++import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
++import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
++
++import com.nimbusds.jose.jwk.source.ImmutableSecret;
++
++/**
++ * JU 사용자 JWT (HS256) 발급/검증 설정.
++ *
++ * - JU_JWT_SECRET(juprovider.security.jwt.secret)이 없거나 32바이트 미만이면 기동 실패
++ * - 단, allow-random-secret=true(dev profile 전용)이고 값이 없으면 임시 키 + WARN
++ * - 서명키 값은 로그에 쓰지 않는다
++ */
++@Configuration
++public class JwtConfig {
++
++    private static final Logger log = LoggerFactory.getLogger(JwtConfig.class);
++
++    static final int MIN_SECRET_BYTES = 32;
++
++    @Bean
++    public SecretKey jwtSecretKey(
++            @Value("${juprovider.security.jwt.secret:}") String secret,
++            @Value("${juprovider.security.jwt.allow-random-secret:false}") boolean allowRandomSecret) {
++        return new SecretKeySpec(resolveSecret(secret, allowRandomSecret), "HmacSHA256");
++    }
++
++    static byte[] resolveSecret(String secret, boolean allowRandomSecret) {
++        if (secret == null || secret.isBlank()) {
++            if (!allowRandomSecret) {
++                throw new IllegalStateException(
++                        "JU_JWT_SECRET이 설정되지 않았습니다. (Tomcat bin\\setenv.bat, 32바이트 이상)");
++            }
++            byte[] random = new byte[MIN_SECRET_BYTES];
++            new SecureRandom().nextBytes(random);
++            log.warn("JU_JWT_SECRET이 없어 임시 서명키를 사용합니다 (dev profile 전용). "
++                    + "재시작하면 발급된 토큰은 모두 무효가 됩니다.");
++            return random;
++        }
++        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
++        if (keyBytes.length < MIN_SECRET_BYTES) {
++            throw new IllegalStateException(
++                    "JU_JWT_SECRET은 32바이트 이상이어야 합니다.");
++        }
++        return keyBytes;
++    }
++
++    @Bean
++    public JwtEncoder jwtEncoder(SecretKey jwtSecretKey) {
++        return new NimbusJwtEncoder(new ImmutableSecret<>(jwtSecretKey));
++    }
++
++    @Bean
++    public JwtDecoder jwtDecoder(
++            SecretKey jwtSecretKey,
++            @Value("${juprovider.security.jwt.issuer:juprovider}") String issuer) {
++        NimbusJwtDecoder decoder = NimbusJwtDecoder
++                .withSecretKey(jwtSecretKey)
++                .macAlgorithm(MacAlgorithm.HS256)
++                .build();
++        decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer(issuer));
++        return decoder;
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java b/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
+index 6c4d3a5..51947a4 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
+@@ -2,22 +2,85 @@ package com.asdp.juprovider.config;
+ 
+ import org.springframework.context.annotation.Bean;
+ import org.springframework.context.annotation.Configuration;
++import org.springframework.core.annotation.Order;
++import org.springframework.http.HttpMethod;
+ import org.springframework.security.config.Customizer;
+ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
++import org.springframework.security.config.http.SessionCreationPolicy;
+ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+ import org.springframework.security.crypto.password.PasswordEncoder;
+ import org.springframework.security.web.SecurityFilterChain;
+ 
++import com.asdp.juprovider.security.JsonSecurityErrorHandler;
++import com.asdp.juprovider.security.UserTokenAuthenticationConverter;
++import com.asdp.juprovider.service.AuthService;
++
++/**
++ * 인증 구조 (JU-1A)
++ *
++ * 1) Sync 체인 : /api/core/sync/**  → JU-1B(Client 인증) 전까지 임시 permitAll (Desktop 동기화)
++ * 2) API 체인  : /api/**            → 사용자 JWT
++ *      - 공개: POST /api/auth/login, /api/health
++ *      - 로그인만: /api/auth/me, /api/auth/password (최초 비밀번호 변경 전에도 허용)
++ *      - 그 외(/api/core/**, /api/action/** 등): 로그인 + 비밀번호 변경 완료(PW_OK). 아니면 403
++ *      - 메뉴 Action 권한(AUTH_ATTR)은 JU-1B
++ * 3) 웹 체인   : 그 밖의 경로 (Vue 정적 파일) 공개
++ */
+ @Configuration
+ public class SecurityConfig {
+ 
++    private final JsonSecurityErrorHandler errorHandler = new JsonSecurityErrorHandler();
++
+     @Bean
+-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
++    @Order(1)
++    public SecurityFilterChain syncSecurityFilterChain(HttpSecurity http) throws Exception {
+         http
++            .securityMatcher("/api/core/sync/**")
+             .csrf(csrf -> csrf.disable())
+             .cors(Customizer.withDefaults())
++            .sessionManagement(session ->
++                    session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
++            // TODO(JU-1B): Desktop Client Key 인증으로 교체
+             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
++        return http.build();
++    }
+ 
++    @Bean
++    @Order(2)
++    public SecurityFilterChain apiSecurityFilterChain(
++            HttpSecurity http,
++            AuthService authService) throws Exception {
++        UserTokenAuthenticationConverter userTokenAuthenticationConverter =
++                new UserTokenAuthenticationConverter(authService);
++        http
++            .securityMatcher("/api/**")
++            .csrf(csrf -> csrf.disable())
++            .cors(Customizer.withDefaults())
++            .sessionManagement(session ->
++                    session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
++            .authorizeHttpRequests(auth -> auth
++                    .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
++                    .requestMatchers("/api/health").permitAll()
++                    .requestMatchers("/api/auth/me", "/api/auth/password")
++                            .hasAuthority(UserTokenAuthenticationConverter.AUTHORITY_USER)
++                    .anyRequest()
++                            .hasAuthority(UserTokenAuthenticationConverter.AUTHORITY_PASSWORD_OK))
++            .oauth2ResourceServer(oauth2 -> oauth2
++                    .jwt(jwt -> jwt.jwtAuthenticationConverter(userTokenAuthenticationConverter))
++                    .authenticationEntryPoint(errorHandler)
++                    .accessDeniedHandler(errorHandler))
++            .exceptionHandling(ex -> ex
++                    .authenticationEntryPoint(errorHandler)
++                    .accessDeniedHandler(errorHandler));
++        return http.build();
++    }
++
++    @Bean
++    @Order(3)
++    public SecurityFilterChain webSecurityFilterChain(HttpSecurity http) throws Exception {
++        http
++            .csrf(csrf -> csrf.disable())
++            .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
+         return http.build();
+     }
+ 
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java
+index e4bab62..6449493 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java
+@@ -1,14 +1,22 @@
+ package com.asdp.juprovider.controller;
+ 
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.security.oauth2.jwt.Jwt;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++
+ import com.asdp.juprovider.dto.ApiResponse;
+ import com.asdp.juprovider.dto.LoginRequest;
+ import com.asdp.juprovider.dto.LoginResponse;
++import com.asdp.juprovider.dto.MeResponse;
++import com.asdp.juprovider.dto.PasswordChangeRequest;
++import com.asdp.juprovider.security.JwtTokenService;
+ import com.asdp.juprovider.service.AuthService;
++
+ import jakarta.validation.Valid;
+-import org.springframework.web.bind.annotation.PostMapping;
+-import org.springframework.web.bind.annotation.RequestBody;
+-import org.springframework.web.bind.annotation.RequestMapping;
+-import org.springframework.web.bind.annotation.RestController;
+ 
+ @RestController
+ @RequestMapping("/api/auth")
+@@ -25,4 +33,18 @@ public class AuthController {
+             @Valid @RequestBody LoginRequest request) {
+         return ApiResponse.ok(authService.login(request));
+     }
++
++    @GetMapping("/me")
++    public ApiResponse<MeResponse> me(@AuthenticationPrincipal Jwt jwt) {
++        return ApiResponse.ok(authService.me(JwtTokenService.userId(jwt)));
++    }
++
++    /** 성공하면 이전에 발급된 토큰은 모두 무효. 새로 로그인한다. */
++    @PostMapping("/password")
++    public ApiResponse<Void> changePassword(
++            @AuthenticationPrincipal Jwt jwt,
++            @Valid @RequestBody PasswordChangeRequest request) {
++        authService.changePassword(JwtTokenService.userId(jwt), request);
++        return new ApiResponse<>(true, null, "비밀번호가 변경되었습니다. 다시 로그인하세요.");
++    }
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/LoginResponse.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/LoginResponse.java
+index b906070..fce454c 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/LoginResponse.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/LoginResponse.java
+@@ -1,10 +1,14 @@
+ package com.asdp.juprovider.dto;
+ 
++import java.time.Instant;
++
++/**
++ * 로그인 응답. passwordChangeRequired = true이면 비밀번호를 바꾸기 전까지
++ * /api/auth/me, /api/auth/password 외의 보호 API는 403이다.
++ */
+ public record LoginResponse(
+-        Long userId,
+-        String loginId,
+-        String userName,
+-        Long authId,
+-        String authType,
+-        String authAttr) {
++        String accessToken,
++        Instant expiresAt,
++        UserInfo user,
++        boolean passwordChangeRequired) {
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/MeResponse.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/MeResponse.java
+new file mode 100644
+index 0000000..d31b7d6
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/MeResponse.java
+@@ -0,0 +1,6 @@
++package com.asdp.juprovider.dto;
++
++public record MeResponse(
++        UserInfo user,
++        boolean passwordChangeRequired) {
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/PasswordChangeRequest.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/PasswordChangeRequest.java
+new file mode 100644
+index 0000000..5fc2de3
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/PasswordChangeRequest.java
+@@ -0,0 +1,9 @@
++package com.asdp.juprovider.dto;
++
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.Size;
++
++public record PasswordChangeRequest(
++        @NotBlank String currentPassword,
++        @NotBlank @Size(min = 8, max = 100) String newPassword) {
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/UserInfo.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/UserInfo.java
+new file mode 100644
+index 0000000..747b84b
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/UserInfo.java
+@@ -0,0 +1,9 @@
++package com.asdp.juprovider.dto;
++
++public record UserInfo(
++        Long userId,
++        String loginId,
++        String userName,
++        Long authId,
++        String authType) {
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUser.java b/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUser.java
+index 43f8f75..605a681 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUser.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUser.java
+@@ -47,4 +47,8 @@ public class JuUser {
+     public String getUseYn() {
+         return useYn;
+     }
++
++    public void changePasswordHash(String passwordHash) {
++        this.passwordHash = passwordHash;
++    }
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUserDetail.java b/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUserDetail.java
+index 0bebd0a..41b7442 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUserDetail.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/entity/JuUserDetail.java
+@@ -43,4 +43,42 @@ public class JuUserDetail {
+     public String getUserName() {
+         return userName;
+     }
++
++    public Integer getLoginFailCount() {
++        return loginFailCount;
++    }
++
++    public LocalDateTime getLastLoginAt() {
++        return lastLoginAt;
++    }
++
++    public LocalDateTime getPasswordChangedAt() {
++        return passwordChangedAt;
++    }
++
++    /** 비밀번호 변경일이 없으면 첫 로그인 후 변경이 필요하다 (초기 관리자 등). */
++    public boolean isPasswordChangeRequired() {
++        return passwordChangedAt == null;
++    }
++
++    public void loginFailed() {
++        loginFailCount = (loginFailCount == null ? 0 : loginFailCount) + 1;
++    }
++
++    public void loginSucceeded(LocalDateTime now) {
++        loginFailCount = 0;
++        lastLoginAt = now;
++    }
++
++    public void passwordChanged(LocalDateTime now) {
++        passwordChangedAt = now;
++    }
++
++    public static JuUserDetail create(Long userId, String userName) {
++        JuUserDetail detail = new JuUserDetail();
++        detail.userId = userId;
++        detail.userName = userName;
++        detail.loginFailCount = 0;
++        return detail;
++    }
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/AuthenticationFailedException.java b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/AuthenticationFailedException.java
+new file mode 100644
+index 0000000..d95dbae
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/AuthenticationFailedException.java
+@@ -0,0 +1,9 @@
++package com.asdp.juprovider.exception;
++
++/** 로그인 실패 (401). 아이디 없음·비밀번호 오류·비활성 사용자/권한을 구분하지 않는다. */
++public class AuthenticationFailedException extends RuntimeException {
++
++    public AuthenticationFailedException(String message) {
++        super(message);
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+index 616cce4..375214f 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+@@ -3,6 +3,9 @@ package com.asdp.juprovider.exception;
+ import com.asdp.juprovider.dto.ApiResponse;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.http.ResponseEntity;
++import org.springframework.http.converter.HttpMessageNotReadableException;
++import org.springframework.validation.FieldError;
++import org.springframework.web.bind.MethodArgumentNotValidException;
+ import org.springframework.web.bind.annotation.ExceptionHandler;
+ import org.springframework.web.bind.annotation.ResponseStatus;
+ import org.springframework.web.bind.annotation.RestControllerAdvice;
+@@ -17,6 +20,34 @@ public class GlobalExceptionHandler {
+                 .body(new ApiResponse<>(false, null, exception.getMessage()));
+     }
+ 
++    /** 로그인 실패 등 인증 실패 */
++    @ExceptionHandler(AuthenticationFailedException.class)
++    public ResponseEntity<ApiResponse<Void>> handleAuthenticationFailed(
++            AuthenticationFailedException exception) {
++        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
++                .body(new ApiResponse<>(false, null, exception.getMessage()));
++    }
++
++    /** 요청 DTO 검증(@Valid) 실패 */
++    @ExceptionHandler(MethodArgumentNotValidException.class)
++    public ResponseEntity<ApiResponse<Void>> handleValidation(
++            MethodArgumentNotValidException exception) {
++        FieldError error = exception.getBindingResult().getFieldError();
++        String message = error == null
++                ? "요청 값이 올바르지 않습니다."
++                : error.getField() + ": " + error.getDefaultMessage();
++        return ResponseEntity.badRequest()
++                .body(new ApiResponse<>(false, null, message));
++    }
++
++    /** 요청 본문(JSON) 형식 오류 */
++    @ExceptionHandler(HttpMessageNotReadableException.class)
++    public ResponseEntity<ApiResponse<Void>> handleUnreadable(
++            HttpMessageNotReadableException exception) {
++        return ResponseEntity.badRequest()
++                .body(new ApiResponse<>(false, null, "요청 형식이 올바르지 않습니다."));
++    }
++
+     @ExceptionHandler(Exception.class)
+     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+     public ApiResponse<Void> handleException(Exception e) {
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/repository/UserRepository.java b/juprovider.backend/src/main/java/com/asdp/juprovider/repository/UserRepository.java
+index f31c1ec..55988e9 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/repository/UserRepository.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/repository/UserRepository.java
+@@ -8,4 +8,6 @@ import java.util.Optional;
+ public interface UserRepository extends JpaRepository<JuUser, Long> {
+ 
+     Optional<JuUser> findByLoginIdAndUseYn(String loginId, String useYn);
++
++    Optional<JuUser> findByLoginId(String loginId);
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
+new file mode 100644
+index 0000000..cd7edc4
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
+@@ -0,0 +1,52 @@
++package com.asdp.juprovider.security;
++
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++
++import org.springframework.http.MediaType;
++import org.springframework.security.access.AccessDeniedException;
++import org.springframework.security.core.Authentication;
++import org.springframework.security.core.AuthenticationException;
++import org.springframework.security.core.context.SecurityContextHolder;
++import org.springframework.security.web.AuthenticationEntryPoint;
++import org.springframework.security.web.access.AccessDeniedHandler;
++
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++
++/**
++ * 인증 실패(401)·권한 없음(403)을 ApiResponse 형식 JSON으로 응답한다.
++ */
++public class JsonSecurityErrorHandler implements AuthenticationEntryPoint, AccessDeniedHandler {
++
++    @Override
++    public void commence(
++            HttpServletRequest request,
++            HttpServletResponse response,
++            AuthenticationException authException) throws IOException {
++        write(response, HttpServletResponse.SC_UNAUTHORIZED, "인증이 필요합니다.");
++    }
++
++    @Override
++    public void handle(
++            HttpServletRequest request,
++            HttpServletResponse response,
++            AccessDeniedException accessDeniedException) throws IOException {
++        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
++        boolean passwordChangeRequired = authentication != null
++                && authentication.getAuthorities().stream()
++                        .noneMatch(a -> UserTokenAuthenticationConverter.AUTHORITY_PASSWORD_OK
++                                .equals(a.getAuthority()));
++        write(response, HttpServletResponse.SC_FORBIDDEN,
++                passwordChangeRequired ? "비밀번호를 먼저 변경해야 합니다." : "권한이 없습니다.");
++    }
++
++    private static void write(HttpServletResponse response, int status, String message)
++            throws IOException {
++        response.setStatus(status);
++        response.setCharacterEncoding(StandardCharsets.UTF_8.name());
++        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
++        response.getWriter().write(
++                "{\"success\":false,\"data\":null,\"message\":\"" + message + "\"}");
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/security/JwtTokenService.java b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JwtTokenService.java
+new file mode 100644
+index 0000000..a8d9459
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JwtTokenService.java
+@@ -0,0 +1,107 @@
++package com.asdp.juprovider.security;
++
++import java.time.Instant;
++import java.time.temporal.ChronoUnit;
++
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
++import org.springframework.security.oauth2.jwt.JwsHeader;
++import org.springframework.security.oauth2.jwt.Jwt;
++import org.springframework.security.oauth2.jwt.JwtClaimsSet;
++import org.springframework.security.oauth2.jwt.JwtEncoder;
++import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
++import org.springframework.stereotype.Service;
++
++import com.asdp.juprovider.core.security.ExecutionContext;
++
++/**
++ * JU 사용자 Access Token 발급과 클레임 해석.
++ *
++ * 클레임
++ *   sub       : USER_ID
++ *   login_id  : LOGIN_ID
++ *   auth_id   : AUTH_ID
++ *   auth_type : AUTH_TYPE (예: AUTH0001)
++ *   pwv       : 발급 시점의 비밀번호 버전 (PW_CHANGE_DT epoch 초, 없으면 0).
++ *               요청마다 DB 값과 비교해서, 비밀번호 변경 전에 발급된 토큰을 거부한다.
++ */
++@Service
++public class JwtTokenService {
++
++    public static final String CLAIM_LOGIN_ID = "login_id";
++    public static final String CLAIM_AUTH_ID = "auth_id";
++    public static final String CLAIM_AUTH_TYPE = "auth_type";
++    public static final String CLAIM_PASSWORD_VERSION = "pwv";
++
++    private final JwtEncoder jwtEncoder;
++    private final String issuer;
++    private final long accessTokenMinutes;
++
++    public JwtTokenService(
++            JwtEncoder jwtEncoder,
++            @Value("${juprovider.security.jwt.issuer:juprovider}") String issuer,
++            @Value("${juprovider.security.jwt.access-token-minutes:60}") long accessTokenMinutes) {
++        this.jwtEncoder = jwtEncoder;
++        this.issuer = issuer;
++        this.accessTokenMinutes = accessTokenMinutes;
++    }
++
++    public IssuedToken issue(
++            Long userId,
++            String loginId,
++            Long authId,
++            String authType,
++            long passwordVersion) {
++        Instant now = Instant.now();
++        Instant expiresAt = now.plus(accessTokenMinutes, ChronoUnit.MINUTES);
++        JwtClaimsSet claims = JwtClaimsSet.builder()
++                .issuer(issuer)
++                .issuedAt(now)
++                .expiresAt(expiresAt)
++                .subject(String.valueOf(userId))
++                .claim(CLAIM_LOGIN_ID, loginId)
++                .claim(CLAIM_AUTH_ID, authId)
++                .claim(CLAIM_AUTH_TYPE, authType)
++                .claim(CLAIM_PASSWORD_VERSION, passwordVersion)
++                .build();
++        JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();
++        String token = jwtEncoder
++                .encode(JwtEncoderParameters.from(header, claims))
++                .getTokenValue();
++        return new IssuedToken(token, expiresAt);
++    }
++
++    public static Long userId(Jwt jwt) {
++        return Long.valueOf(jwt.getSubject());
++    }
++
++    public static long passwordVersion(Jwt jwt) {
++        return toLong(jwt.getClaim(CLAIM_PASSWORD_VERSION), -1L);
++    }
++
++    public static Long authId(Jwt jwt) {
++        Object value = jwt.getClaim(CLAIM_AUTH_ID);
++        return value == null ? null : toLong(value, -1L);
++    }
++
++    public static ExecutionContext toContext(Jwt jwt) {
++        return ExecutionContext.ofUser(userId(jwt), authId(jwt));
++    }
++
++    private static long toLong(Object value, long fallback) {
++        if (value instanceof Number number) {
++            return number.longValue();
++        }
++        if (value == null) {
++            return fallback;
++        }
++        try {
++            return Long.parseLong(value.toString());
++        } catch (NumberFormatException e) {
++            return fallback;
++        }
++    }
++
++    public record IssuedToken(String token, Instant expiresAt) {
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/security/UserTokenAuthenticationConverter.java b/juprovider.backend/src/main/java/com/asdp/juprovider/security/UserTokenAuthenticationConverter.java
+new file mode 100644
+index 0000000..ab0b051
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/security/UserTokenAuthenticationConverter.java
+@@ -0,0 +1,61 @@
++package com.asdp.juprovider.security;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.springframework.core.convert.converter.Converter;
++import org.springframework.security.authentication.AbstractAuthenticationToken;
++import org.springframework.security.core.GrantedAuthority;
++import org.springframework.security.core.authority.SimpleGrantedAuthority;
++import org.springframework.security.oauth2.jwt.Jwt;
++import org.springframework.security.oauth2.server.resource.InvalidBearerTokenException;
++import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
++
++import com.asdp.juprovider.service.AuthService;
++import com.asdp.juprovider.service.AuthService.UserState;
++
++/**
++ * 서명·만료가 확인된 JWT를 현재 DB 상태와 대조해서 인증 객체로 만든다.
++ *
++ * 거부(401): 사용자/권한이 없거나 미사용, 비밀번호 버전(pwv) 불일치(변경 전에 발급된 토큰)
++ * 권한:
++ *   USER        : 로그인한 사용자 (/api/auth/me, /api/auth/password)
++ *   PW_OK       : 비밀번호 변경이 끝난 사용자 (그 밖의 보호 API)
++ *   ROLE_{AUTH_TYPE}
++ *
++ * MVC 변환기로 자동 등록되지 않도록 Bean이 아니라 SecurityConfig에서 직접 만든다.
++ */
++public class UserTokenAuthenticationConverter implements Converter<Jwt, AbstractAuthenticationToken> {
++
++    public static final String AUTHORITY_USER = "USER";
++    public static final String AUTHORITY_PASSWORD_OK = "PW_OK";
++
++    private final AuthService authService;
++
++    public UserTokenAuthenticationConverter(AuthService authService) {
++        this.authService = authService;
++    }
++
++    @Override
++    public AbstractAuthenticationToken convert(Jwt jwt) {
++        Long userId;
++        try {
++            userId = JwtTokenService.userId(jwt);
++        } catch (RuntimeException e) {
++            throw new InvalidBearerTokenException("토큰이 올바르지 않습니다.");
++        }
++        UserState state = authService.findActiveUserState(userId)
++                .orElseThrow(() -> new InvalidBearerTokenException("사용할 수 없는 계정입니다."));
++        if (state.passwordVersion() != JwtTokenService.passwordVersion(jwt)) {
++            throw new InvalidBearerTokenException("비밀번호가 변경되어 다시 로그인해야 합니다.");
++        }
++
++        List<GrantedAuthority> authorities = new ArrayList<>();
++        authorities.add(new SimpleGrantedAuthority(AUTHORITY_USER));
++        if (!state.passwordChangeRequired()) {
++            authorities.add(new SimpleGrantedAuthority(AUTHORITY_PASSWORD_OK));
++            authorities.add(new SimpleGrantedAuthority("ROLE_" + state.authType()));
++        }
++        return new JwtAuthenticationToken(jwt, authorities, jwt.getSubject());
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java b/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
+index 47a72d8..68305a9 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
+@@ -1,63 +1,158 @@
+ package com.asdp.juprovider.service;
+ 
++import java.time.LocalDateTime;
++import java.time.ZoneOffset;
++import java.time.temporal.ChronoUnit;
++import java.util.Optional;
++
++import org.springframework.security.crypto.password.PasswordEncoder;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++
+ import com.asdp.juprovider.dto.LoginRequest;
+ import com.asdp.juprovider.dto.LoginResponse;
++import com.asdp.juprovider.dto.MeResponse;
++import com.asdp.juprovider.dto.PasswordChangeRequest;
++import com.asdp.juprovider.dto.UserInfo;
+ import com.asdp.juprovider.entity.JuAuth;
+ import com.asdp.juprovider.entity.JuUser;
+ import com.asdp.juprovider.entity.JuUserDetail;
++import com.asdp.juprovider.exception.AuthenticationFailedException;
+ import com.asdp.juprovider.repository.AuthRepository;
+ import com.asdp.juprovider.repository.UserDetailRepository;
+ import com.asdp.juprovider.repository.UserRepository;
+-import org.springframework.security.crypto.password.PasswordEncoder;
+-import org.springframework.stereotype.Service;
++import com.asdp.juprovider.security.JwtTokenService;
++import com.asdp.juprovider.security.JwtTokenService.IssuedToken;
+ 
++/**
++ * 사용자 인증 (JU-1A)
++ *
++ * - 로그인 실패(아이디 없음·비밀번호 오류·사용자/권한 미사용)는 구분 없이 401
++ * - 비밀번호 오류: LOGIN_FAIL_CNT + 1 (잠금은 이번 단계에서 하지 않음)
++ * - 성공: LOGIN_FAIL_CNT = 0, LAST_LOGIN_DT 갱신
++ * - PW_CHANGE_DT가 NULL이면 최초 비밀번호 변경 필요
++ * - 비밀번호 변경: 현재 비밀번호 오류·입력 오류는 400, 성공 시 PW_CHANGE_DT 갱신
++ *   → 이전에 발급된 토큰은 비밀번호 버전(pwv) 불일치로 거부된다
++ */
+ @Service
+ public class AuthService {
+ 
+     private static final String USE_YES = "YENO0001";
++    private static final String LOGIN_FAILED = "아이디 또는 비밀번호가 올바르지 않습니다.";
+ 
+     private final UserRepository userRepository;
+     private final UserDetailRepository userDetailRepository;
+     private final AuthRepository authRepository;
+     private final PasswordEncoder passwordEncoder;
++    private final JwtTokenService jwtTokenService;
+ 
+     public AuthService(
+             UserRepository userRepository,
+             UserDetailRepository userDetailRepository,
+             AuthRepository authRepository,
+-            PasswordEncoder passwordEncoder) {
++            PasswordEncoder passwordEncoder,
++            JwtTokenService jwtTokenService) {
+         this.userRepository = userRepository;
+         this.userDetailRepository = userDetailRepository;
+         this.authRepository = authRepository;
+         this.passwordEncoder = passwordEncoder;
++        this.jwtTokenService = jwtTokenService;
+     }
+ 
++    /** 실패 횟수 기록이 예외로 롤백되지 않도록 트랜잭션으로 묶지 않는다 (저장은 repository 단위). */
+     public LoginResponse login(LoginRequest request) {
+-        JuUser user = userRepository
+-                .findByLoginIdAndUseYn(request.loginId(), USE_YES)
+-                .orElseThrow(() -> new IllegalArgumentException(
+-                        "아이디 또는 비밀번호가 올바르지 않습니다."));
++        JuUser user = userRepository.findByLoginId(request.loginId())
++                .orElseThrow(() -> new AuthenticationFailedException(LOGIN_FAILED));
++        JuUserDetail detail = userDetailRepository.findById(user.getUserId())
++                .orElseGet(() -> JuUserDetail.create(user.getUserId(), user.getLoginId()));
+ 
+         if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+-            throw new IllegalArgumentException(
+-                    "아이디 또는 비밀번호가 올바르지 않습니다.");
++            detail.loginFailed();
++            userDetailRepository.save(detail);
++            throw new AuthenticationFailedException(LOGIN_FAILED);
+         }
+ 
+-        JuAuth auth = authRepository.findById(user.getAuthId())
+-                .filter(item -> USE_YES.equals(item.getUseYn()))
+-                .orElseThrow(() -> new IllegalArgumentException(
+-                        "사용할 수 없는 권한입니다."));
++        JuAuth auth = authRepository.findById(user.getAuthId()).orElse(null);
++        if (!USE_YES.equals(user.getUseYn()) || auth == null || !USE_YES.equals(auth.getUseYn())) {
++            throw new AuthenticationFailedException(LOGIN_FAILED);
++        }
+ 
+-        String userName = userDetailRepository.findById(user.getUserId())
+-                .map(JuUserDetail::getUserName)
+-                .orElse(user.getLoginId());
++        detail.loginSucceeded(LocalDateTime.now());
++        userDetailRepository.save(detail);
+ 
+-        return new LoginResponse(
++        IssuedToken token = jwtTokenService.issue(
+                 user.getUserId(),
+                 user.getLoginId(),
+-                userName,
+                 auth.getAuthId(),
+                 auth.getAuthType(),
+-                auth.getAuthAttr());
++                passwordVersion(detail.getPasswordChangedAt()));
++        return new LoginResponse(
++                token.token(),
++                token.expiresAt(),
++                toUserInfo(user, detail, auth),
++                detail.isPasswordChangeRequired());
++    }
++
++    @Transactional(readOnly = true)
++    public MeResponse me(Long userId) {
++        JuUser user = userRepository.findById(userId)
++                .orElseThrow(() -> new AuthenticationFailedException("사용자를 찾을 수 없습니다."));
++        JuUserDetail detail = userDetailRepository.findById(userId).orElse(null);
++        JuAuth auth = authRepository.findById(user.getAuthId()).orElse(null);
++        return new MeResponse(
++                toUserInfo(user, detail, auth),
++                detail == null || detail.isPasswordChangeRequired());
++    }
++
++    @Transactional
++    public void changePassword(Long userId, PasswordChangeRequest request) {
++        JuUser user = userRepository.findById(userId)
++                .orElseThrow(() -> new AuthenticationFailedException("사용자를 찾을 수 없습니다."));
++        if (!passwordEncoder.matches(request.currentPassword(), user.getPasswordHash())) {
++            throw new IllegalArgumentException("현재 비밀번호가 올바르지 않습니다.");
++        }
++        if (request.currentPassword().equals(request.newPassword())) {
++            throw new IllegalArgumentException("새 비밀번호는 현재 비밀번호와 달라야 합니다.");
++        }
++        user.changePasswordHash(passwordEncoder.encode(request.newPassword()));
++        userRepository.save(user);
++
++        JuUserDetail detail = userDetailRepository.findById(userId)
++                .orElseGet(() -> JuUserDetail.create(userId, user.getLoginId()));
++        // 초 단위로 저장 (토큰의 pwv와 같은 정밀도)
++        detail.passwordChanged(LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS));
++        userDetailRepository.save(detail);
++    }
++
++    /** JWT 요청마다 호출: 사용자·권한이 사용 중일 때만 상태를 돌려준다. */
++    @Transactional(readOnly = true)
++    public Optional<UserState> findActiveUserState(Long userId) {
++        return userRepository.findById(userId)
++                .filter(user -> USE_YES.equals(user.getUseYn()))
++                .flatMap(user -> authRepository.findById(user.getAuthId())
++                        .filter(auth -> USE_YES.equals(auth.getUseYn()))
++                        .map(auth -> {
++                            JuUserDetail detail = userDetailRepository.findById(userId).orElse(null);
++                            LocalDateTime changedAt = detail == null ? null : detail.getPasswordChangedAt();
++                            return new UserState(auth.getAuthType(), changedAt == null, passwordVersion(changedAt));
++                        }));
++    }
++
++    static long passwordVersion(LocalDateTime passwordChangedAt) {
++        return passwordChangedAt == null
++                ? 0L
++                : passwordChangedAt.truncatedTo(ChronoUnit.SECONDS).toEpochSecond(ZoneOffset.UTC);
++    }
++
++    private static UserInfo toUserInfo(JuUser user, JuUserDetail detail, JuAuth auth) {
++        return new UserInfo(
++                user.getUserId(),
++                user.getLoginId(),
++                detail == null ? user.getLoginId() : detail.getUserName(),
++                auth == null ? user.getAuthId() : auth.getAuthId(),
++                auth == null ? null : auth.getAuthType());
++    }
++
++    public record UserState(String authType, boolean passwordChangeRequired, long passwordVersion) {
+     }
+ }
+diff --git a/juprovider.backend/src/main/resources/application-dev.yml b/juprovider.backend/src/main/resources/application-dev.yml
+new file mode 100644
+index 0000000..83bfc29
+--- /dev/null
++++ b/juprovider.backend/src/main/resources/application-dev.yml
+@@ -0,0 +1,6 @@
++# 개발 PC 전용 (spring.profiles.active=dev). Jenkins/Tomcat 배포에서는 사용하지 않는다.
++juprovider:
++  security:
++    jwt:
++      # JU_JWT_SECRET이 없으면 임시 서명키를 만든다 (재시작하면 기존 토큰 무효, WARN 로그).
++      allow-random-secret: true
+diff --git a/juprovider.backend/src/main/resources/application.yml b/juprovider.backend/src/main/resources/application.yml
+index ed52c53..4d296ed 100644
+--- a/juprovider.backend/src/main/resources/application.yml
++++ b/juprovider.backend/src/main/resources/application.yml
+@@ -35,3 +35,13 @@ server:
+ logging:
+   level:
+     com.asdp.juprovider: INFO
++
++juprovider:
++  security:
++    jwt:
++      # HS256 서명키(32바이트 이상). 값은 Git에 두지 않고 Tomcat bin\setenv.bat의 JU_JWT_SECRET으로 지정한다.
++      # 없거나 32바이트 미만이면 서버가 시작되지 않는다 (dev profile만 예외: application-dev.yml).
++      secret: ${JU_JWT_SECRET:}
++      allow-random-secret: false
++      issuer: juprovider
++      access-token-minutes: 60
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/config/JwtConfigTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/config/JwtConfigTest.java
+new file mode 100644
+index 0000000..dd1758a
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/config/JwtConfigTest.java
+@@ -0,0 +1,34 @@
++package com.asdp.juprovider.config;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import org.junit.jupiter.api.Test;
++
++/** JU_JWT_SECRET 기동 조건 (JU-1A) */
++class JwtConfigTest {
++
++    private static final String VALID = "0123456789abcdef0123456789abcdef"; // 32바이트 (테스트용 더미)
++
++    @Test
++    void missingSecretFailsWithoutDevProfile() {
++        assertThrows(IllegalStateException.class, () -> JwtConfig.resolveSecret("", false));
++        assertThrows(IllegalStateException.class, () -> JwtConfig.resolveSecret(null, false));
++    }
++
++    @Test
++    void shortSecretFailsEvenInDevProfile() {
++        assertThrows(IllegalStateException.class, () -> JwtConfig.resolveSecret("short", false));
++        assertThrows(IllegalStateException.class, () -> JwtConfig.resolveSecret("short", true));
++    }
++
++    @Test
++    void validSecretIsUsed() {
++        assertEquals(32, JwtConfig.resolveSecret(VALID, false).length);
++    }
++
++    @Test
++    void devProfileAllowsRandomSecretWhenMissing() {
++        assertEquals(JwtConfig.MIN_SECRET_BYTES, JwtConfig.resolveSecret("", true).length);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/security/ExecutionContext.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/ExecutionContext.java
+new file mode 100644
+index 0000000..6453977
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/ExecutionContext.java
+@@ -0,0 +1,24 @@
++package com.asdp.juprovider.core.security;
++
++/**
++ * Core 업무 실행 주체 (읽기 전용).
++ *
++ * Backend가 인증 정보(사용자 JWT, JU-1B부터 Client 자격)를 해석해서 만든다.
++ * Core는 HTTP/토큰을 모르고 이 값만 사용한다.
++ *
++ * userId/authId : 작업한 사용자 (ju_user.USER_ID, ju_auth.AUTH_ID)
++ * clientId      : 요청한 Desktop Client (JU-1B)
++ */
++public record ExecutionContext(
++        Long userId,
++        Long authId,
++        String clientId) {
++
++    public static ExecutionContext ofUser(Long userId, Long authId) {
++        return new ExecutionContext(userId, authId, null);
++    }
++
++    public boolean hasUser() {
++        return userId != null && authId != null;
++    }
++}
