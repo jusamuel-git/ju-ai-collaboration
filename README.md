@@ -8,7 +8,7 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 | 구분 | 문서 |
 |---|---|
 | 협업 규칙 | [AI_COLLABORATION.md](AI_COLLABORATION.md) (v1.3) |
-| 설계 | [architecture/DB_CORE_API.md](architecture/DB_CORE_API.md) (ChatGPT v1.2 — 재설계 대기) |
+| 설계 | [architecture/DB_CORE_API.md](architecture/DB_CORE_API.md) (ChatGPT v1.2 — v1.3 재설계 검토 중) |
 | 유효한 결정 | [decisions/CURRENT.md](decisions/CURRENT.md) |
 | 지금 할 일 | [worklog/CURRENT.md](worklog/CURRENT.md) |
 | 개발 환경 | [environment/DEV_ENVIRONMENT_STANDARD.md](environment/DEV_ENVIRONMENT_STANDARD.md) |
@@ -17,8 +17,9 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 
 ## 지금 진행 중
 
-- **ChatGPT 재설계 요청**: [reviews/claude/2026-10-26_redesign_request.md](reviews/claude/2026-10-26_redesign_request.md)
-  - 10/25 v1.2 설계·구현을 오늘 확정된 PC-A 기준으로 다시 단계 설계
+1. ChatGPT 재설계 v1.3: [reviews/chatgpt/2026-10-26_redesign_v1.3.md](reviews/chatgpt/2026-10-26_redesign_v1.3.md)
+2. **Claude 역검토 (완료)**: [reviews/claude/2026-10-26_redesign_v1.3_review.md](reviews/claude/2026-10-26_redesign_v1.3_review.md)
+3. 다음: ChatGPT 재검토 → 사용자 승인 → ENV-0부터 단계별 구현
 
 ## 제품 저장소
 
