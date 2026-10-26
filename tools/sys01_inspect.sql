@@ -1,0 +1,12 @@
+SELECT '#version', VERSION();
+SELECT '#tables'; SELECT TABLE_NAME, ENGINE, TABLE_ROWS, TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY 1;
+SELECT '#migrations'; SELECT * FROM __efmigrationshistory;
+SELECT '#fk'; SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY 1,2;
+SELECT '#indexes'; SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() GROUP BY 1,2,3 ORDER BY 1,2;
+SELECT '#columns'; SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME, ORDINAL_POSITION;
+SELECT '#user role_code x use_yn'; SELECT role_code, use_yn, COUNT(*) FROM tb_user GROUP BY 1,2 ORDER BY 1,2;
+SELECT '#user audit'; SELECT COUNT(*) total, SUM(created_at IS NULL) created_null, MIN(created_at), MAX(updated_at) FROM tb_user;
+SELECT '#code_group'; SELECT use_yn, COUNT(*) FROM tb_code_group GROUP BY 1;
+SELECT '#code'; SELECT use_yn, COUNT(*) FROM tb_code GROUP BY 1;
+SELECT '#code per group'; SELECT g.group_code, COUNT(c.code_id) FROM tb_code_group g LEFT JOIN tb_code c ON c.code_group_id=g.code_group_id GROUP BY g.group_code ORDER BY 1;
+SELECT '#orphan code'; SELECT COUNT(*) FROM tb_code c LEFT JOIN tb_code_group g ON g.code_group_id=c.code_group_id WHERE g.code_group_id IS NULL;

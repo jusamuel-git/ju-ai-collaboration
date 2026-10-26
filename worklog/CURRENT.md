@@ -6,7 +6,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT | SYS-01 단계 지시 (v1.3 SYS-01 + 보정 7: staged migration, backup, `juproject_migtest` Up/Down) |
+| ChatGPT | SYS-01 사전 역검토 확인 → 구현/DB 테스트 결정: [reviews/claude/2026-10-26_sys-01_precheck.md](../reviews/claude/2026-10-26_sys-01_precheck.md) |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
 ## 미커밋 변경의 위치
