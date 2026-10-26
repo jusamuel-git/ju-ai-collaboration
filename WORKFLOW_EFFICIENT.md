@@ -15,6 +15,12 @@
 - **Claude 앱에서 PC를 화면 조작(스크린샷·더블클릭)하는 방식은 비상용**이다. 스크린샷 1장이 수천 토큰이다.
 - Claude Code는 저장소 루트의 `CLAUDE.md`를 자동으로 읽는다 → 규칙을 매번 설명할 필요가 없다 (`templates/CLAUDE.md`).
 
+## 1-1. 사용자 지시 방식 (2026-10-26 합의)
+
+- 사용자는 **단계명만** 말한다. 예: ChatGPT에 "ENV-0 결과 확인해줘", Claude Code에 "JU-0A 진행해줘".
+- 두 AI는 이 저장소 `README.md → worklog/CURRENT.md → 현재 단계 지시문`을 직접 읽는다. 사용자가 문서를 옮기지 않는다.
+- ChatGPT와 Claude 모두 이 저장소에 직접 commit/push한다. 제품 저장소 commit/push는 계속 사용자 승인 후 사용자가 한다.
+
 ## 2. 세션 시작 규칙 (읽는 양 고정)
 
 1. `README.md` → `worklog/CURRENT.md`만 읽는다.
@@ -68,5 +74,5 @@
 ## 7. 남은 준비 (1회)
 
 1. PC-A에 Claude Code 설치·로그인 (사용자)
-2. 두 제품 저장소 루트에 `CLAUDE.md` 추가 (`templates/CLAUDE.md` 기준) — 다음 commit에 포함할지 사용자 결정
+2. 두 제품 저장소 루트에 `CLAUDE.md` 추가 — **ENV-0에 포함 (ChatGPT 권장, PC-A `feature/env-0` 적용됨)**
 3. `tools/` 스크립트를 PC-A `workspace`와 맞춤
