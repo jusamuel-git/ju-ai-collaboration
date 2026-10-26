@@ -1,0 +1,3 @@
+SELECT '#tb_user'; SELECT user_id, role_code, SHA2(CONCAT_WS('|',login_id,password_hash,user_name,IFNULL(email,'-'),IFNULL(phone,'-'),IFNULL(last_login_at,'-'),use_yn,created_at,IFNULL(updated_at,'-')),256) h FROM tb_user ORDER BY user_id;
+SELECT '#tb_code_group'; SELECT code_group_id, SHA2(CONCAT_WS('|',group_code,group_name,IFNULL(description,'-'),sort_order,use_yn,created_at,IFNULL(updated_at,'-')),256) h FROM tb_code_group ORDER BY 1;
+SELECT '#tb_code'; SELECT code_id, SHA2(CONCAT_WS('|',code_group_id,code,code_name,IFNULL(description,'-'),sort_order,use_yn,created_at,IFNULL(updated_at,'-')),256) h FROM tb_code ORDER BY 1;

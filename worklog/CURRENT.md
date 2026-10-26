@@ -6,7 +6,8 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT | SYS-01 사전 역검토 확인 → 구현/DB 테스트 결정: [reviews/claude/2026-10-26_sys-01_precheck.md](../reviews/claude/2026-10-26_sys-01_precheck.md) |
+| ChatGPT | SYS-01 구현·migtest 결과 검토: [reviews/claude/2026-10-26_sys-01_result.md](../reviews/claude/2026-10-26_sys-01_result.md) |
+| 사용자 | 승인 시: 실제 juproject DB 백업 → Up, commit/push 지시. `juproject_migtest` 삭제 여부 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
 ## 미커밋 변경의 위치
@@ -15,6 +16,8 @@
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 재사용 후보. PC-A 미적용 |
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | 재사용 후보. PC-A 미적용 |
 
+| SYS-01 | **PC-A juproject `feature/sys-01`** 미커밋 | 빌드·migtest Up/Down/재Up·smoke 19건 PASS, 검토 대기 |
+
 ## 최근 확인
 - 2026-10-26 10:31 PC-A `feature/env-0`: 환경검사 PASS 30 / WARN 4 / FAIL 0, 로컬 빌드 5종 PASS, `global.json` → SDK 10.0.402
 - 2026-10-26 14:28 PC-A `feature/ju-0a`: 로컬 빌드 5종 PASS
@@ -22,3 +25,4 @@
 - 2026-10-26 14:59 JU-0A 테스트 DB 검증 PASS (신규 설치 = 기존 설치+04 = PC-A 사본+04, 04 재실행 무변경)
 - 2026-10-26 15:08 JU-0A 실제 DB 04 적용(백업 후) = 신규 설치 동일. JU-0B smoke PASS
 - 2026-10-26 15:17 **JU-0A·JU-0B 완료**: juprovider `main` `03f636c` push, Jenkins `juprovider-ai` #13 SUCCESS (Health UP). 테스트 DB 3개 삭제
+- 2026-10-26 15:40 SYS-01 migtest: Up/Down(원본 동일)/재Up, smoke 19/19 PASS

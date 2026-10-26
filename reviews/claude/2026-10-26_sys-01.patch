@@ -1,0 +1,1163 @@
+diff --git a/backend/src/JuProject.Api/Infrastructure/HttpCurrentUser.cs b/backend/src/JuProject.Api/Infrastructure/HttpCurrentUser.cs
+new file mode 100644
+index 0000000..103902f
+--- /dev/null
++++ b/backend/src/JuProject.Api/Infrastructure/HttpCurrentUser.cs
+@@ -0,0 +1,17 @@
++using JuProject.Application.Common;
++using Microsoft.IdentityModel.JsonWebTokens;
++
++namespace JuProject.Api.Infrastructure;
++
++// JWT의 sub 클레임에서 현재 사용자 ID를 읽는다. 로그인하지 않은 요청이면 null.
++public class HttpCurrentUser(IHttpContextAccessor httpContextAccessor) : ICurrentUser
++{
++    public long? UserId
++    {
++        get
++        {
++            var sub = httpContextAccessor.HttpContext?.User.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
++            return long.TryParse(sub, out var userId) ? userId : null;
++        }
++    }
++}
+diff --git a/backend/src/JuProject.Api/Program.cs b/backend/src/JuProject.Api/Program.cs
+index f96c9e4..5b68002 100644
+--- a/backend/src/JuProject.Api/Program.cs
++++ b/backend/src/JuProject.Api/Program.cs
+@@ -16,6 +16,10 @@ var builder = WebApplication.CreateBuilder(args);
+ builder.Services.AddApplication();
+ builder.Services.AddInfrastructure(builder.Configuration);
+ 
++// 감사 컬럼(created_by, updated_by) 기록용 현재 사용자
++builder.Services.AddHttpContextAccessor();
++builder.Services.AddScoped<ICurrentUser, HttpCurrentUser>();
++
+ builder.Services.AddControllers();
+ builder.Services.AddProblemDetails();
+ builder.Services.AddExceptionHandler<AppExceptionHandler>();
+diff --git a/backend/src/JuProject.Application/Auth/AuthService.cs b/backend/src/JuProject.Application/Auth/AuthService.cs
+index 98caa88..6d1bfd2 100644
+--- a/backend/src/JuProject.Application/Auth/AuthService.cs
++++ b/backend/src/JuProject.Application/Auth/AuthService.cs
+@@ -1,5 +1,6 @@
+ using JuProject.Application.Common;
+ using JuProject.Application.Users;
++using JuProject.Domain.Common;
+ 
+ namespace JuProject.Application.Auth;
+ 
+@@ -22,6 +23,11 @@ public class AuthService(
+         if (user is null || !passwordHasher.Verify(user.PasswordHash, request.Password))
+             throw new AuthenticationFailedException("아이디 또는 비밀번호가 올바르지 않습니다.");
+ 
++        // 사용자와 권한이 모두 사용(use_yn = 'Y') 상태여야 로그인할 수 있다.
++        // (사용자 조회는 권한 필터를 적용하지 않으므로 여기서 명시적으로 검사한다)
++        if (user.UseYn != YesNo.Yes || user.Authority is null || user.Authority.UseYn != YesNo.Yes)
++            throw new AuthenticationFailedException("사용할 수 있는 권한이 없는 계정입니다. 관리자에게 문의하세요.");
++
+         user.LastLoginAt = DateTime.UtcNow;
+         await userRepository.SaveChangesAsync(ct);
+ 
+diff --git a/backend/src/JuProject.Application/Authorities/IAuthorityRepository.cs b/backend/src/JuProject.Application/Authorities/IAuthorityRepository.cs
+new file mode 100644
+index 0000000..ff2a3ed
+--- /dev/null
++++ b/backend/src/JuProject.Application/Authorities/IAuthorityRepository.cs
+@@ -0,0 +1,9 @@
++using JuProject.Domain.Entities;
++
++namespace JuProject.Application.Authorities;
++
++public interface IAuthorityRepository
++{
++    // 사용 중(use_yn = 'Y')인 권한만 조회한다.
++    Task<Authority?> GetByCodeAsync(string authCode, CancellationToken ct = default);
++}
+diff --git a/backend/src/JuProject.Application/Common/Interfaces.cs b/backend/src/JuProject.Application/Common/Interfaces.cs
+index 70bf8a6..b015c7f 100644
+--- a/backend/src/JuProject.Application/Common/Interfaces.cs
++++ b/backend/src/JuProject.Application/Common/Interfaces.cs
+@@ -13,3 +13,9 @@ public interface ITokenService
+ {
+     (string Token, DateTime ExpiresAt) CreateAccessToken(User user);
+ }
++
++// 현재 요청의 로그인 사용자. 로그인하지 않은 요청이나 백그라운드 처리에서는 UserId가 null이다.
++public interface ICurrentUser
++{
++    long? UserId { get; }
++}
+diff --git a/backend/src/JuProject.Application/Users/UserDtos.cs b/backend/src/JuProject.Application/Users/UserDtos.cs
+index 6e7ea04..abe6982 100644
+--- a/backend/src/JuProject.Application/Users/UserDtos.cs
++++ b/backend/src/JuProject.Application/Users/UserDtos.cs
+@@ -33,13 +33,14 @@ public record UserUpdateRequest(
+ 
+ public static class UserMappings
+ {
++    // Authority 내비게이션이 로드된 상태에서 호출해야 한다. RoleCode는 sys_auth.auth_code 값이다.
+     public static UserDto ToDto(this User user) => new(
+         user.UserId,
+         user.LoginId,
+         user.UserName,
+         user.Email,
+         user.Phone,
+-        user.RoleCode,
++        user.Authority?.AuthCode ?? string.Empty,
+         user.LastLoginAt,
+         user.CreatedAt);
+ }
+diff --git a/backend/src/JuProject.Application/Users/UserService.cs b/backend/src/JuProject.Application/Users/UserService.cs
+index d4f1f39..a0ec960 100644
+--- a/backend/src/JuProject.Application/Users/UserService.cs
++++ b/backend/src/JuProject.Application/Users/UserService.cs
+@@ -1,5 +1,5 @@
++using JuProject.Application.Authorities;
+ using JuProject.Application.Common;
+-using JuProject.Domain.Common;
+ using JuProject.Domain.Entities;
+ 
+ namespace JuProject.Application.Users;
+@@ -13,7 +13,10 @@ public interface IUserService
+     Task DeleteAsync(long userId, long currentUserId, CancellationToken ct = default);
+ }
+ 
+-public class UserService(IUserRepository userRepository, IPasswordHasher passwordHasher) : IUserService
++public class UserService(
++    IUserRepository userRepository,
++    IAuthorityRepository authorityRepository,
++    IPasswordHasher passwordHasher) : IUserService
+ {
+     private const int MaxPageSize = 100;
+ 
+@@ -34,7 +37,7 @@ public class UserService(IUserRepository userRepository, IPasswordHasher passwor
+ 
+     public async Task<UserDto> CreateAsync(UserCreateRequest request, CancellationToken ct = default)
+     {
+-        EnsureValidRole(request.RoleCode);
++        var authority = await FindAuthorityAsync(request.RoleCode, ct);
+ 
+         var user = await userRepository.GetByLoginIdAsync(request.LoginId, includeDeleted: true, ct);
+         if (user is { IsDeleted: false })
+@@ -55,7 +58,8 @@ public class UserService(IUserRepository userRepository, IPasswordHasher passwor
+         user.UserName = request.UserName;
+         user.Email = request.Email;
+         user.Phone = request.Phone;
+-        user.RoleCode = request.RoleCode;
++        user.AuthId = authority.AuthId;
++        user.Authority = authority;
+ 
+         await userRepository.SaveChangesAsync(ct);
+         return user.ToDto();
+@@ -63,13 +67,14 @@ public class UserService(IUserRepository userRepository, IPasswordHasher passwor
+ 
+     public async Task<UserDto> UpdateAsync(long userId, UserUpdateRequest request, CancellationToken ct = default)
+     {
+-        EnsureValidRole(request.RoleCode);
++        var authority = await FindAuthorityAsync(request.RoleCode, ct);
+ 
+         var user = await FindAsync(userId, ct);
+         user.UserName = request.UserName;
+         user.Email = request.Email;
+         user.Phone = request.Phone;
+-        user.RoleCode = request.RoleCode;
++        user.AuthId = authority.AuthId;
++        user.Authority = authority;
+ 
+         if (!string.IsNullOrEmpty(request.NewPassword))
+             user.PasswordHash = passwordHasher.Hash(request.NewPassword);
+@@ -92,9 +97,8 @@ public class UserService(IUserRepository userRepository, IPasswordHasher passwor
+         await userRepository.GetByIdAsync(userId, ct)
+         ?? throw new NotFoundException($"사용자를 찾을 수 없습니다. (ID: {userId})");
+ 
+-    private static void EnsureValidRole(string roleCode)
+-    {
+-        if (!Roles.IsValid(roleCode))
+-            throw new BusinessException($"올바르지 않은 권한입니다: {roleCode}");
+-    }
++    // API 계약의 RoleCode는 sys_auth.auth_code로 해석한다.
++    private async Task<Authority> FindAuthorityAsync(string roleCode, CancellationToken ct) =>
++        await authorityRepository.GetByCodeAsync(roleCode, ct)
++        ?? throw new BusinessException($"올바르지 않은 권한입니다: {roleCode}");
+ }
+diff --git a/backend/src/JuProject.Domain/Common/BaseEntity.cs b/backend/src/JuProject.Domain/Common/BaseEntity.cs
+index 08084fd..3a8c419 100644
+--- a/backend/src/JuProject.Domain/Common/BaseEntity.cs
++++ b/backend/src/JuProject.Domain/Common/BaseEntity.cs
+@@ -2,12 +2,16 @@ namespace JuProject.Domain.Common;
+ 
+ /// <summary>
+ /// 모든 엔터티의 공통 컬럼. 삭제는 UseYn = "N"으로 처리하는 논리 삭제를 사용한다.
++/// 감사 컬럼(생성/수정 일시·사용자)은 AppDbContext.SaveChangesAsync에서 자동 기록한다.
++/// CreatedBy/UpdatedBy는 sys_user.user_id 값이며, 시스템 처리(시드·마이그레이션)는 NULL이다.
+ /// </summary>
+ public abstract class BaseEntity
+ {
+     public string UseYn { get; set; } = YesNo.Yes;
+     public DateTime CreatedAt { get; set; }
++    public long? CreatedBy { get; set; }
+     public DateTime? UpdatedAt { get; set; }
++    public long? UpdatedBy { get; set; }
+ 
+     public bool IsDeleted => UseYn == YesNo.No;
+ 
+diff --git a/backend/src/JuProject.Domain/Common/Roles.cs b/backend/src/JuProject.Domain/Common/Roles.cs
+index 9c2df5e..9fc205a 100644
+--- a/backend/src/JuProject.Domain/Common/Roles.cs
++++ b/backend/src/JuProject.Domain/Common/Roles.cs
+@@ -1,9 +1,11 @@
+ namespace JuProject.Domain.Common;
+ 
++/// <summary>
++/// 기본 권한 코드 (sys_auth.auth_code). 권한 목록 자체는 sys_auth 테이블이 기준이다.
++/// 인가 정책(AdminOnly)과 초기 관리자 생성에서 사용한다.
++/// </summary>
+ public static class Roles
+ {
+     public const string Admin = "ADMIN";
+     public const string User = "USER";
+-
+-    public static bool IsValid(string role) => role is Admin or User;
+ }
+diff --git a/backend/src/JuProject.Domain/Entities/Authority.cs b/backend/src/JuProject.Domain/Entities/Authority.cs
+new file mode 100644
+index 0000000..92121a1
+--- /dev/null
++++ b/backend/src/JuProject.Domain/Entities/Authority.cs
+@@ -0,0 +1,14 @@
++using JuProject.Domain.Common;
++
++namespace JuProject.Domain.Entities;
++
++// 테이블: sys_auth. 클래스명을 Auth로 하면 JuProject.Application.Auth 네임스페이스와 충돌하므로 Authority로 정의한다.
++public class Authority : BaseEntity
++{
++    public long AuthId { get; set; }
++    public string AuthCode { get; set; } = string.Empty;
++    public string AuthName { get; set; } = string.Empty;
++    public int SortOrder { get; set; }
++
++    public ICollection<AuthorityMenu> AuthorityMenus { get; set; } = new List<AuthorityMenu>();
++}
+diff --git a/backend/src/JuProject.Domain/Entities/AuthorityMenu.cs b/backend/src/JuProject.Domain/Entities/AuthorityMenu.cs
+new file mode 100644
+index 0000000..bbb375d
+--- /dev/null
++++ b/backend/src/JuProject.Domain/Entities/AuthorityMenu.cs
+@@ -0,0 +1,14 @@
++using JuProject.Domain.Common;
++
++namespace JuProject.Domain.Entities;
++
++// 테이블: sys_auth_menu. 권한별 메뉴 사용 허용 (auth_id, menu_id) 쌍은 UNIQUE
++public class AuthorityMenu : BaseEntity
++{
++    public long AuthMenuId { get; set; }
++    public long AuthId { get; set; }
++    public long MenuId { get; set; }
++
++    public Authority? Authority { get; set; }
++    public Menu? Menu { get; set; }
++}
+diff --git a/backend/src/JuProject.Domain/Entities/CodeGroup.cs b/backend/src/JuProject.Domain/Entities/CodeGroup.cs
+index 8d46034..43597fa 100644
+--- a/backend/src/JuProject.Domain/Entities/CodeGroup.cs
++++ b/backend/src/JuProject.Domain/Entities/CodeGroup.cs
+@@ -2,6 +2,7 @@ using JuProject.Domain.Common;
+ 
+ namespace JuProject.Domain.Entities;
+ 
++// 테이블: sys_code_group
+ public class CodeGroup : BaseEntity
+ {
+     public long CodeGroupId { get; set; }
+diff --git a/backend/src/JuProject.Domain/Entities/CommonCode.cs b/backend/src/JuProject.Domain/Entities/CommonCode.cs
+index 7db252c..c86838d 100644
+--- a/backend/src/JuProject.Domain/Entities/CommonCode.cs
++++ b/backend/src/JuProject.Domain/Entities/CommonCode.cs
+@@ -2,13 +2,14 @@ using JuProject.Domain.Common;
+ 
+ namespace JuProject.Domain.Entities;
+ 
+-// 클래스명을 Code로 하면 Code 속성과 이름이 충돌하므로 CommonCode로 정의한다. (테이블: tb_code)
++// 클래스명을 Code로 하면 Code 속성과 이름이 충돌하므로 CommonCode로 정의한다. (테이블: sys_code)
+ public class CommonCode : BaseEntity
+ {
+     public long CodeId { get; set; }
+     public long CodeGroupId { get; set; }
+     public string Code { get; set; } = string.Empty;
+     public string CodeName { get; set; } = string.Empty;
++    public string? CodeValue { get; set; }
+     public string? Description { get; set; }
+     public int SortOrder { get; set; }
+ 
+diff --git a/backend/src/JuProject.Domain/Entities/Dept.cs b/backend/src/JuProject.Domain/Entities/Dept.cs
+new file mode 100644
+index 0000000..823f840
+--- /dev/null
++++ b/backend/src/JuProject.Domain/Entities/Dept.cs
+@@ -0,0 +1,17 @@
++using JuProject.Domain.Common;
++
++namespace JuProject.Domain.Entities;
++
++// 테이블: sys_dept. Site 하위 부서 (부서 계층은 ParentDeptId)
++public class Dept : BaseEntity
++{
++    public long DeptId { get; set; }
++    public long SiteId { get; set; }
++    public string DeptCode { get; set; } = string.Empty;
++    public string DeptName { get; set; } = string.Empty;
++    public long? ParentDeptId { get; set; }
++    public int SortOrder { get; set; }
++
++    public Site? Site { get; set; }
++    public Dept? ParentDept { get; set; }
++}
+diff --git a/backend/src/JuProject.Domain/Entities/Menu.cs b/backend/src/JuProject.Domain/Entities/Menu.cs
+new file mode 100644
+index 0000000..83b3a14
+--- /dev/null
++++ b/backend/src/JuProject.Domain/Entities/Menu.cs
+@@ -0,0 +1,18 @@
++using JuProject.Domain.Common;
++
++namespace JuProject.Domain.Entities;
++
++// 테이블: sys_menu
++public class Menu : BaseEntity
++{
++    public long MenuId { get; set; }
++    public long? ParentMenuId { get; set; }
++    public string MenuCode { get; set; } = string.Empty;
++    public string MenuName { get; set; } = string.Empty;
++    public string? RoutePath { get; set; }
++    public string? ComponentKey { get; set; }
++    public string? IconKey { get; set; }
++    public int SortOrder { get; set; }
++
++    public Menu? ParentMenu { get; set; }
++}
+diff --git a/backend/src/JuProject.Domain/Entities/Site.cs b/backend/src/JuProject.Domain/Entities/Site.cs
+new file mode 100644
+index 0000000..0693abb
+--- /dev/null
++++ b/backend/src/JuProject.Domain/Entities/Site.cs
+@@ -0,0 +1,13 @@
++using JuProject.Domain.Common;
++
++namespace JuProject.Domain.Entities;
++
++// 테이블: sys_site. 고객/사업 단위 최상위 조직
++public class Site : BaseEntity
++{
++    public long SiteId { get; set; }
++    public string SiteCode { get; set; } = string.Empty;
++    public string SiteName { get; set; } = string.Empty;
++
++    public ICollection<Dept> Depts { get; set; } = new List<Dept>();
++}
+diff --git a/backend/src/JuProject.Domain/Entities/User.cs b/backend/src/JuProject.Domain/Entities/User.cs
+index 2bf4dc8..8f61a90 100644
+--- a/backend/src/JuProject.Domain/Entities/User.cs
++++ b/backend/src/JuProject.Domain/Entities/User.cs
+@@ -2,14 +2,19 @@ using JuProject.Domain.Common;
+ 
+ namespace JuProject.Domain.Entities;
+ 
++// 테이블: sys_user
+ public class User : BaseEntity
+ {
+     public long UserId { get; set; }
++    public long? DeptId { get; set; }
+     public string LoginId { get; set; } = string.Empty;
+     public string PasswordHash { get; set; } = string.Empty;
+     public string UserName { get; set; } = string.Empty;
+     public string? Email { get; set; }
+     public string? Phone { get; set; }
+-    public string RoleCode { get; set; } = Roles.User;
++    public long AuthId { get; set; }
+     public DateTime? LastLoginAt { get; set; }
++
++    public Dept? Dept { get; set; }
++    public Authority? Authority { get; set; }
+ }
+diff --git a/backend/src/JuProject.Infrastructure/DependencyInjection.cs b/backend/src/JuProject.Infrastructure/DependencyInjection.cs
+index c82322a..f2b255f 100644
+--- a/backend/src/JuProject.Infrastructure/DependencyInjection.cs
++++ b/backend/src/JuProject.Infrastructure/DependencyInjection.cs
+@@ -1,3 +1,4 @@
++using JuProject.Application.Authorities;
+ using JuProject.Application.CodeGroups;
+ using JuProject.Application.Codes;
+ using JuProject.Application.Common;
+@@ -31,6 +32,7 @@ public static class DependencyInjection
+         services.AddScoped<IUserRepository, UserRepository>();
+         services.AddScoped<ICodeGroupRepository, CodeGroupRepository>();
+         services.AddScoped<ICodeRepository, CodeRepository>();
++        services.AddScoped<IAuthorityRepository, AuthorityRepository>();
+ 
+         return services;
+     }
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/AppDbContext.cs b/backend/src/JuProject.Infrastructure/Persistence/AppDbContext.cs
+index 040e257..c934755 100644
+--- a/backend/src/JuProject.Infrastructure/Persistence/AppDbContext.cs
++++ b/backend/src/JuProject.Infrastructure/Persistence/AppDbContext.cs
+@@ -1,14 +1,20 @@
++using JuProject.Application.Common;
+ using JuProject.Domain.Common;
+ using JuProject.Domain.Entities;
+ using Microsoft.EntityFrameworkCore;
+ 
+ namespace JuProject.Infrastructure.Persistence;
+ 
+-public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
++public class AppDbContext(DbContextOptions<AppDbContext> options, ICurrentUser currentUser) : DbContext(options)
+ {
+     public DbSet<User> Users => Set<User>();
+     public DbSet<CodeGroup> CodeGroups => Set<CodeGroup>();
+     public DbSet<CommonCode> Codes => Set<CommonCode>();
++    public DbSet<Site> Sites => Set<Site>();
++    public DbSet<Dept> Depts => Set<Dept>();
++    public DbSet<Authority> Authorities => Set<Authority>();
++    public DbSet<Menu> Menus => Set<Menu>();
++    public DbSet<AuthorityMenu> AuthorityMenus => Set<AuthorityMenu>();
+ 
+     protected override void OnModelCreating(ModelBuilder modelBuilder)
+     {
+@@ -18,14 +24,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
+ 
+     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+     {
+-        // 1차 범위에서는 생성/수정 일시만 자동 기록한다. (생성자/수정자는 2차 과제)
++        // 감사 컬럼 자동 기록. 로그인 사용자가 없는 처리(로그인 갱신, 시드)는 사용자 컬럼이 NULL이다.
+         var now = DateTime.UtcNow;
++        var userId = currentUser.UserId;
+         foreach (var entry in ChangeTracker.Entries<BaseEntity>())
+         {
+             if (entry.State == EntityState.Added)
++            {
+                 entry.Entity.CreatedAt = now;
++                entry.Entity.CreatedBy = userId;
++            }
+             else if (entry.State == EntityState.Modified)
++            {
+                 entry.Entity.UpdatedAt = now;
++                entry.Entity.UpdatedBy = userId;
++            }
+         }
+ 
+         return base.SaveChangesAsync(cancellationToken);
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/AuthorityConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/AuthorityConfiguration.cs
+new file mode 100644
+index 0000000..92072db
+--- /dev/null
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/AuthorityConfiguration.cs
+@@ -0,0 +1,22 @@
++using JuProject.Domain.Entities;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace JuProject.Infrastructure.Persistence.Configurations;
++
++internal class AuthorityConfiguration : IEntityTypeConfiguration<Authority>
++{
++    public void Configure(EntityTypeBuilder<Authority> builder)
++    {
++        builder.ToTable("sys_auth");
++        builder.HasKey(e => e.AuthId);
++
++        builder.Property(e => e.AuthId).HasColumnName("auth_id");
++        builder.Property(e => e.AuthCode).HasColumnName("auth_code").HasMaxLength(30).IsRequired();
++        builder.Property(e => e.AuthName).HasColumnName("auth_name").HasMaxLength(100).IsRequired();
++        builder.Property(e => e.SortOrder).HasColumnName("sort_order");
++        builder.ConfigureBase();
++
++        builder.HasIndex(e => e.AuthCode).IsUnique().HasDatabaseName("uk_auth_code");
++    }
++}
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/AuthorityMenuConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/AuthorityMenuConfiguration.cs
+new file mode 100644
+index 0000000..f2a2eb7
+--- /dev/null
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/AuthorityMenuConfiguration.cs
+@@ -0,0 +1,33 @@
++using JuProject.Domain.Entities;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace JuProject.Infrastructure.Persistence.Configurations;
++
++internal class AuthorityMenuConfiguration : IEntityTypeConfiguration<AuthorityMenu>
++{
++    public void Configure(EntityTypeBuilder<AuthorityMenu> builder)
++    {
++        builder.ToTable("sys_auth_menu");
++        builder.HasKey(e => e.AuthMenuId);
++
++        builder.Property(e => e.AuthMenuId).HasColumnName("auth_menu_id");
++        builder.Property(e => e.AuthId).HasColumnName("auth_id");
++        builder.Property(e => e.MenuId).HasColumnName("menu_id");
++        builder.ConfigureBase();
++
++        builder.HasOne(e => e.Authority)
++            .WithMany(a => a.AuthorityMenus)
++            .HasForeignKey(e => e.AuthId)
++            .HasConstraintName("fk_auth_menu_auth")
++            .OnDelete(DeleteBehavior.Restrict);
++
++        builder.HasOne(e => e.Menu)
++            .WithMany()
++            .HasForeignKey(e => e.MenuId)
++            .HasConstraintName("fk_auth_menu_menu")
++            .OnDelete(DeleteBehavior.Restrict);
++
++        builder.HasIndex(e => new { e.AuthId, e.MenuId }).IsUnique().HasDatabaseName("uk_auth_menu");
++    }
++}
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/BaseEntityConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/BaseEntityConfiguration.cs
+index 9203227..6c88346 100644
+--- a/backend/src/JuProject.Infrastructure/Persistence/Configurations/BaseEntityConfiguration.cs
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/BaseEntityConfiguration.cs
+@@ -13,7 +13,9 @@ internal static class BaseEntityConfiguration
+         builder.Property(e => e.UseYn).HasColumnName("use_yn").HasColumnType("char(1)")
+             .HasDefaultValue(YesNo.Yes).IsRequired();
+         builder.Property(e => e.CreatedAt).HasColumnName("created_at").HasColumnType("datetime(6)");
++        builder.Property(e => e.CreatedBy).HasColumnName("created_by");
+         builder.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasColumnType("datetime(6)");
++        builder.Property(e => e.UpdatedBy).HasColumnName("updated_by");
+ 
+         builder.HasQueryFilter(e => e.UseYn == YesNo.Yes);
+     }
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/CodeGroupConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/CodeGroupConfiguration.cs
+index 559d3e8..70fa3d9 100644
+--- a/backend/src/JuProject.Infrastructure/Persistence/Configurations/CodeGroupConfiguration.cs
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/CodeGroupConfiguration.cs
+@@ -8,7 +8,7 @@ internal class CodeGroupConfiguration : IEntityTypeConfiguration<CodeGroup>
+ {
+     public void Configure(EntityTypeBuilder<CodeGroup> builder)
+     {
+-        builder.ToTable("tb_code_group");
++        builder.ToTable("sys_code_group");
+         builder.HasKey(e => e.CodeGroupId);
+ 
+         builder.Property(e => e.CodeGroupId).HasColumnName("code_group_id");
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/CommonCodeConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/CommonCodeConfiguration.cs
+index 046e882..5d5e929 100644
+--- a/backend/src/JuProject.Infrastructure/Persistence/Configurations/CommonCodeConfiguration.cs
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/CommonCodeConfiguration.cs
+@@ -8,13 +8,14 @@ internal class CommonCodeConfiguration : IEntityTypeConfiguration<CommonCode>
+ {
+     public void Configure(EntityTypeBuilder<CommonCode> builder)
+     {
+-        builder.ToTable("tb_code");
++        builder.ToTable("sys_code");
+         builder.HasKey(e => e.CodeId);
+ 
+         builder.Property(e => e.CodeId).HasColumnName("code_id");
+         builder.Property(e => e.CodeGroupId).HasColumnName("code_group_id");
+         builder.Property(e => e.Code).HasColumnName("code").HasMaxLength(50).IsRequired();
+         builder.Property(e => e.CodeName).HasColumnName("code_name").HasMaxLength(100).IsRequired();
++        builder.Property(e => e.CodeValue).HasColumnName("code_value").HasMaxLength(200);
+         builder.Property(e => e.Description).HasColumnName("description").HasMaxLength(500);
+         builder.Property(e => e.SortOrder).HasColumnName("sort_order");
+         builder.ConfigureBase();
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/DeptConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/DeptConfiguration.cs
+new file mode 100644
+index 0000000..fda8f3a
+--- /dev/null
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/DeptConfiguration.cs
+@@ -0,0 +1,37 @@
++using JuProject.Domain.Entities;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace JuProject.Infrastructure.Persistence.Configurations;
++
++internal class DeptConfiguration : IEntityTypeConfiguration<Dept>
++{
++    public void Configure(EntityTypeBuilder<Dept> builder)
++    {
++        builder.ToTable("sys_dept");
++        builder.HasKey(e => e.DeptId);
++
++        builder.Property(e => e.DeptId).HasColumnName("dept_id");
++        builder.Property(e => e.SiteId).HasColumnName("site_id");
++        builder.Property(e => e.DeptCode).HasColumnName("dept_code").HasMaxLength(50).IsRequired();
++        builder.Property(e => e.DeptName).HasColumnName("dept_name").HasMaxLength(100).IsRequired();
++        builder.Property(e => e.ParentDeptId).HasColumnName("parent_dept_id");
++        builder.Property(e => e.SortOrder).HasColumnName("sort_order");
++        builder.ConfigureBase();
++
++        builder.HasOne(e => e.Site)
++            .WithMany(s => s.Depts)
++            .HasForeignKey(e => e.SiteId)
++            .HasConstraintName("fk_dept_site")
++            .OnDelete(DeleteBehavior.Restrict);
++
++        builder.HasOne(e => e.ParentDept)
++            .WithMany()
++            .HasForeignKey(e => e.ParentDeptId)
++            .HasConstraintName("fk_dept_parent")
++            .OnDelete(DeleteBehavior.Restrict);
++
++        builder.HasIndex(e => e.DeptCode).IsUnique().HasDatabaseName("uk_dept_code");
++        builder.HasIndex(e => new { e.SiteId, e.SortOrder }).HasDatabaseName("ix_dept_site_sort");
++    }
++}
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/MenuConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/MenuConfiguration.cs
+new file mode 100644
+index 0000000..7ea1526
+--- /dev/null
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/MenuConfiguration.cs
+@@ -0,0 +1,33 @@
++using JuProject.Domain.Entities;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace JuProject.Infrastructure.Persistence.Configurations;
++
++internal class MenuConfiguration : IEntityTypeConfiguration<Menu>
++{
++    public void Configure(EntityTypeBuilder<Menu> builder)
++    {
++        builder.ToTable("sys_menu");
++        builder.HasKey(e => e.MenuId);
++
++        builder.Property(e => e.MenuId).HasColumnName("menu_id");
++        builder.Property(e => e.ParentMenuId).HasColumnName("parent_menu_id");
++        builder.Property(e => e.MenuCode).HasColumnName("menu_code").HasMaxLength(50).IsRequired();
++        builder.Property(e => e.MenuName).HasColumnName("menu_name").HasMaxLength(100).IsRequired();
++        builder.Property(e => e.RoutePath).HasColumnName("route_path").HasMaxLength(200);
++        builder.Property(e => e.ComponentKey).HasColumnName("component_key").HasMaxLength(100);
++        builder.Property(e => e.IconKey).HasColumnName("icon_key").HasMaxLength(50);
++        builder.Property(e => e.SortOrder).HasColumnName("sort_order");
++        builder.ConfigureBase();
++
++        builder.HasOne(e => e.ParentMenu)
++            .WithMany()
++            .HasForeignKey(e => e.ParentMenuId)
++            .HasConstraintName("fk_menu_parent")
++            .OnDelete(DeleteBehavior.Restrict);
++
++        builder.HasIndex(e => e.MenuCode).IsUnique().HasDatabaseName("uk_menu_code");
++        builder.HasIndex(e => new { e.ParentMenuId, e.SortOrder }).HasDatabaseName("ix_menu_parent_sort");
++    }
++}
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/SiteConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/SiteConfiguration.cs
+new file mode 100644
+index 0000000..f022042
+--- /dev/null
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/SiteConfiguration.cs
+@@ -0,0 +1,21 @@
++using JuProject.Domain.Entities;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace JuProject.Infrastructure.Persistence.Configurations;
++
++internal class SiteConfiguration : IEntityTypeConfiguration<Site>
++{
++    public void Configure(EntityTypeBuilder<Site> builder)
++    {
++        builder.ToTable("sys_site");
++        builder.HasKey(e => e.SiteId);
++
++        builder.Property(e => e.SiteId).HasColumnName("site_id");
++        builder.Property(e => e.SiteCode).HasColumnName("site_code").HasMaxLength(50).IsRequired();
++        builder.Property(e => e.SiteName).HasColumnName("site_name").HasMaxLength(100).IsRequired();
++        builder.ConfigureBase();
++
++        builder.HasIndex(e => e.SiteCode).IsUnique().HasDatabaseName("uk_site_code");
++    }
++}
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Configurations/UserConfiguration.cs b/backend/src/JuProject.Infrastructure/Persistence/Configurations/UserConfiguration.cs
+index a97c02b..e614530 100644
+--- a/backend/src/JuProject.Infrastructure/Persistence/Configurations/UserConfiguration.cs
++++ b/backend/src/JuProject.Infrastructure/Persistence/Configurations/UserConfiguration.cs
+@@ -8,19 +8,32 @@ internal class UserConfiguration : IEntityTypeConfiguration<User>
+ {
+     public void Configure(EntityTypeBuilder<User> builder)
+     {
+-        builder.ToTable("tb_user");
++        builder.ToTable("sys_user");
+         builder.HasKey(e => e.UserId);
+ 
+         builder.Property(e => e.UserId).HasColumnName("user_id");
++        builder.Property(e => e.DeptId).HasColumnName("dept_id");
+         builder.Property(e => e.LoginId).HasColumnName("login_id").HasMaxLength(50).IsRequired();
+         builder.Property(e => e.PasswordHash).HasColumnName("password_hash").HasMaxLength(255).IsRequired();
+         builder.Property(e => e.UserName).HasColumnName("user_name").HasMaxLength(100).IsRequired();
+         builder.Property(e => e.Email).HasColumnName("email").HasMaxLength(200);
+         builder.Property(e => e.Phone).HasColumnName("phone").HasMaxLength(30);
+-        builder.Property(e => e.RoleCode).HasColumnName("role_code").HasMaxLength(30).IsRequired();
++        builder.Property(e => e.AuthId).HasColumnName("auth_id");
+         builder.Property(e => e.LastLoginAt).HasColumnName("last_login_at").HasColumnType("datetime(6)");
+         builder.ConfigureBase();
+ 
++        builder.HasOne(e => e.Dept)
++            .WithMany()
++            .HasForeignKey(e => e.DeptId)
++            .HasConstraintName("fk_user_dept")
++            .OnDelete(DeleteBehavior.Restrict);
++
++        builder.HasOne(e => e.Authority)
++            .WithMany()
++            .HasForeignKey(e => e.AuthId)
++            .HasConstraintName("fk_user_auth")
++            .OnDelete(DeleteBehavior.Restrict);
++
+         builder.HasIndex(e => e.LoginId).IsUnique().HasDatabaseName("uk_user_login_id");
+     }
+ }
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/DbSeeder.cs b/backend/src/JuProject.Infrastructure/Persistence/DbSeeder.cs
+index ae0d257..93678b2 100644
+--- a/backend/src/JuProject.Infrastructure/Persistence/DbSeeder.cs
++++ b/backend/src/JuProject.Infrastructure/Persistence/DbSeeder.cs
+@@ -17,12 +17,20 @@ public static class DbSeeder
+         if (exists)
+             return;
+ 
++        // ADMIN 권한은 마이그레이션(SysCoreSchema)에서 만든다.
++        var adminAuthId = await db.Authorities
++            .Where(a => a.AuthCode == Roles.Admin)
++            .Select(a => a.AuthId)
++            .FirstOrDefaultAsync(ct);
++        if (adminAuthId == 0)
++            throw new InvalidOperationException("sys_auth에 ADMIN 권한이 없습니다. 마이그레이션을 먼저 적용하세요.");
++
+         db.Users.Add(new User
+         {
+             LoginId = AdminLoginId,
+             PasswordHash = passwordHasher.Hash(adminPassword),
+             UserName = "관리자",
+-            RoleCode = Roles.Admin,
++            AuthId = adminAuthId,
+         });
+         await db.SaveChangesAsync(ct);
+     }
+diff --git a/backend/src/JuProject.Infrastructure/Persistence/Migrations/20261026063158_SysCoreSchema.cs b/backend/src/JuProject.Infrastructure/Persistence/Migrations/20261026063158_SysCoreSchema.cs
+new file mode 100644
+index 0000000..67dd190
+--- /dev/null
++++ b/backend/src/JuProject.Infrastructure/Persistence/Migrations/20261026063158_SysCoreSchema.cs
+@@ -0,0 +1,344 @@
++﻿using System;
++using Microsoft.EntityFrameworkCore.Metadata;
++using Microsoft.EntityFrameworkCore.Migrations;
++
++#nullable disable
++
++namespace JuProject.Infrastructure.Persistence.Migrations
++{
++    /// <inheritdoc />
++    public partial class SysCoreSchema : Migration
++    {
++        // 데이터 보존 staged migration (2026-10-26, SYS-01). 자동 생성 결과를 수작업으로 재배치했다.
++        // MariaDB DDL은 트랜잭션으로 묶이지 않으므로, 파괴적 단계(role_code 삭제)는 검증 뒤 마지막에 둔다.
++        // tb_* 의 PK/인덱스/FK 이름은 테이블명과 무관하므로 RenameTable 후에도 그대로 유지된다.
++        // (자동 생성된 DropPrimaryKey/AddPrimaryKey(PK_tb_* → PK_sys_*)는 MariaDB에서 의미가 없어 제거)
++
++        private const string Collation = "utf8mb4_unicode_ci";
++
++        /// <inheritdoc />
++        protected override void Up(MigrationBuilder migrationBuilder)
++        {
++            // 1) 기존 테이블 이름 변경 (Drop/Create 하지 않음 → 데이터 보존)
++            migrationBuilder.RenameTable(name: "tb_code_group", newName: "sys_code_group");
++            migrationBuilder.RenameTable(name: "tb_code", newName: "sys_code");
++            migrationBuilder.RenameTable(name: "tb_user", newName: "sys_user");
++
++            // 2) 신규 테이블: sys_auth, sys_menu, sys_site, sys_auth_menu, sys_dept
++            migrationBuilder.CreateTable(
++                name: "sys_auth",
++                columns: table => new
++                {
++                    auth_id = table.Column<long>(type: "bigint", nullable: false)
++                        .Annotation("MySql:ValueGenerationStrategy", MySqlValueGenerationStrategy.IdentityColumn),
++                    auth_code = table.Column<string>(type: "varchar(30)", maxLength: 30, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    auth_name = table.Column<string>(type: "varchar(100)", maxLength: 100, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    sort_order = table.Column<int>(type: "int", nullable: false),
++                    use_yn = table.Column<string>(type: "char(1)", nullable: false, defaultValue: "Y", collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    created_at = table.Column<DateTime>(type: "datetime(6)", nullable: false),
++                    created_by = table.Column<long>(type: "bigint", nullable: true),
++                    updated_at = table.Column<DateTime>(type: "datetime(6)", nullable: true),
++                    updated_by = table.Column<long>(type: "bigint", nullable: true)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_sys_auth", x => x.auth_id);
++                })
++                .Annotation("MySql:CharSet", "utf8mb4")
++                .Annotation("Relational:Collation", "utf8mb4_unicode_ci");
++
++            migrationBuilder.CreateTable(
++                name: "sys_menu",
++                columns: table => new
++                {
++                    menu_id = table.Column<long>(type: "bigint", nullable: false)
++                        .Annotation("MySql:ValueGenerationStrategy", MySqlValueGenerationStrategy.IdentityColumn),
++                    parent_menu_id = table.Column<long>(type: "bigint", nullable: true),
++                    menu_code = table.Column<string>(type: "varchar(50)", maxLength: 50, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    menu_name = table.Column<string>(type: "varchar(100)", maxLength: 100, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    route_path = table.Column<string>(type: "varchar(200)", maxLength: 200, nullable: true, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    component_key = table.Column<string>(type: "varchar(100)", maxLength: 100, nullable: true, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    icon_key = table.Column<string>(type: "varchar(50)", maxLength: 50, nullable: true, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    sort_order = table.Column<int>(type: "int", nullable: false),
++                    use_yn = table.Column<string>(type: "char(1)", nullable: false, defaultValue: "Y", collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    created_at = table.Column<DateTime>(type: "datetime(6)", nullable: false),
++                    created_by = table.Column<long>(type: "bigint", nullable: true),
++                    updated_at = table.Column<DateTime>(type: "datetime(6)", nullable: true),
++                    updated_by = table.Column<long>(type: "bigint", nullable: true)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_sys_menu", x => x.menu_id);
++                    table.ForeignKey(
++                        name: "fk_menu_parent",
++                        column: x => x.parent_menu_id,
++                        principalTable: "sys_menu",
++                        principalColumn: "menu_id",
++                        onDelete: ReferentialAction.Restrict);
++                })
++                .Annotation("MySql:CharSet", "utf8mb4")
++                .Annotation("Relational:Collation", "utf8mb4_unicode_ci");
++
++            migrationBuilder.CreateTable(
++                name: "sys_site",
++                columns: table => new
++                {
++                    site_id = table.Column<long>(type: "bigint", nullable: false)
++                        .Annotation("MySql:ValueGenerationStrategy", MySqlValueGenerationStrategy.IdentityColumn),
++                    site_code = table.Column<string>(type: "varchar(50)", maxLength: 50, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    site_name = table.Column<string>(type: "varchar(100)", maxLength: 100, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    use_yn = table.Column<string>(type: "char(1)", nullable: false, defaultValue: "Y", collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    created_at = table.Column<DateTime>(type: "datetime(6)", nullable: false),
++                    created_by = table.Column<long>(type: "bigint", nullable: true),
++                    updated_at = table.Column<DateTime>(type: "datetime(6)", nullable: true),
++                    updated_by = table.Column<long>(type: "bigint", nullable: true)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_sys_site", x => x.site_id);
++                })
++                .Annotation("MySql:CharSet", "utf8mb4")
++                .Annotation("Relational:Collation", "utf8mb4_unicode_ci");
++
++            migrationBuilder.CreateTable(
++                name: "sys_auth_menu",
++                columns: table => new
++                {
++                    auth_menu_id = table.Column<long>(type: "bigint", nullable: false)
++                        .Annotation("MySql:ValueGenerationStrategy", MySqlValueGenerationStrategy.IdentityColumn),
++                    auth_id = table.Column<long>(type: "bigint", nullable: false),
++                    menu_id = table.Column<long>(type: "bigint", nullable: false),
++                    use_yn = table.Column<string>(type: "char(1)", nullable: false, defaultValue: "Y", collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    created_at = table.Column<DateTime>(type: "datetime(6)", nullable: false),
++                    created_by = table.Column<long>(type: "bigint", nullable: true),
++                    updated_at = table.Column<DateTime>(type: "datetime(6)", nullable: true),
++                    updated_by = table.Column<long>(type: "bigint", nullable: true)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_sys_auth_menu", x => x.auth_menu_id);
++                    table.ForeignKey(
++                        name: "fk_auth_menu_auth",
++                        column: x => x.auth_id,
++                        principalTable: "sys_auth",
++                        principalColumn: "auth_id",
++                        onDelete: ReferentialAction.Restrict);
++                    table.ForeignKey(
++                        name: "fk_auth_menu_menu",
++                        column: x => x.menu_id,
++                        principalTable: "sys_menu",
++                        principalColumn: "menu_id",
++                        onDelete: ReferentialAction.Restrict);
++                })
++                .Annotation("MySql:CharSet", "utf8mb4")
++                .Annotation("Relational:Collation", "utf8mb4_unicode_ci");
++
++            migrationBuilder.CreateTable(
++                name: "sys_dept",
++                columns: table => new
++                {
++                    dept_id = table.Column<long>(type: "bigint", nullable: false)
++                        .Annotation("MySql:ValueGenerationStrategy", MySqlValueGenerationStrategy.IdentityColumn),
++                    site_id = table.Column<long>(type: "bigint", nullable: false),
++                    dept_code = table.Column<string>(type: "varchar(50)", maxLength: 50, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    dept_name = table.Column<string>(type: "varchar(100)", maxLength: 100, nullable: false, collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    parent_dept_id = table.Column<long>(type: "bigint", nullable: true),
++                    sort_order = table.Column<int>(type: "int", nullable: false),
++                    use_yn = table.Column<string>(type: "char(1)", nullable: false, defaultValue: "Y", collation: "utf8mb4_unicode_ci")
++                        .Annotation("MySql:CharSet", "utf8mb4"),
++                    created_at = table.Column<DateTime>(type: "datetime(6)", nullable: false),
++                    created_by = table.Column<long>(type: "bigint", nullable: true),
++                    updated_at = table.Column<DateTime>(type: "datetime(6)", nullable: true),
++                    updated_by = table.Column<long>(type: "bigint", nullable: true)
++                },
++                constraints: table =>
++                {
++                    table.PrimaryKey("PK_sys_dept", x => x.dept_id);
++                    table.ForeignKey(
++                        name: "fk_dept_parent",
++                        column: x => x.parent_dept_id,
++                        principalTable: "sys_dept",
++                        principalColumn: "dept_id",
++                        onDelete: ReferentialAction.Restrict);
++                    table.ForeignKey(
++                        name: "fk_dept_site",
++                        column: x => x.site_id,
++                        principalTable: "sys_site",
++                        principalColumn: "site_id",
++                        onDelete: ReferentialAction.Restrict);
++                })
++                .Annotation("MySql:CharSet", "utf8mb4")
++                .Annotation("Relational:Collation", "utf8mb4_unicode_ci");
++
++            migrationBuilder.CreateIndex(
++                name: "uk_auth_code",
++                table: "sys_auth",
++                column: "auth_code",
++                unique: true);
++
++            migrationBuilder.CreateIndex(
++                name: "IX_sys_auth_menu_menu_id",
++                table: "sys_auth_menu",
++                column: "menu_id");
++
++            migrationBuilder.CreateIndex(
++                name: "uk_auth_menu",
++                table: "sys_auth_menu",
++                columns: new[] { "auth_id", "menu_id" },
++                unique: true);
++
++            migrationBuilder.CreateIndex(
++                name: "ix_dept_site_sort",
++                table: "sys_dept",
++                columns: new[] { "site_id", "sort_order" });
++
++            migrationBuilder.CreateIndex(
++                name: "IX_sys_dept_parent_dept_id",
++                table: "sys_dept",
++                column: "parent_dept_id");
++
++            migrationBuilder.CreateIndex(
++                name: "uk_dept_code",
++                table: "sys_dept",
++                column: "dept_code",
++                unique: true);
++
++            migrationBuilder.CreateIndex(
++                name: "ix_menu_parent_sort",
++                table: "sys_menu",
++                columns: new[] { "parent_menu_id", "sort_order" });
++
++            migrationBuilder.CreateIndex(
++                name: "uk_menu_code",
++                table: "sys_menu",
++                column: "menu_code",
++                unique: true);
++
++            migrationBuilder.CreateIndex(
++                name: "uk_site_code",
++                table: "sys_site",
++                column: "site_code",
++                unique: true);
++
++            // 3) 기본 권한 (기존 role_code 값과 같은 auth_code)
++            migrationBuilder.Sql(
++                "INSERT INTO sys_auth (auth_code, auth_name, sort_order, use_yn, created_at) VALUES " +
++                "('ADMIN', '관리자', 1, 'Y', UTC_TIMESTAMP(6)), " +
++                "('USER', '사용자', 2, 'Y', UTC_TIMESTAMP(6));");
++
++            // 4) 새 컬럼은 모두 NULL 허용으로 추가 (auth_id도 우선 NULL 허용)
++            migrationBuilder.AddColumn<long>(name: "auth_id", table: "sys_user", type: "bigint", nullable: true);
++            migrationBuilder.AddColumn<long>(name: "dept_id", table: "sys_user", type: "bigint", nullable: true);
++            foreach (var table in new[] { "sys_user", "sys_code_group", "sys_code" })
++            {
++                migrationBuilder.AddColumn<long>(name: "created_by", table: table, type: "bigint", nullable: true);
++                migrationBuilder.AddColumn<long>(name: "updated_by", table: table, type: "bigint", nullable: true);
++            }
++            migrationBuilder.AddColumn<string>(
++                name: "code_value", table: "sys_code", type: "varchar(200)", maxLength: 200,
++                nullable: true, collation: Collation)
++                .Annotation("MySql:CharSet", "utf8mb4");
++
++            // 5) role_code → auth_id 변환
++            migrationBuilder.Sql(
++                "UPDATE sys_user u JOIN sys_auth a ON a.auth_code = u.role_code SET u.auth_id = a.auth_id;");
++
++            // 6) 변환 검증: 매칭되지 않은 사용자가 있으면 role_code를 지우기 전에 중단
++            migrationBuilder.Sql(@"
++BEGIN NOT ATOMIC
++  IF EXISTS (SELECT 1 FROM sys_user WHERE auth_id IS NULL) THEN
++    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'SysCoreSchema Up: sys_user.auth_id IS NULL (role_code not mapped to sys_auth)';
++  END IF;
++END");
++
++            // 7) NOT NULL → 인덱스 → FK
++            migrationBuilder.AlterColumn<long>(
++                name: "auth_id", table: "sys_user", type: "bigint", nullable: false,
++                oldClrType: typeof(long), oldType: "bigint", oldNullable: true);
++            migrationBuilder.CreateIndex(name: "IX_sys_user_auth_id", table: "sys_user", column: "auth_id");
++            migrationBuilder.CreateIndex(name: "IX_sys_user_dept_id", table: "sys_user", column: "dept_id");
++            migrationBuilder.AddForeignKey(
++                name: "fk_user_auth", table: "sys_user", column: "auth_id",
++                principalTable: "sys_auth", principalColumn: "auth_id", onDelete: ReferentialAction.Restrict);
++            migrationBuilder.AddForeignKey(
++                name: "fk_user_dept", table: "sys_user", column: "dept_id",
++                principalTable: "sys_dept", principalColumn: "dept_id", onDelete: ReferentialAction.Restrict);
++
++            // 8) 마지막에 role_code 삭제
++            migrationBuilder.DropColumn(name: "role_code", table: "sys_user");
++
++            // 9) 초기 메뉴(React 메뉴와 동일) + 권한-메뉴 매핑 (ADMIN 전체, USER는 사용자 관리 제외)
++            migrationBuilder.Sql(
++                "INSERT INTO sys_menu (menu_code, menu_name, route_path, sort_order, use_yn, created_at) VALUES " +
++                "('HOME', '홈', '/', 1, 'Y', UTC_TIMESTAMP(6)), " +
++                "('USERS', '사용자 관리', '/users', 2, 'Y', UTC_TIMESTAMP(6)), " +
++                "('CODE_GROUPS', '공통코드 그룹', '/code-groups', 3, 'Y', UTC_TIMESTAMP(6)), " +
++                "('CODES', '공통코드', '/codes', 4, 'Y', UTC_TIMESTAMP(6));");
++            migrationBuilder.Sql(
++                "INSERT INTO sys_auth_menu (auth_id, menu_id, use_yn, created_at) " +
++                "SELECT a.auth_id, m.menu_id, 'Y', UTC_TIMESTAMP(6) FROM sys_auth a CROSS JOIN sys_menu m " +
++                "WHERE a.auth_code = 'ADMIN' OR (a.auth_code = 'USER' AND m.menu_code <> 'USERS');");
++        }
++
++        /// <inheritdoc />
++        protected override void Down(MigrationBuilder migrationBuilder)
++        {
++            // 1) role_code 복원 (원래 위치: phone 뒤) → auth_code로 채움
++            migrationBuilder.Sql(
++                "ALTER TABLE sys_user ADD COLUMN role_code varchar(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL AFTER phone;");
++            migrationBuilder.Sql(
++                "UPDATE sys_user u JOIN sys_auth a ON a.auth_id = u.auth_id SET u.role_code = a.auth_code;");
++
++            // 2) 복원 검증: role_code가 비면 구조를 되돌리기 전에 중단
++            migrationBuilder.Sql(@"
++BEGIN NOT ATOMIC
++  IF EXISTS (SELECT 1 FROM sys_user WHERE role_code IS NULL) THEN
++    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'SysCoreSchema Down: sys_user.role_code IS NULL (auth_id not mapped)';
++  END IF;
++END");
++            migrationBuilder.Sql(
++                "ALTER TABLE sys_user MODIFY role_code varchar(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL;");
++
++            // 3) FK·인덱스·추가 컬럼 제거
++            migrationBuilder.DropForeignKey(name: "fk_user_auth", table: "sys_user");
++            migrationBuilder.DropForeignKey(name: "fk_user_dept", table: "sys_user");
++            migrationBuilder.DropIndex(name: "IX_sys_user_auth_id", table: "sys_user");
++            migrationBuilder.DropIndex(name: "IX_sys_user_dept_id", table: "sys_user");
++            migrationBuilder.DropColumn(name: "auth_id", table: "sys_user");
++            migrationBuilder.DropColumn(name: "dept_id", table: "sys_user");
++            foreach (var table in new[] { "sys_user", "sys_code_group", "sys_code" })
++            {
++                migrationBuilder.DropColumn(name: "created_by", table: table);
++                migrationBuilder.DropColumn(name: "updated_by", table: table);
++            }
++            migrationBuilder.DropColumn(name: "code_value", table: "sys_code");
++
++            // 4) 신규 테이블 삭제 (참조 순서)
++            migrationBuilder.DropTable(name: "sys_auth_menu");
++            migrationBuilder.DropTable(name: "sys_dept");
++            migrationBuilder.DropTable(name: "sys_menu");
++            migrationBuilder.DropTable(name: "sys_auth");
++            migrationBuilder.DropTable(name: "sys_site");
++
++            // 5) 이름 원복
++            migrationBuilder.RenameTable(name: "sys_user", newName: "tb_user");
++            migrationBuilder.RenameTable(name: "sys_code", newName: "tb_code");
++            migrationBuilder.RenameTable(name: "sys_code_group", newName: "tb_code_group");
++        }
++    }
++}
+diff --git a/backend/src/JuProject.Infrastructure/Repositories/AuthorityRepository.cs b/backend/src/JuProject.Infrastructure/Repositories/AuthorityRepository.cs
+new file mode 100644
+index 0000000..221232a
+--- /dev/null
++++ b/backend/src/JuProject.Infrastructure/Repositories/AuthorityRepository.cs
+@@ -0,0 +1,12 @@
++using JuProject.Application.Authorities;
++using JuProject.Domain.Entities;
++using JuProject.Infrastructure.Persistence;
++using Microsoft.EntityFrameworkCore;
++
++namespace JuProject.Infrastructure.Repositories;
++
++public class AuthorityRepository(AppDbContext db) : IAuthorityRepository
++{
++    public Task<Authority?> GetByCodeAsync(string authCode, CancellationToken ct = default) =>
++        db.Authorities.FirstOrDefaultAsync(a => a.AuthCode == authCode, ct);
++}
+diff --git a/backend/src/JuProject.Infrastructure/Repositories/UserRepository.cs b/backend/src/JuProject.Infrastructure/Repositories/UserRepository.cs
+index 6d80f92..fb3b91e 100644
+--- a/backend/src/JuProject.Infrastructure/Repositories/UserRepository.cs
++++ b/backend/src/JuProject.Infrastructure/Repositories/UserRepository.cs
+@@ -1,4 +1,5 @@
+ using JuProject.Application.Users;
++using JuProject.Domain.Common;
+ using JuProject.Domain.Entities;
+ using JuProject.Infrastructure.Persistence;
+ using Microsoft.EntityFrameworkCore;
+@@ -7,19 +8,24 @@ namespace JuProject.Infrastructure.Repositories;
+ 
+ public class UserRepository(AppDbContext db) : IUserRepository
+ {
++    // sys_user.auth_id는 필수 FK라서 Include(Authority)에 Authority의 전역 필터(UseYn = Y)가 함께 걸리면
++    // 권한이 미사용(N)인 사용자가 조회에서 빠진다. 사용자 조회에서는 전역 필터를 끄고
++    // 사용자 자신의 UseYn 조건만 다시 건다. 권한 사용 여부는 로그인(AuthService)에서 검사한다.
++    private IQueryable<User> UsersWithAuthority(bool includeDeleted) =>
++        includeDeleted
++            ? db.Users.IgnoreQueryFilters().Include(u => u.Authority)
++            : db.Users.IgnoreQueryFilters().Where(u => u.UseYn == YesNo.Yes).Include(u => u.Authority);
++
+     public Task<User?> GetByIdAsync(long userId, CancellationToken ct = default) =>
+-        db.Users.FirstOrDefaultAsync(u => u.UserId == userId, ct);
++        UsersWithAuthority(includeDeleted: false).FirstOrDefaultAsync(u => u.UserId == userId, ct);
+ 
+-    public Task<User?> GetByLoginIdAsync(string loginId, bool includeDeleted, CancellationToken ct = default)
+-    {
+-        var query = includeDeleted ? db.Users.IgnoreQueryFilters() : db.Users;
+-        return query.FirstOrDefaultAsync(u => u.LoginId == loginId, ct);
+-    }
++    public Task<User?> GetByLoginIdAsync(string loginId, bool includeDeleted, CancellationToken ct = default) =>
++        UsersWithAuthority(includeDeleted).FirstOrDefaultAsync(u => u.LoginId == loginId, ct);
+ 
+     public async Task<(IReadOnlyList<User> Items, int TotalCount)> SearchAsync(
+         string? keyword, int page, int size, CancellationToken ct = default)
+     {
+-        var query = db.Users.AsNoTracking();
++        var query = UsersWithAuthority(includeDeleted: false).AsNoTracking();
+ 
+         if (!string.IsNullOrWhiteSpace(keyword))
+             query = query.Where(u => u.LoginId.Contains(keyword) || u.UserName.Contains(keyword));
+diff --git a/backend/src/JuProject.Infrastructure/Security/JwtTokenService.cs b/backend/src/JuProject.Infrastructure/Security/JwtTokenService.cs
+index a7dea46..d797024 100644
+--- a/backend/src/JuProject.Infrastructure/Security/JwtTokenService.cs
++++ b/backend/src/JuProject.Infrastructure/Security/JwtTokenService.cs
+@@ -32,7 +32,8 @@ public class JwtTokenService(IOptions<JwtOptions> options) : ITokenService
+                 new Claim(JwtRegisteredClaimNames.Sub, user.UserId.ToString()),
+                 new Claim(JwtRegisteredClaimNames.UniqueName, user.LoginId),
+                 new Claim(UserNameClaim, user.UserName),
+-                new Claim(RoleClaim, user.RoleCode),
++                new Claim(RoleClaim, user.Authority?.AuthCode
++                    ?? throw new InvalidOperationException("사용자 권한(Authority)이 로드되지 않았습니다.")),
+             ]),
+         };
+ 

@@ -1,0 +1,7 @@
+SELECT '#sys_user'; SELECT u.user_id, a.auth_code AS role_code, SHA2(CONCAT_WS('|',u.login_id,u.password_hash,u.user_name,IFNULL(u.email,'-'),IFNULL(u.phone,'-'),IFNULL(u.last_login_at,'-'),u.use_yn,u.created_at,IFNULL(u.updated_at,'-')),256) h FROM sys_user u JOIN sys_auth a ON a.auth_id=u.auth_id ORDER BY u.user_id;
+SELECT '#sys_code_group'; SELECT code_group_id, SHA2(CONCAT_WS('|',group_code,group_name,IFNULL(description,'-'),sort_order,use_yn,created_at,IFNULL(updated_at,'-')),256) h FROM sys_code_group ORDER BY 1;
+SELECT '#sys_code'; SELECT code_id, SHA2(CONCAT_WS('|',code_group_id,code,code_name,IFNULL(description,'-'),sort_order,use_yn,created_at,IFNULL(updated_at,'-')),256) h FROM sys_code ORDER BY 1;
+SELECT '#check'; SELECT (SELECT COUNT(*) FROM sys_user) users, (SELECT COUNT(*) FROM sys_user WHERE auth_id IS NULL) auth_null, (SELECT COUNT(*) FROM sys_user u LEFT JOIN sys_auth a ON a.auth_id=u.auth_id WHERE a.auth_id IS NULL) auth_orphan, (SELECT COUNT(*) FROM sys_user WHERE created_by IS NOT NULL OR updated_by IS NOT NULL) audit_by_set;
+SELECT '#sys_auth'; SELECT auth_id,auth_code,auth_name,sort_order,use_yn FROM sys_auth ORDER BY 1;
+SELECT '#sys_menu'; SELECT menu_code,menu_name,route_path,sort_order,use_yn FROM sys_menu ORDER BY sort_order;
+SELECT '#sys_auth_menu'; SELECT a.auth_code,m.menu_code FROM sys_auth_menu am JOIN sys_auth a ON a.auth_id=am.auth_id JOIN sys_menu m ON m.menu_id=am.menu_id ORDER BY 1,m.sort_order;
