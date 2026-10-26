@@ -1,0 +1,457 @@
+diff --git a/database/README.md b/database/README.md
+new file mode 100644
+index 0000000..aa626e4
+--- /dev/null
++++ b/database/README.md
+@@ -0,0 +1,42 @@
++# juprovider database
++
++MariaDB 10.6+ / DB `juprovider` / `utf8mb4_general_ci`
++
++| 폴더 | 용도 |
++|---|---|
++| `baseline` | 신규 설치용 전체 구조 |
++| `seed` | 신규 설치용 기본 데이터 |
++| `migration` | 이미 설치된 DB 업그레이드·검증용 SQL (번호 순서대로 실행) |
++
++## 신규 설치
++
++```
++mysql -u <user> -p juprovider < baseline/01_ju_core_baseline.sql
++mysql -u <user> -p juprovider < seed/02_ju_core_seed.sql
++mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
++```
++
++## 기존 DB 업그레이드
++
++| 파일 | 대상 | 내용 |
++|---|---|---|
++| `migration/04_ju0_install_fix.sql` | seed V2.2로 설치한 DB | 프로토콜 유형 코드, .NET 버전, 장치 유형 코드 정정, 초기 관리자 생성(사용자가 없을 때만), `ju_menu_action`(+detail), 메뉴 Action 종류 공통코드 MACT |
++
++## 초기 관리자
++
++- 로그인 ID: `admin` (seed와 `04`가 사용자가 없을 때만 만든다. 비밀번호는 BCrypt 해시로만 저장)
++- 초기 비밀번호는 **공개 저장소에 기록하지 않는다.** 설치 담당자에게 별도로 전달한다.
++- 설치 후 첫 로그인에서 반드시 바꾼다. `ju_user_detail.PW_CHANGE_DT`가 NULL이면 변경 대상이다 (변경 강제는 JU-1에서 적용).
++
++## 메뉴 Action 종류 (`MACT`)
++
++| 코드 | 이름 | COM_VAL (권한 비트) |
++|---|---|---|
++| MACT0001 | 조회 | 01 |
++| MACT0003 | 등록 | 02 |
++| MACT0004 | 수정 | 04 |
++| MACT0005 | 삭제 | 08 |
++| MACT0002 | 실행 | 10 |
++| MACT0006 | 내보내기 | 20 |
++
++- `ju_menu_action.ACT_KIND`가 이 코드를 쓴다. 권한 비트를 `AUTH_ATTR`에서 쓰는 것은 JU-1부터다 (현재 `AUTH_ATTR`는 9자리 메뉴코드 형식 유지).
+diff --git a/database/baseline/01_ju_core_baseline.sql b/database/baseline/01_ju_core_baseline.sql
+index 0e547e9..b4675a7 100644
+--- a/database/baseline/01_ju_core_baseline.sql
++++ b/database/baseline/01_ju_core_baseline.sql
+@@ -1,5 +1,5 @@
+ -- ============================================================
+--- JuProvider DB Baseline V2
++-- JuProvider DB Baseline V2.3 (2026-10-26 JU-0A: ju_menu_action(+detail) 추가)
+ -- 2026-10-16
+ -- MariaDB 10.6+
+ -- Principles:
+@@ -320,6 +320,30 @@ CREATE TABLE `ju_menu` (
+   CONSTRAINT `FK_MENU_PARENT` FOREIGN KEY (`UP_MNU_ID`) REFERENCES `ju_menu` (`MNU_ID`)
+ ) ENGINE=InnoDB AUTO_INCREMENT=30 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='JuProvider 메뉴';
+ 
++CREATE TABLE `ju_menu_action` (
++  `ACT_ID` bigint(20) NOT NULL AUTO_INCREMENT COMMENT 'Action ID',
++  `MNU_ID` bigint(20) NOT NULL COMMENT '메뉴 ID',
++  `ACT_CD` varchar(20) NOT NULL COMMENT 'Action 코드',
++  `ACT_KIND` varchar(8) NOT NULL COMMENT 'Action 종류(MACT)',
++  `HANDLER_ID` varchar(100) NOT NULL COMMENT 'Action Handler ID',
++  `USE_YN` varchar(8) NOT NULL DEFAULT 'YENO0001' COMMENT '사용여부',
++  `ENABLED_YN` varchar(8) NOT NULL DEFAULT 'YENO0001' COMMENT '활성여부',
++  `SORT_ORD` int(11) NOT NULL DEFAULT 0 COMMENT '정렬순서',
++  PRIMARY KEY (`ACT_ID`),
++  UNIQUE KEY `UK_JU_MENU_ACTION_01` (`MNU_ID`,`ACT_CD`),
++  CONSTRAINT `FK_JU_MENU_ACTION_01` FOREIGN KEY (`MNU_ID`) REFERENCES `ju_menu` (`MNU_ID`) ON DELETE CASCADE
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='메뉴 Action';
++
++CREATE TABLE `ju_menu_action_detail` (
++  `ACT_ID` bigint(20) NOT NULL COMMENT 'Action ID',
++  `ACT_NM` varchar(100) DEFAULT NULL COMMENT 'Action명',
++  `ACT_DESC` varchar(500) DEFAULT NULL COMMENT 'Action 설명',
++  `ACT_NM_KEY` varchar(200) DEFAULT NULL COMMENT 'Action명 다국어 Resource Key',
++  `ACT_DESC_KEY` varchar(200) DEFAULT NULL COMMENT 'Action설명 다국어 Resource Key',
++  PRIMARY KEY (`ACT_ID`),
++  CONSTRAINT `FK_JU_MENU_ACTION_DETAIL_01` FOREIGN KEY (`ACT_ID`) REFERENCES `ju_menu_action` (`ACT_ID`) ON DELETE CASCADE
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='메뉴 Action 상세정보';
++
+ CREATE TABLE `ju_menu_detail` (
+   `MNU_ID` bigint(20) NOT NULL COMMENT '메뉴 내부 식별키',
+   `MNU_NM` varchar(100) NOT NULL COMMENT '기본(한국어) 메뉴명',
+diff --git a/database/migration/04_ju0_install_fix.sql b/database/migration/04_ju0_install_fix.sql
+new file mode 100644
+index 0000000..4aa7700
+--- /dev/null
++++ b/database/migration/04_ju0_install_fix.sql
+@@ -0,0 +1,147 @@
++-- ============================================================
++-- JU-0 설치 완결성: 기존 설치 DB 보정 (seed V2.2 → V2.3)
++-- 2026-10-25
++-- 신규 설치는 baseline + seed만 실행하면 되고, 이 파일은 필요 없다.
++-- 여러 번 실행해도 결과가 같도록 작성했다.
++-- ============================================================
++SET NAMES utf8mb4;
++
++-- 1) 프로토콜 유형: 문자열 'POLLING' → 공통코드 PROT0000(POLLING)
++UPDATE ju_protocol SET PTL_TYPE = 'PROT0000' WHERE PTL_TYPE = 'POLLING';
++
++-- 2) Desktop 대상 .NET 버전
++UPDATE ju_sys SET SYS_VAL = '10.0' WHERE SYS_CD = 'DOTNET_VERSION' AND SYS_VAL = '9.0';
++
++-- 3) 장치 유형 공통코드(DEVI) 정정
++--    DEVI0000=VIRTUAL, DEVI0001=SERIAL, DEVI0002=NETWORK, DEVI0003=NETWORK_GATEWAY
++--    terminal은 DEVI0000을 가상 장치로 처리한다.
++UPDATE ju_device SET DEV_TYPE = 'DEVI0000' WHERE DEV_CD = 'VDEV_GTEC01' AND DEV_TYPE = 'DEVI0003';
++UPDATE ju_device SET DEV_TYPE = 'DEVI0001' WHERE DEV_CD = 'SDEV_GTEC01' AND DEV_TYPE = 'DEVI0002';
++UPDATE ju_device SET DEV_TYPE = 'DEVI0002' WHERE DEV_CD = 'NET_GTEC01'  AND DEV_TYPE = 'DEVI0001';
++
++-- 4) 초기 관리자: 사용자가 한 명도 없을 때만 만든다.
++--    초기 비밀번호는 저장소에 기록하지 않는다(설치 담당자에게 별도 전달). PW_CHANGE_DT가 NULL이면 변경 대상.
++INSERT INTO ju_user (LOGIN_ID, USER_PW_HASH, AUTH_ID, USE_YN)
++SELECT 'admin', '$2a$10$Ad/VeiYXigyd5e3ufI3t/uy4kULBx06kXQGO2ejDaN3xXMhra.Kg.', 1, 'YENO0001'
++FROM DUAL
++WHERE NOT EXISTS (SELECT 1 FROM ju_user);
++
++INSERT INTO ju_user_detail (USER_ID, USER_NM, LOGIN_FAIL_CNT)
++SELECT u.USER_ID, '관리자', 0
++FROM ju_user u
++WHERE u.LOGIN_ID = 'admin'
++  AND NOT EXISTS (SELECT 1 FROM ju_user_detail d WHERE d.USER_ID = u.USER_ID);
++
++-- 5) 메뉴 Action 테이블 (seed V2.2에는 없었음. 이미 있으면 건너뜀)
++CREATE TABLE IF NOT EXISTS `ju_menu_action` (
++  `ACT_ID` bigint(20) NOT NULL AUTO_INCREMENT COMMENT 'Action ID',
++  `MNU_ID` bigint(20) NOT NULL COMMENT '메뉴 ID',
++  `ACT_CD` varchar(20) NOT NULL COMMENT 'Action 코드',
++  `ACT_KIND` varchar(8) NOT NULL COMMENT 'Action 종류(MACT)',
++  `HANDLER_ID` varchar(100) NOT NULL COMMENT 'Action Handler ID',
++  `USE_YN` varchar(8) NOT NULL DEFAULT 'YENO0001' COMMENT '사용여부',
++  `ENABLED_YN` varchar(8) NOT NULL DEFAULT 'YENO0001' COMMENT '활성여부',
++  `SORT_ORD` int(11) NOT NULL DEFAULT 0 COMMENT '정렬순서',
++  PRIMARY KEY (`ACT_ID`),
++  UNIQUE KEY `UK_JU_MENU_ACTION_01` (`MNU_ID`,`ACT_CD`),
++  CONSTRAINT `FK_JU_MENU_ACTION_01` FOREIGN KEY (`MNU_ID`) REFERENCES `ju_menu` (`MNU_ID`) ON DELETE CASCADE
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='메뉴 Action';
++
++CREATE TABLE IF NOT EXISTS `ju_menu_action_detail` (
++  `ACT_ID` bigint(20) NOT NULL COMMENT 'Action ID',
++  `ACT_NM` varchar(100) DEFAULT NULL COMMENT 'Action명',
++  `ACT_DESC` varchar(500) DEFAULT NULL COMMENT 'Action 설명',
++  `ACT_NM_KEY` varchar(200) DEFAULT NULL COMMENT 'Action명 다국어 Resource Key',
++  `ACT_DESC_KEY` varchar(200) DEFAULT NULL COMMENT 'Action설명 다국어 Resource Key',
++  PRIMARY KEY (`ACT_ID`),
++  CONSTRAINT `FK_JU_MENU_ACTION_DETAIL_01` FOREIGN KEY (`ACT_ID`) REFERENCES `ju_menu_action` (`ACT_ID`) ON DELETE CASCADE
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='메뉴 Action 상세정보';
++
++INSERT IGNORE INTO `ju_menu_action` VALUES
++(1,15,'SEARCH','MACT0001','DEVICE.SEARCH','YENO0001','YENO0001',10),
++(2,15,'GET','MACT0001','DEVICE.GET','YENO0001','YENO0001',20),
++(3,15,'CREATE','MACT0003','DEVICE.CREATE','YENO0001','YENO0001',30),
++(4,15,'UPDATE','MACT0004','DEVICE.UPDATE','YENO0001','YENO0001',40),
++(5,15,'DELETE','MACT0005','DEVICE.DELETE','YENO0001','YENO0001',50),
++(6,15,'CONNECT','MACT0002','DEVICE.CONNECT','YENO0001','YENO0001',60),
++(7,15,'DISCONNECT','MACT0002','DEVICE.DISCONNECT','YENO0001','YENO0001',70),
++(8,15,'STATUS','MACT0001','DEVICE.STATUS','YENO0001','YENO0001',80),
++(9,15,'START','MACT0002','DEVICE.START','YENO0001','YENO0001',90),
++(10,15,'STOP','MACT0002','DEVICE.STOP','YENO0001','YENO0001',100);
++
++INSERT IGNORE INTO `ju_menu_action_detail` VALUES
++(1,'조회','장치 목록을 조회합니다.','ACTION.DEVICE.SEARCH.NM','ACTION.DEVICE.SEARCH.DESC'),
++(2,'상세조회','선택한 장치의 상세정보를 조회합니다.','ACTION.DEVICE.GET.NM','ACTION.DEVICE.GET.DESC'),
++(3,'추가','새로운 장치를 등록합니다.','ACTION.DEVICE.CREATE.NM','ACTION.DEVICE.CREATE.DESC'),
++(4,'수정','선택한 장치정보를 수정합니다.','ACTION.DEVICE.UPDATE.NM','ACTION.DEVICE.UPDATE.DESC'),
++(5,'삭제','선택한 장치를 삭제합니다.','ACTION.DEVICE.DELETE.NM','ACTION.DEVICE.DELETE.DESC'),
++(6,'연결','선택한 장치에 연결합니다.','ACTION.DEVICE.CONNECT.NM','ACTION.DEVICE.CONNECT.DESC'),
++(7,'연결해제','선택한 장치의 연결을 해제합니다.','ACTION.DEVICE.DISCONNECT.NM','ACTION.DEVICE.DISCONNECT.DESC'),
++(8,'상태조회','장치의 현재 상태를 조회합니다.','ACTION.DEVICE.STATUS.NM','ACTION.DEVICE.STATUS.DESC'),
++(9,'시작','장치 데이터 수집을 시작합니다.','ACTION.DEVICE.START.NM','ACTION.DEVICE.START.DESC'),
++(10,'정지','장치 데이터 수집을 정지합니다.','ACTION.DEVICE.STOP.NM','ACTION.DEVICE.STOP.DESC');
++
++-- 6) 메뉴 Action 종류(MACT) 공통코드. COM_VAL = AUTH_ATTR 권한 비트(16진 2자리)
++INSERT INTO ju_com_group (GRP_CD, USE_YN, SORT_ORD) VALUES ('MACT','YENO0001',208)
++  ON DUPLICATE KEY UPDATE USE_YN = VALUES(USE_YN);
++INSERT INTO ju_com_group_detail (GRP_CD, GRP_NM, GRP_DESC, GRP_NM_KEY, GRP_DESC_KEY) VALUES
++('MACT','메뉴액션종류','권한 비트를 가진 메뉴 Action 분류. COM_VAL=AUTH_ATTR 비트(16진)','GROUP.MACT.NM','GROUP.MACT.DESC')
++  ON DUPLICATE KEY UPDATE GRP_NM = VALUES(GRP_NM), GRP_DESC = VALUES(GRP_DESC);
++INSERT INTO ju_com_code (GRP_CD, COM_CD, COM_VAL, COM_ATTR, USE_YN, SORT_ORD) VALUES
++('MACT','MACT0001','01',NULL,'YENO0001',1),
++('MACT','MACT0002','10',NULL,'YENO0001',2),
++('MACT','MACT0003','02',NULL,'YENO0001',3),
++('MACT','MACT0004','04',NULL,'YENO0001',4),
++('MACT','MACT0005','08',NULL,'YENO0001',5),
++('MACT','MACT0006','20',NULL,'YENO0001',6)
++  ON DUPLICATE KEY UPDATE COM_VAL = VALUES(COM_VAL), USE_YN = VALUES(USE_YN), SORT_ORD = VALUES(SORT_ORD);
++INSERT INTO ju_com_code_detail (GRP_CD, COM_CD, COM_NM, COM_DESC, COM_NM_KEY, COM_DESC_KEY) VALUES
++('MACT','MACT0001','조회','목록·상세·상태 조회','CODE.MACT.MACT0001.NM','CODE.MACT.MACT0001.DESC'),
++('MACT','MACT0002','실행','연결·시작·정지 등 실행','CODE.MACT.MACT0002.NM','CODE.MACT.MACT0002.DESC'),
++('MACT','MACT0003','등록','신규 등록','CODE.MACT.MACT0003.NM','CODE.MACT.MACT0003.DESC'),
++('MACT','MACT0004','수정','기존 정보 수정','CODE.MACT.MACT0004.NM','CODE.MACT.MACT0004.DESC'),
++('MACT','MACT0005','삭제','논리 삭제','CODE.MACT.MACT0005.NM','CODE.MACT.MACT0005.DESC'),
++('MACT','MACT0006','내보내기','파일 내보내기','CODE.MACT.MACT0006.NM','CODE.MACT.MACT0006.DESC')
++  ON DUPLICATE KEY UPDATE COM_NM = VALUES(COM_NM), COM_DESC = VALUES(COM_DESC);
++
++-- 7) 편집 계열을 등록/수정/삭제로 세분화 (MACT0003=등록, MACT0004=수정, MACT0005=삭제)
++UPDATE ju_menu_action SET ACT_KIND = 'MACT0004' WHERE ACT_CD = 'UPDATE' AND ACT_KIND = 'MACT0003';
++UPDATE ju_menu_action SET ACT_KIND = 'MACT0005' WHERE ACT_CD = 'DELETE' AND ACT_KIND = 'MACT0003';
++
++-- 8) 다국어 리소스 (MACT, 장치 Action 이름)
++INSERT INTO ju_multi_lang (LANG_CD, RES_KEY, RES_VAL) VALUES
++('LANG0001','GROUP.MACT.NM','메뉴액션종류'),
++('LANG0002','GROUP.MACT.NM','Menu Action Kind'),
++('LANG0001','CODE.MACT.MACT0001.NM','조회'),
++('LANG0001','CODE.MACT.MACT0002.NM','실행'),
++('LANG0001','CODE.MACT.MACT0003.NM','등록'),
++('LANG0001','CODE.MACT.MACT0004.NM','수정'),
++('LANG0001','CODE.MACT.MACT0005.NM','삭제'),
++('LANG0001','CODE.MACT.MACT0006.NM','내보내기'),
++('LANG0002','CODE.MACT.MACT0001.NM','Search'),
++('LANG0002','CODE.MACT.MACT0002.NM','Execute'),
++('LANG0002','CODE.MACT.MACT0003.NM','Create'),
++('LANG0002','CODE.MACT.MACT0004.NM','Update'),
++('LANG0002','CODE.MACT.MACT0005.NM','Delete'),
++('LANG0002','CODE.MACT.MACT0006.NM','Export'),
++('LANG0001','ACTION.DEVICE.SEARCH.NM','조회'),
++('LANG0001','ACTION.DEVICE.GET.NM','상세조회'),
++('LANG0001','ACTION.DEVICE.CREATE.NM','추가'),
++('LANG0001','ACTION.DEVICE.UPDATE.NM','수정'),
++('LANG0001','ACTION.DEVICE.DELETE.NM','삭제'),
++('LANG0001','ACTION.DEVICE.CONNECT.NM','연결'),
++('LANG0001','ACTION.DEVICE.DISCONNECT.NM','연결해제'),
++('LANG0001','ACTION.DEVICE.STATUS.NM','상태조회'),
++('LANG0001','ACTION.DEVICE.START.NM','시작'),
++('LANG0001','ACTION.DEVICE.STOP.NM','정지'),
++('LANG0002','ACTION.DEVICE.SEARCH.NM','Search'),
++('LANG0002','ACTION.DEVICE.GET.NM','Detail'),
++('LANG0002','ACTION.DEVICE.CREATE.NM','Create'),
++('LANG0002','ACTION.DEVICE.UPDATE.NM','Update'),
++('LANG0002','ACTION.DEVICE.DELETE.NM','Delete'),
++('LANG0002','ACTION.DEVICE.CONNECT.NM','Connect'),
++('LANG0002','ACTION.DEVICE.DISCONNECT.NM','Disconnect'),
++('LANG0002','ACTION.DEVICE.STATUS.NM','Status'),
++('LANG0002','ACTION.DEVICE.START.NM','Start'),
++('LANG0002','ACTION.DEVICE.STOP.NM','Stop')
++  ON DUPLICATE KEY UPDATE RES_VAL = VALUES(RES_VAL);
+diff --git a/database/seed/02_ju_core_seed.sql b/database/seed/02_ju_core_seed.sql
+index 32028a3..71ac585 100644
+--- a/database/seed/02_ju_core_seed.sql
++++ b/database/seed/02_ju_core_seed.sql
+@@ -1,5 +1,5 @@
+ -- ============================================================
+--- JuProvider Baseline V2.2 Seed
++-- JuProvider Baseline V2.3 Seed
+ -- Fresh-install base data only.
+ -- IMPORTANT: pure DML only; no LOCK/DROP/CREATE/ALTER statements.
+ -- ============================================================
+@@ -124,7 +124,13 @@ INSERT INTO `ju_com_code` VALUES
+ ('PSEP','PSEP0002','COMMA',',','YENO0001',20),
+ ('YENO','YENO0000','ALL',NULL,'YENO0001',0),
+ ('YENO','YENO0001','Y',NULL,'YENO0001',1),
+-('YENO','YENO0002','N',NULL,'YENO0001',2);
++('YENO','YENO0002','N',NULL,'YENO0001',2),
++('MACT','MACT0001','01',NULL,'YENO0001',1),
++('MACT','MACT0002','10',NULL,'YENO0001',2),
++('MACT','MACT0003','02',NULL,'YENO0001',3),
++('MACT','MACT0004','04',NULL,'YENO0001',4),
++('MACT','MACT0005','08',NULL,'YENO0001',5),
++('MACT','MACT0006','20',NULL,'YENO0001',6);
+ 
+ -- ju_com_code_detail
+ INSERT INTO `ju_com_code_detail` VALUES
+@@ -228,7 +234,13 @@ INSERT INTO `ju_com_code_detail` VALUES
+ ('PSEP','PSEP0002','COMMA','콤마','CODE.PSEP.PSEP0002.NM','CODE.PSEP.PSEP0002.DESC'),
+ ('YENO','YENO0000','전체','전체/미지정 선택값','CODE.YENO.YENO0000.NM','CODE.YENO.YENO0000.DESC'),
+ ('YENO','YENO0001','예','사용/활성/예','CODE.YENO.YENO0001.NM','CODE.YENO.YENO0001.DESC'),
+-('YENO','YENO0002','아니오','미사용/비활성/아니오','CODE.YENO.YENO0002.NM','CODE.YENO.YENO0002.DESC');
++('YENO','YENO0002','아니오','미사용/비활성/아니오','CODE.YENO.YENO0002.NM','CODE.YENO.YENO0002.DESC'),
++('MACT','MACT0001','조회','목록·상세·상태 조회','CODE.MACT.MACT0001.NM','CODE.MACT.MACT0001.DESC'),
++('MACT','MACT0002','실행','연결·시작·정지 등 실행','CODE.MACT.MACT0002.NM','CODE.MACT.MACT0002.DESC'),
++('MACT','MACT0003','등록','신규 등록','CODE.MACT.MACT0003.NM','CODE.MACT.MACT0003.DESC'),
++('MACT','MACT0004','수정','기존 정보 수정','CODE.MACT.MACT0004.NM','CODE.MACT.MACT0004.DESC'),
++('MACT','MACT0005','삭제','논리 삭제','CODE.MACT.MACT0005.NM','CODE.MACT.MACT0005.DESC'),
++('MACT','MACT0006','내보내기','파일 내보내기','CODE.MACT.MACT0006.NM','CODE.MACT.MACT0006.DESC');
+ 
+ -- ju_com_group
+ INSERT INTO `ju_com_group` VALUES
+@@ -261,7 +273,8 @@ INSERT INTO `ju_com_group` VALUES
+ ('SYSM','YENO0001',3),
+ ('TAGK','YENO0001',205),
+ ('YENO','YENO0001',1),
+-('YSNO','YENO0001',2);
++('YSNO','YENO0001',2),
++('MACT','YENO0001',208);
+ 
+ -- ju_com_group_detail
+ INSERT INTO `ju_com_group_detail` VALUES
+@@ -294,7 +307,8 @@ INSERT INTO `ju_com_group_detail` VALUES
+ ('SYSM','시스템설정','시스템설정','GROUP.SYSM.NM','GROUP.SYSM.DESC'),
+ ('TAGK','태그종류','데이터태그 종류','GROUP.TAGK.NM','GROUP.TAGK.DESC'),
+ ('YENO','예/아니오','예/아니오','GROUP.YENO.NM','GROUP.YENO.DESC'),
+-('YSNO','사용/미사용','사용/미사용','GROUP.YSNO.NM','GROUP.YSNO.DESC');
++('YSNO','사용/미사용','사용/미사용','GROUP.YSNO.NM','GROUP.YSNO.DESC'),
++('MACT','메뉴액션종류','권한 비트를 가진 메뉴 Action 분류. COM_VAL=AUTH_ATTR 비트(16진)','GROUP.MACT.NM','GROUP.MACT.DESC');
+ 
+ -- ju_data_tag
+ INSERT INTO `ju_data_tag` VALUES
+@@ -335,9 +349,9 @@ INSERT INTO `ju_data_group_detail` VALUES
+ -- ju_device
+ INSERT INTO `ju_device` VALUES
+ ('11','DEVI0003','DEVF0000','DEVC0000',NULL,1,1,'YENO0002'),
+-('NET_GTEC01','DEVI0001','DEVF0000','DEVC0000',NULL,1,1,'YENO0002'),
+-('SDEV_GTEC01','DEVI0002','DEVF0001','DEVC0003','GTEC',4,4,'YENO0001'),
+-('VDEV_GTEC01','DEVI0003','DEVF0000','DEVC0000','GTEC',4,4,'YENO0001');
++('NET_GTEC01','DEVI0002','DEVF0000','DEVC0000',NULL,1,1,'YENO0002'),
++('SDEV_GTEC01','DEVI0001','DEVF0001','DEVC0003','GTEC',4,4,'YENO0001'),
++('VDEV_GTEC01','DEVI0000','DEVF0000','DEVC0000','GTEC',4,4,'YENO0001');
+ 
+ -- ju_device_detail
+ INSERT INTO `ju_device_detail` VALUES
+@@ -404,6 +418,33 @@ INSERT INTO `ju_menu` VALUES
+ (28,'M04000000',NULL,'MENU0002',1,NULL,'YENO0001','YENO0001',28),
+ (29,'M04010000',28,'MENU0002',2,'@ai','YENO0001','YENO0001',29);
+ 
++-- ju_menu_action
++-- 시스템장치관리(MNU_ID 15) 화면 Action. ACT_KIND는 공통코드 MACT
++INSERT INTO `ju_menu_action` VALUES
++(1,15,'SEARCH','MACT0001','DEVICE.SEARCH','YENO0001','YENO0001',10),
++(2,15,'GET','MACT0001','DEVICE.GET','YENO0001','YENO0001',20),
++(3,15,'CREATE','MACT0003','DEVICE.CREATE','YENO0001','YENO0001',30),
++(4,15,'UPDATE','MACT0004','DEVICE.UPDATE','YENO0001','YENO0001',40),
++(5,15,'DELETE','MACT0005','DEVICE.DELETE','YENO0001','YENO0001',50),
++(6,15,'CONNECT','MACT0002','DEVICE.CONNECT','YENO0001','YENO0001',60),
++(7,15,'DISCONNECT','MACT0002','DEVICE.DISCONNECT','YENO0001','YENO0001',70),
++(8,15,'STATUS','MACT0001','DEVICE.STATUS','YENO0001','YENO0001',80),
++(9,15,'START','MACT0002','DEVICE.START','YENO0001','YENO0001',90),
++(10,15,'STOP','MACT0002','DEVICE.STOP','YENO0001','YENO0001',100);
++
++-- ju_menu_action_detail
++INSERT INTO `ju_menu_action_detail` VALUES
++(1,'조회','장치 목록을 조회합니다.','ACTION.DEVICE.SEARCH.NM','ACTION.DEVICE.SEARCH.DESC'),
++(2,'상세조회','선택한 장치의 상세정보를 조회합니다.','ACTION.DEVICE.GET.NM','ACTION.DEVICE.GET.DESC'),
++(3,'추가','새로운 장치를 등록합니다.','ACTION.DEVICE.CREATE.NM','ACTION.DEVICE.CREATE.DESC'),
++(4,'수정','선택한 장치정보를 수정합니다.','ACTION.DEVICE.UPDATE.NM','ACTION.DEVICE.UPDATE.DESC'),
++(5,'삭제','선택한 장치를 삭제합니다.','ACTION.DEVICE.DELETE.NM','ACTION.DEVICE.DELETE.DESC'),
++(6,'연결','선택한 장치에 연결합니다.','ACTION.DEVICE.CONNECT.NM','ACTION.DEVICE.CONNECT.DESC'),
++(7,'연결해제','선택한 장치의 연결을 해제합니다.','ACTION.DEVICE.DISCONNECT.NM','ACTION.DEVICE.DISCONNECT.DESC'),
++(8,'상태조회','장치의 현재 상태를 조회합니다.','ACTION.DEVICE.STATUS.NM','ACTION.DEVICE.STATUS.DESC'),
++(9,'시작','장치 데이터 수집을 시작합니다.','ACTION.DEVICE.START.NM','ACTION.DEVICE.START.DESC'),
++(10,'정지','장치 데이터 수집을 정지합니다.','ACTION.DEVICE.STOP.NM','ACTION.DEVICE.STOP.DESC');
++
+ -- ju_menu_detail
+ INSERT INTO `ju_menu_detail` VALUES
+ (1,'시스템관리','시스템관리','MENU.M01000000.NM','MENU.M01000000.DESC'),
+@@ -721,28 +762,62 @@ INSERT INTO `ju_multi_lang` VALUES
+ ('LANG0001','CODE.YENO.YENO0002.DESC','미사용/비활성/아니오'),
+ ('LANG0002','CODE.YENO.YENO0000.DESC','All / unspecified'),
+ ('LANG0002','CODE.YENO.YENO0001.DESC','Use / enabled / yes'),
+-('LANG0002','CODE.YENO.YENO0002.DESC','Unused / disabled / no');
++('LANG0002','CODE.YENO.YENO0002.DESC','Unused / disabled / no'),
++('LANG0001','GROUP.MACT.NM','메뉴액션종류'),
++('LANG0002','GROUP.MACT.NM','Menu Action Kind'),
++('LANG0001','CODE.MACT.MACT0001.NM','조회'),
++('LANG0001','CODE.MACT.MACT0002.NM','실행'),
++('LANG0001','CODE.MACT.MACT0003.NM','등록'),
++('LANG0001','CODE.MACT.MACT0004.NM','수정'),
++('LANG0001','CODE.MACT.MACT0005.NM','삭제'),
++('LANG0001','CODE.MACT.MACT0006.NM','내보내기'),
++('LANG0002','CODE.MACT.MACT0001.NM','Search'),
++('LANG0002','CODE.MACT.MACT0002.NM','Execute'),
++('LANG0002','CODE.MACT.MACT0003.NM','Create'),
++('LANG0002','CODE.MACT.MACT0004.NM','Update'),
++('LANG0002','CODE.MACT.MACT0005.NM','Delete'),
++('LANG0002','CODE.MACT.MACT0006.NM','Export'),
++('LANG0001','ACTION.DEVICE.SEARCH.NM','조회'),
++('LANG0001','ACTION.DEVICE.GET.NM','상세조회'),
++('LANG0001','ACTION.DEVICE.CREATE.NM','추가'),
++('LANG0001','ACTION.DEVICE.UPDATE.NM','수정'),
++('LANG0001','ACTION.DEVICE.DELETE.NM','삭제'),
++('LANG0001','ACTION.DEVICE.CONNECT.NM','연결'),
++('LANG0001','ACTION.DEVICE.DISCONNECT.NM','연결해제'),
++('LANG0001','ACTION.DEVICE.STATUS.NM','상태조회'),
++('LANG0001','ACTION.DEVICE.START.NM','시작'),
++('LANG0001','ACTION.DEVICE.STOP.NM','정지'),
++('LANG0002','ACTION.DEVICE.SEARCH.NM','Search'),
++('LANG0002','ACTION.DEVICE.GET.NM','Detail'),
++('LANG0002','ACTION.DEVICE.CREATE.NM','Create'),
++('LANG0002','ACTION.DEVICE.UPDATE.NM','Update'),
++('LANG0002','ACTION.DEVICE.DELETE.NM','Delete'),
++('LANG0002','ACTION.DEVICE.CONNECT.NM','Connect'),
++('LANG0002','ACTION.DEVICE.DISCONNECT.NM','Disconnect'),
++('LANG0002','ACTION.DEVICE.STATUS.NM','Status'),
++('LANG0002','ACTION.DEVICE.START.NM','Start'),
++('LANG0002','ACTION.DEVICE.STOP.NM','Stop');
+ 
+ -- ju_protocol
+ INSERT INTO `ju_protocol` VALUES
+-('GETC','GETC0000','POLLING',NULL,'S{TEST}[CR][LF]','YENO0002'),
+-('GTEC','GTEC0000','POLLING',NULL,'S{TEST}[CR][LF]','YENO0001'),
+-('GTEC','GTEC0001','POLLING',NULL,'S{10,3}','YENO0001'),
+-('GTEC','GTEC0002','POLLING',NULL,'S{20}','YENO0001'),
+-('GTEC','GTEC0003','POLLING',NULL,'','YENO0001'),
+-('GTEC','GTEC0100','POLLING',NULL,'S{11,1}','YENO0001'),
+-('GTEC','GTEC0101','POLLING',NULL,'S{11,0}','YENO0001'),
+-('GTEC','GTEC0102','POLLING',NULL,'S{11,2}','YENO0001'),
+-('GTEC','GTEC0103','POLLING',NULL,'S{10,0}[CR][LF]','YENO0001'),
+-('GTEC','GTEC0104','POLLING',NULL,'S{11,1}[CR][LF]','YENO0001'),
+-('GTEC','GTEC0105','POLLING',NULL,'S{12,10}[CR][LF]','YENO0001'),
+-('GTEC','GTEC0200','POLLING',NULL,'S{12,0.100}','YENO0001'),
+-('GTEC','GTEC0201','POLLING',NULL,'S{12,0.020}','YENO0001'),
+-('GTEC','GTEC0300','POLLING',NULL,'S{10,1}','YENO0001'),
+-('GTEC','GTEC0301','POLLING',NULL,'S{10,0}','YENO0001'),
+-('GTEC','GTEC0400','POLLING',NULL,'','YENO0001'),
+-('GTEC','GTEC0401','POLLING',NULL,'','YENO0001'),
+-('GTEC','GTEC0402','POLLING',NULL,'','YENO0001');
++('GETC','GETC0000','PROT0000',NULL,'S{TEST}[CR][LF]','YENO0002'),
++('GTEC','GTEC0000','PROT0000',NULL,'S{TEST}[CR][LF]','YENO0001'),
++('GTEC','GTEC0001','PROT0000',NULL,'S{10,3}','YENO0001'),
++('GTEC','GTEC0002','PROT0000',NULL,'S{20}','YENO0001'),
++('GTEC','GTEC0003','PROT0000',NULL,'','YENO0001'),
++('GTEC','GTEC0100','PROT0000',NULL,'S{11,1}','YENO0001'),
++('GTEC','GTEC0101','PROT0000',NULL,'S{11,0}','YENO0001'),
++('GTEC','GTEC0102','PROT0000',NULL,'S{11,2}','YENO0001'),
++('GTEC','GTEC0103','PROT0000',NULL,'S{10,0}[CR][LF]','YENO0001'),
++('GTEC','GTEC0104','PROT0000',NULL,'S{11,1}[CR][LF]','YENO0001'),
++('GTEC','GTEC0105','PROT0000',NULL,'S{12,10}[CR][LF]','YENO0001'),
++('GTEC','GTEC0200','PROT0000',NULL,'S{12,0.100}','YENO0001'),
++('GTEC','GTEC0201','PROT0000',NULL,'S{12,0.020}','YENO0001'),
++('GTEC','GTEC0300','PROT0000',NULL,'S{10,1}','YENO0001'),
++('GTEC','GTEC0301','PROT0000',NULL,'S{10,0}','YENO0001'),
++('GTEC','GTEC0400','PROT0000',NULL,'','YENO0001'),
++('GTEC','GTEC0401','PROT0000',NULL,'','YENO0001'),
++('GTEC','GTEC0402','PROT0000',NULL,'','YENO0001');
+ 
+ -- ju_protocol_group
+ INSERT INTO `ju_protocol_group` VALUES
+@@ -792,7 +867,7 @@ INSERT INTO `ju_sys` VALUES
+ ('CLIENT_PROJECT_PATH','project','YENO0001'),
+ ('DEPLOY_MODE','SELF_CONTAINED','YENO0001'),
+ ('DEVICE_LOG_PATH','logs/device','YENO0001'),
+-('DOTNET_VERSION','9.0','YENO0001'),
++('DOTNET_VERSION','10.0','YENO0001'),
+ ('SYSM0001','KO','YENO0001'),
+ ('UPDATE_CHECK_MODE','FULL_AND_MODULE','YENO0001');
+ 
+@@ -809,4 +884,14 @@ INSERT INTO `ju_sys_detail` VALUES
+ ('SYSM0001','다국어 기본언어','기본 표시 언어','SYS.SYSM0001.NM','SYS.SYSM0001.DESC'),
+ ('UPDATE_CHECK_MODE','업데이트 확인방식','전체 ZIP 버전 + 개별 EXE/DLL FileVersion 비교','SYS.UPDATE_CHECK_MODE.NM','SYS.UPDATE_CHECK_MODE.DESC');
+ 
++-- ju_user
++-- 초기 관리자. 초기 비밀번호는 저장소에 기록하지 않는다(설치 담당자에게 별도 전달).
++-- ju_user_detail.PW_CHANGE_DT가 NULL이면 첫 로그인 후 비밀번호 변경을 강제한다.
++INSERT INTO `ju_user` VALUES
++(1,'admin','$2a$10$Ad/VeiYXigyd5e3ufI3t/uy4kULBx06kXQGO2ejDaN3xXMhra.Kg.',1,'YENO0001');
++
++-- ju_user_detail
++INSERT INTO `ju_user_detail` VALUES
++(1,'관리자',NULL,NULL,NULL,0,NULL,NULL);
++
+ SET FOREIGN_KEY_CHECKS=1;
