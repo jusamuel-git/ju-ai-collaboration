@@ -8,7 +8,7 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 | 구분 | 문서 |
 |---|---|
 | 협업 규칙 | [AI_COLLABORATION.md](AI_COLLABORATION.md) (v1.3) |
-| 설계 | [architecture/DB_CORE_API.md](architecture/DB_CORE_API.md) (ChatGPT v1.2 — v1.3 재설계 검토 중) |
+| 설계 | [architecture/DB_CORE_API.md](architecture/DB_CORE_API.md) (ChatGPT v1.2 — v1.3 재설계 승인, 단계별 구현 중) |
 | 유효한 결정 | [decisions/CURRENT.md](decisions/CURRENT.md) |
 | 지금 할 일 | [worklog/CURRENT.md](worklog/CURRENT.md) |
 | 개발 환경 | [environment/DEV_ENVIRONMENT_STANDARD.md](environment/DEV_ENVIRONMENT_STANDARD.md) |
@@ -17,9 +17,9 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 
 ## 지금 진행 중
 
-1. ChatGPT 재설계 v1.3: [reviews/chatgpt/2026-10-26_redesign_v1.3.md](reviews/chatgpt/2026-10-26_redesign_v1.3.md)
-2. **Claude 역검토 (완료)**: [reviews/claude/2026-10-26_redesign_v1.3_review.md](reviews/claude/2026-10-26_redesign_v1.3_review.md)
-3. 다음: ChatGPT 재검토 → 사용자 승인 → ENV-0부터 단계별 구현
+1. ChatGPT 재설계 v1.3 → Claude 역검토 → **ChatGPT 승인 (8개 보정)**
+2. **ENV-0 구현 완료 (미커밋)**: [reviews/claude/2026-10-26_env-0_result.md](reviews/claude/2026-10-26_env-0_result.md) — 환경검사 FAIL 0, 로컬 빌드 5종 PASS
+3. 다음: ChatGPT diff 검토 → Jenkins `JU_TOMCAT_HOME` 추가 → 사용자 commit/push → Jenkins `main` 확인 → JU-0A
 
 ## 제품 저장소
 
