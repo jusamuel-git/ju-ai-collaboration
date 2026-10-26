@@ -1,0 +1,32 @@
+diff --git a/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs b/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs
+index b41bd2d..302af83 100644
+--- a/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs
++++ b/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs
+@@ -7,6 +7,9 @@ namespace JuProvider.Terminal.Runtime;
+ 
+ public sealed class DeviceRuntimeManager
+ {
++    // 장치유형 공통코드(DEVI): DEVI0000=VIRTUAL, DEVI0001=SERIAL, DEVI0002=NETWORK, DEVI0003=NETWORK_GATEWAY
++    private const string DeviceTypeVirtual = "DEVI0000";
++
+     public event Action<string, string>? DataReceived;
+ 
+     private readonly ConcurrentDictionary<string, VirtualDeviceRuntime>
+@@ -45,7 +48,7 @@ public sealed class DeviceRuntimeManager
+                 (_, _) => device
+             );
+ 
+-            if (device.DevType == "DEVI0003")
++            if (device.DevType == DeviceTypeVirtual)
+             {
+                 _virtualDevices.AddOrUpdate(
+                     devCd,
+@@ -162,7 +165,7 @@ public sealed class DeviceRuntimeManager
+          * 현재 단계에서는 Virtual Device만 구현.
+          * Serial/Network는 이후 같은 위치에 추가한다.
+          */
+-        if (device.DevType == "DEVI0003")
++        if (device.DevType == DeviceTypeVirtual)
+         {
+             if (!_virtualDevices.TryGetValue(
+                 deviceCode,

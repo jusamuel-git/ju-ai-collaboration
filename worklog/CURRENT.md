@@ -1,19 +1,21 @@
-# 지금 할 일 (2026-10-26 14:30 기준)
+# 지금 할 일 (2026-10-26 15:10 기준)
 
-단계 계획: v1.3 — ENV-0 → **JU-0A** → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C → JU-1c Desktop
+단계 계획: v1.3 — ENV-0 → JU-0A → **JU-0B** → SYS-01 → JU-1A → JU-1B → JU-1C → JU-1c Desktop
 (JU-1A/1B/1C는 로컬 commit을 나누고, 1C까지 로컬 Build/Smoke 후 함께 push — ChatGPT 보정 R1)
 
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT | JU-0A diff 검토: [reviews/claude/2026-10-26_ju-0a_result.md](../reviews/claude/2026-10-26_ju-0a_result.md) |
-| ChatGPT | JU-0A 테스트 DB 결과 확인 → 최종 승인: [reviews/claude/2026-10-26_ju-0a_db_test.md](../reviews/claude/2026-10-26_ju-0a_db_test.md) |
+| ChatGPT | JU-0B 검토: [reviews/claude/2026-10-26_ju-0b_result.md](../reviews/claude/2026-10-26_ju-0b_result.md) |
+| 사용자 | JU-0B 승인 후 commit → juprovider `main` push (JU-0A `5dcc603` + JU-0B 함께 권장) → Jenkins `juprovider-ai` 빌드 |
+| 사용자 | 테스트 DB 3개 삭제 여부 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
 ## 미커밋 변경의 위치
 | 작업 | 위치 | 상태 |
 |---|---|---|
-| JU-0A (juprovider database) | **PC-A `feature/ju-0a`** | 로컬 빌드 5종 PASS, 검토 대기 |
+| JU-0A | PC-A `main` `5dcc603` 로컬 commit, **실제 DB 04 적용 완료** (백업 `C:\MyData\MyDev\backup`) | push 대기 |
+| JU-0B | **PC-A `feature/ju-0b`** 미커밋 | 빌드 PASS, smoke PASS, 검토 대기 |
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 재사용 후보. PC-A 미적용 |
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | 재사용 후보. PC-A 미적용 |
 
@@ -22,3 +24,4 @@
 - 2026-10-26 14:28 PC-A `feature/ju-0a`: 로컬 빌드 5종 PASS
 - 2026-10-26 14:40 **ENV-0 완료**: Jenkins `juprovider-ai` #12 (`e36a0ed`, `HTTP_PORT` 8081·Health Check OK), `juproject-ai` #2 (`50d7ac3`, SDK 10.0.402) SUCCESS
 - 2026-10-26 14:59 JU-0A 테스트 DB 검증 PASS (신규 설치 = 기존 설치+04 = PC-A 사본+04, 04 재실행 무변경)
+- 2026-10-26 15:08 JU-0A 실제 DB 04 적용(백업 후) = 신규 설치 동일. JU-0B smoke PASS
