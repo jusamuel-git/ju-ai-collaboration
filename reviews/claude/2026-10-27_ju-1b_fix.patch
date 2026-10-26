@@ -1,0 +1,96 @@
+diff --git a/database/README.md b/database/README.md
+index 1ee6fae..ccfe1b9 100644
+--- a/database/README.md
++++ b/database/README.md
+@@ -62,5 +62,6 @@ mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
+ 1. 어드민으로 로그인해서 토큰을 받는다 (`POST /juprovider/api/auth/login`, 최초 비밀번호 변경 후).
+ 2. `POST /juprovider/api/admin/clients` `{"clientId":"PC01","clientName":"실험실 PC"}` → 응답의 `clientKey`는 이때 한 번만 보인다 (서버에는 SHA-256 해시만 저장).
+ 3. Desktop `{app}\config\client.json`에 `ServerUrl`, `ClientId`, `ClientKey`를 넣는다 (저장소에 올리지 않음).
+-4. 키를 잃어버리면 `POST /juprovider/api/admin/clients/{clientId}/key`로 재발급 (이전 키는 즉시 무효). `DELETE …/{clientId}`는 사용 중지.
++4. 키를 잃어버리면 `POST /juprovider/api/admin/clients/{clientId}/key`로 재발급 (이전 키는 즉시 무효, **사용 중인 Client만**). `DELETE …/{clientId}`는 사용 중지.
++   사용 중지된 Client를 다시 쓰려면 같은 `clientId`로 2번 등록을 다시 한다 (새 키 발급).
+ 5. `/juprovider/api/core/sync/**`는 헤더 `X-JU-Client-Id`, `X-JU-Client-Key`가 맞아야 한다 (아니면 401).
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java
+index ec6f686..cacdef9 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java
+@@ -22,11 +22,16 @@ public interface ClientDao {
+             @Param("clientName") String clientName,
+             @Param("clientDescription") String clientDescription);
+ 
+-    /** 키 재발급. 논리 삭제된 Client는 다시 사용으로 바꾼다 (재활성화). */
++    /** 키 재발급. 사용 중인 Client만 바뀐다 (사용 중지 Client는 0건). */
+     int updateClientKey(
+             @Param("clientId") String clientId,
+             @Param("keyHash") String keyHash);
+ 
++    /** 명시적 재등록: 사용 중지된 Client를 새 키로 다시 사용한다. */
++    int reactivateClient(
++            @Param("clientId") String clientId,
++            @Param("keyHash") String keyHash);
++
+     int updateUseYn(
+             @Param("clientId") String clientId,
+             @Param("useYn") String useYn);
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java
+index 88471b1..fc01f92 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java
+@@ -21,7 +21,8 @@ import com.asdp.juprovider.core.client.dto.JuClient;
+  *
+  * - 키는 서버가 만든 32바이트 난수(Base64URL)이고, DB에는 SHA-256 해시만 저장한다.
+  * - 키 원문은 발급/재발급 응답에서 한 번만 돌려준다.
+- * - 삭제는 논리 삭제(USE_YN=YENO0002). 같은 CLIENT_ID를 다시 등록하면 새 키로 재활성화한다.
++ * - 삭제는 논리 삭제(USE_YN=YENO0002). 사용 중지된 Client는 같은 CLIENT_ID로 명시적으로 다시 등록할 때만
++ *   새 키로 재활성화한다. 키 재발급은 사용 중인 Client만 가능하다.
+  */
+ @Service
+ public class ClientService {
+@@ -61,7 +62,7 @@ public class ClientService {
+         if (existing == null) {
+             clientDao.insertClient(id, hash(key));
+         } else {
+-            clientDao.updateClientKey(id, hash(key));
++            clientDao.reactivateClient(id, hash(key));
+         }
+ 
+         clientDao.upsertClientDetail(
+@@ -81,8 +82,15 @@ public class ClientService {
+             throw new IllegalArgumentException("등록되지 않은 Client입니다: " + id);
+         }
+ 
++        if (!USE_YES.equals(existing.getUseYn())) {
++            throw new IllegalArgumentException(
++                    "사용 중지된 Client입니다. 다시 사용하려면 재등록하세요: " + id);
++        }
+         String key = newKey();
+-        clientDao.updateClientKey(id, hash(key));
++        if (clientDao.updateClientKey(id, hash(key)) == 0) {
++            throw new IllegalArgumentException(
++                    "사용 중지된 Client입니다. 다시 사용하려면 재등록하세요: " + id);
++        }
+         return new IssuedClientKey(id, key);
+     }
+ 
+diff --git a/juprovider.core/src/main/resources/mapper/ClientMapper.xml b/juprovider.core/src/main/resources/mapper/ClientMapper.xml
+index 078826d..e54fe56 100644
+--- a/juprovider.core/src/main/resources/mapper/ClientMapper.xml
++++ b/juprovider.core/src/main/resources/mapper/ClientMapper.xml
+@@ -72,7 +72,17 @@
+             CLIENT_DESC = VALUES(CLIENT_DESC)
+     </insert>
+ 
++    <!-- 키 재발급: 사용 중인 Client만. USE_YN은 바꾸지 않는다 -->
+     <update id="updateClientKey">
++        UPDATE ju_client
++           SET KEY_HASH = #{keyHash},
++               KEY_ISSUED_DT = CURRENT_TIMESTAMP(3)
++         WHERE CLIENT_ID = #{clientId}
++           AND USE_YN = 'YENO0001'
++    </update>
++
++    <!-- 명시적 재등록: 사용 중지된 Client를 새 키로 다시 사용 -->
++    <update id="reactivateClient">
+         UPDATE ju_client
+            SET KEY_HASH = #{keyHash},
+                KEY_ISSUED_DT = CURRENT_TIMESTAMP(3),

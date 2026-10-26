@@ -1,5 +1,5 @@
 diff --git a/database/README.md b/database/README.md
-index aa626e4..1ee6fae 100644
+index aa626e4..ccfe1b9 100644
 --- a/database/README.md
 +++ b/database/README.md
 @@ -21,6 +21,7 @@ mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
@@ -10,7 +10,7 @@ index aa626e4..1ee6fae 100644
  
  ## 초기 관리자
  
-@@ -39,4 +40,27 @@ mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
+@@ -39,4 +40,28 @@ mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
  | MACT0002 | 실행 | 10 |
  | MACT0006 | 내보내기 | 20 |
  
@@ -37,7 +37,8 @@ index aa626e4..1ee6fae 100644
 +1. 어드민으로 로그인해서 토큰을 받는다 (`POST /juprovider/api/auth/login`, 최초 비밀번호 변경 후).
 +2. `POST /juprovider/api/admin/clients` `{"clientId":"PC01","clientName":"실험실 PC"}` → 응답의 `clientKey`는 이때 한 번만 보인다 (서버에는 SHA-256 해시만 저장).
 +3. Desktop `{app}\config\client.json`에 `ServerUrl`, `ClientId`, `ClientKey`를 넣는다 (저장소에 올리지 않음).
-+4. 키를 잃어버리면 `POST /juprovider/api/admin/clients/{clientId}/key`로 재발급 (이전 키는 즉시 무효). `DELETE …/{clientId}`는 사용 중지.
++4. 키를 잃어버리면 `POST /juprovider/api/admin/clients/{clientId}/key`로 재발급 (이전 키는 즉시 무효, **사용 중인 Client만**). `DELETE …/{clientId}`는 사용 중지.
++   사용 중지된 Client를 다시 쓰려면 같은 `clientId`로 2번 등록을 다시 한다 (새 키 발급).
 +5. `/juprovider/api/core/sync/**`는 헤더 `X-JU-Client-Id`, `X-JU-Client-Key`가 맞아야 한다 (아니면 401).
 diff --git a/database/baseline/01_ju_core_baseline.sql b/database/baseline/01_ju_core_baseline.sql
 index b4675a7..d13afd9 100644
@@ -823,10 +824,10 @@ index f265a91..8e3c27d 100644
                  menuService.getMenu(
 diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java
 new file mode 100644
-index 0000000..ec6f686
+index 0000000..cacdef9
 --- /dev/null
 +++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,41 @@
 +package com.asdp.juprovider.core.client.dao;
 +
 +import java.util.List;
@@ -851,8 +852,13 @@ index 0000000..ec6f686
 +            @Param("clientName") String clientName,
 +            @Param("clientDescription") String clientDescription);
 +
-+    /** 키 재발급. 논리 삭제된 Client는 다시 사용으로 바꾼다 (재활성화). */
++    /** 키 재발급. 사용 중인 Client만 바뀐다 (사용 중지 Client는 0건). */
 +    int updateClientKey(
++            @Param("clientId") String clientId,
++            @Param("keyHash") String keyHash);
++
++    /** 명시적 재등록: 사용 중지된 Client를 새 키로 다시 사용한다. */
++    int reactivateClient(
 +            @Param("clientId") String clientId,
 +            @Param("keyHash") String keyHash);
 +
@@ -969,10 +975,10 @@ index 0000000..f98d1c2
 +}
 diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java
 new file mode 100644
-index 0000000..88471b1
+index 0000000..fc01f92
 --- /dev/null
 +++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,157 @@
 +package com.asdp.juprovider.core.client.service;
 +
 +import java.nio.charset.StandardCharsets;
@@ -996,7 +1002,8 @@ index 0000000..88471b1
 + *
 + * - 키는 서버가 만든 32바이트 난수(Base64URL)이고, DB에는 SHA-256 해시만 저장한다.
 + * - 키 원문은 발급/재발급 응답에서 한 번만 돌려준다.
-+ * - 삭제는 논리 삭제(USE_YN=YENO0002). 같은 CLIENT_ID를 다시 등록하면 새 키로 재활성화한다.
++ * - 삭제는 논리 삭제(USE_YN=YENO0002). 사용 중지된 Client는 같은 CLIENT_ID로 명시적으로 다시 등록할 때만
++ *   새 키로 재활성화한다. 키 재발급은 사용 중인 Client만 가능하다.
 + */
 +@Service
 +public class ClientService {
@@ -1036,7 +1043,7 @@ index 0000000..88471b1
 +        if (existing == null) {
 +            clientDao.insertClient(id, hash(key));
 +        } else {
-+            clientDao.updateClientKey(id, hash(key));
++            clientDao.reactivateClient(id, hash(key));
 +        }
 +
 +        clientDao.upsertClientDetail(
@@ -1056,8 +1063,15 @@ index 0000000..88471b1
 +            throw new IllegalArgumentException("등록되지 않은 Client입니다: " + id);
 +        }
 +
++        if (!USE_YES.equals(existing.getUseYn())) {
++            throw new IllegalArgumentException(
++                    "사용 중지된 Client입니다. 다시 사용하려면 재등록하세요: " + id);
++        }
 +        String key = newKey();
-+        clientDao.updateClientKey(id, hash(key));
++        if (clientDao.updateClientKey(id, hash(key)) == 0) {
++            throw new IllegalArgumentException(
++                    "사용 중지된 Client입니다. 다시 사용하려면 재등록하세요: " + id);
++        }
 +        return new IssuedClientKey(id, key);
 +    }
 +
@@ -1412,10 +1426,10 @@ index 0000000..f4834f1
 +}
 diff --git a/juprovider.core/src/main/resources/mapper/ClientMapper.xml b/juprovider.core/src/main/resources/mapper/ClientMapper.xml
 new file mode 100644
-index 0000000..078826d
+index 0000000..e54fe56
 --- /dev/null
 +++ b/juprovider.core/src/main/resources/mapper/ClientMapper.xml
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,105 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 +        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
@@ -1490,7 +1504,17 @@ index 0000000..078826d
 +            CLIENT_DESC = VALUES(CLIENT_DESC)
 +    </insert>
 +
++    <!-- 키 재발급: 사용 중인 Client만. USE_YN은 바꾸지 않는다 -->
 +    <update id="updateClientKey">
++        UPDATE ju_client
++           SET KEY_HASH = #{keyHash},
++               KEY_ISSUED_DT = CURRENT_TIMESTAMP(3)
++         WHERE CLIENT_ID = #{clientId}
++           AND USE_YN = 'YENO0001'
++    </update>
++
++    <!-- 명시적 재등록: 사용 중지된 Client를 새 키로 다시 사용 -->
++    <update id="reactivateClient">
 +        UPDATE ju_client
 +           SET KEY_HASH = #{keyHash},
 +               KEY_ISSUED_DT = CURRENT_TIMESTAMP(3),
