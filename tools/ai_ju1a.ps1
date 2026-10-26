@@ -40,9 +40,9 @@ Run $jp 'git status --short' | Out-Null
 
 Log ''; Log '===== 3. 로컬 빌드 5종 (backend 테스트 포함) ====='
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ws 'ai_local_build.ps1') *>&1 | Out-Null
-$bl = Get-Content (Join-Path $ws ("ai_local_build_{0}.log" -f $env:COMPUTERNAME))
+$bl = Get-Content -Encoding UTF8 (Join-Path $ws ("ai_local_build_{0}.log" -f $env:COMPUTERNAME))
 $sumIdx = [Array]::IndexOf($bl, '===== 요약 ====='); $bl[$sumIdx..($bl.Length - 1)] | ForEach-Object { Log ('  ' + $_) }
-Check '로컬 빌드 5종' (@($bl[$sumIdx..($bl.Length - 1)] | Select-String 'FAIL|SKIP').Count -eq 0) ''
+Check '로컬 빌드 5종' (@($bl[$sumIdx..($bl.Length - 1)] | Select-String -CaseSensitive '\bFAIL\b|\bSKIP\b').Count -eq 0) ''
 $tests = $bl | Select-String 'Tests run:.*JwtConfigTest|Tests run: \d+, Failures' | Select-Object -Last 1
 Log ("  테스트: " + $tests)
 $war = Join-Path $jp 'juprovider.backend\target\juprovider.war'
