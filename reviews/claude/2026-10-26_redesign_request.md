@@ -2,12 +2,26 @@
 
 - 목적: 10/25 진행한 v1.2 설계·구현을 **오늘 확정된 환경 기준**으로 다시 설계하기 위한 입력 자료
 - 진행 방식: Claude 조사(이 문서) → **ChatGPT 재설계** → Claude 역검토 → 사용자 결정 → Claude 구현·로컬 빌드 → ChatGPT diff 검토 → 사용자 commit/push → Jenkins main 확인
-- 함께 볼 문서 (workspace, 저장소 밖)
-  - `DEV_ENVIRONMENT_STANDARD.md`: 개발 PC 기준
-  - `BUILD_ENVIRONMENT_STANDARD.md`: 빌드 기준
-  - `ai_dev_env_standard_report_2026-10-26.md`: 환경 조사 보고
-  - `ai_decisions_v1.2_2026-10-25.md`: 10/25 사용자 결정 기록
-  - `AI_ARCHITECTURE_DB_CORE_API_v1.2.md`: ChatGPT 설계 v1.2
+- 함께 볼 문서 (이 저장소 기준 경로)
+  - `README.md` — 진입점
+  - `decisions/CURRENT.md` — 지금 유효한 결정 (10/25 결정 + 10/26 운영 결정)
+  - `architecture/DB_CORE_API.md` — ChatGPT 설계 v1.2 (재설계 대상)
+  - `environment/PC_A.md` — 기준 개발 PC 실측
+  - `environment/DEV_ENVIRONMENT_STANDARD.md`, `environment/BUILD_ENVIRONMENT_STANDARD.md`
+  - `reviews/claude/2026-10-26_ju0_ju1_sys_change_report.md` — 10/25 구현 변경 상세 (파일·API·DB·보안)
+  - `reviews/claude/2026-10-25_system_architecture_status.md`, `2026-10-25_juproject_db_status.md` — 구조·DB 조사
+  - 제품 소스: `jusamuel-git/juprovider`, `jusamuel-git/juproject` (`main`). 10/25 구현은 아직 `main`에 없다
+
+### ChatGPT 읽는 순서
+1. 이 문서
+2. `decisions/CURRENT.md`
+3. `environment/PC_A.md`
+4. `reviews/claude/2026-10-26_ju0_ju1_sys_change_report.md`
+5. `architecture/DB_CORE_API.md`
+
+### 결과를 돌려주는 방법
+- 재설계 결과는 Markdown 한 파일로 주세요. 사용자가 Claude에 전달하면 Claude가 `reviews/chatgpt/2026-10-26_redesign_v1.3.md`로 원문 저장하고, 확정되면 `architecture/DB_CORE_API.md`를 갱신합니다.
+- 결정이 필요한 항목은 선택지와 권장안을 함께 적어 주세요. 사용자 결정은 `decisions/CURRENT.md`에 기록합니다.
 
 ---
 
@@ -20,7 +34,8 @@
 | 환경 점검 | `ai_dev_env_check.ps1`: FAIL 0 (Tool 버전·PATH 정상) |
 | 로컬 빌드 | **5개 대상 모두 PASS** (core install, backend+Vue WAR, desktop, juproject backend, juproject frontend) |
 | 빌드 검증 방법 | 구현 → **PC-A 로컬 빌드**(`ai_local_build.ps1`) → ChatGPT 검토 → 승인 → commit/push → Jenkins `main` 최종 확인. Jenkins Job은 바꾸지 않는다 |
-| Claude 실행 능력 (PC-A) | 파일 읽기·쓰기 가능. 명령 직접 실행 불가. 빌드는 `run_ai_local_build.cmd` 더블클릭으로 실행하고 로그를 읽는다 |
+| Claude 실행 능력 (PC-A) | 파일 읽기·쓰기 가능. 명령 직접 실행 불가. 빌드는 `tools/run_ai_local_build.cmd` 더블클릭으로 실행하고 로그를 읽는다 |
+| 협업 문서 | 이 저장소(ju-ai-collaboration, 공개)가 설계·결정·검토의 Source of Truth. Claude가 직접 commit/push |
 
 ## 2. 10/25 작업의 현재 위치
 
