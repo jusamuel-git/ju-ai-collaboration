@@ -20,8 +20,8 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 
 1. ChatGPT 재설계 v1.3 → Claude 역검토 → **ChatGPT 승인 (8개 보정)**
 2. ENV-0: **완료** (main push, Jenkins 2개 SUCCESS)
-3. JU-0A: 승인·실제 DB 적용·로컬 commit (push 대기)
-4. **JU-0B 구현 완료 (미커밋)**: [reviews/claude/2026-10-26_ju-0b_result.md](reviews/claude/2026-10-26_ju-0b_result.md)
+3. JU-0A·JU-0B: **완료** (`03f636c` push, Jenkins #13 SUCCESS, PC-A DB 04 적용)
+4. 다음: SYS-01
 
 ## 제품 저장소
 
