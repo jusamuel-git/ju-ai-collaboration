@@ -1,0 +1,1553 @@
+diff --git a/database/README.md b/database/README.md
+index aa626e4..1ee6fae 100644
+--- a/database/README.md
++++ b/database/README.md
+@@ -21,6 +21,7 @@ mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
+ | 파일 | 대상 | 내용 |
+ |---|---|---|
+ | `migration/04_ju0_install_fix.sql` | seed V2.2로 설치한 DB | 프로토콜 유형 코드, .NET 버전, 장치 유형 코드 정정, 초기 관리자 생성(사용자가 없을 때만), `ju_menu_action`(+detail), 메뉴 Action 종류 공통코드 MACT |
++| `migration/05_ju1_auth.sql` | 04 적용 DB | `ju_client`(+detail) 생성, `AUTH_ATTR`를 메뉴코드+권한비트 형식으로 변환 (재실행 안전) |
+ 
+ ## 초기 관리자
+ 
+@@ -39,4 +40,27 @@ mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
+ | MACT0002 | 실행 | 10 |
+ | MACT0006 | 내보내기 | 20 |
+ 
+-- `ju_menu_action.ACT_KIND`가 이 코드를 쓴다. 권한 비트를 `AUTH_ATTR`에서 쓰는 것은 JU-1부터다 (현재 `AUTH_ATTR`는 9자리 메뉴코드 형식 유지).
++- `ju_menu_action.ACT_KIND`가 이 코드를 쓴다. 권한 비트는 아래 `AUTH_ATTR`에서 쓴다.
++
++## 권한 (`ju_auth.AUTH_ATTR`)
++
++- JSON 문자열 배열. 항목 = 메뉴코드(9자리) + 권한 비트(16진 2자리). 예: `["M01000000FF","M0201020001"]`
++- 비트는 위 `MACT`의 COM_VAL. 어드민(AUTH0001) 초기값 `FF`, 그 외 `01`(조회)
++- Menu Action 실행 허용: `메뉴 비트 & Action의 ACT_KIND 비트 != 0`
++- 비트 없는 9자리 항목(이전 형식)은 메뉴 표시만 허용
++- 권한은 요청마다 DB에서 읽으므로 바꾸면 바로 적용된다
++
++## 서버 실행 설정 (Tomcat `bin\setenv.bat`, 저장소 밖)
++
++| 변수 | 용도 |
++|---|---|
++| `JU_DB_URL`, `JU_DB_USER`, `JU_DB_PASSWORD` | DB 접속 |
++| `JU_JWT_SECRET` | 사용자 토큰 서명키 (32바이트 이상 임의 문자열). **없거나 짧으면 서버가 시작되지 않는다** (개발 PC의 `dev` profile만 임시 키 허용) |
++
++## Desktop Client 등록
++
++1. 어드민으로 로그인해서 토큰을 받는다 (`POST /juprovider/api/auth/login`, 최초 비밀번호 변경 후).
++2. `POST /juprovider/api/admin/clients` `{"clientId":"PC01","clientName":"실험실 PC"}` → 응답의 `clientKey`는 이때 한 번만 보인다 (서버에는 SHA-256 해시만 저장).
++3. Desktop `{app}\config\client.json`에 `ServerUrl`, `ClientId`, `ClientKey`를 넣는다 (저장소에 올리지 않음).
++4. 키를 잃어버리면 `POST /juprovider/api/admin/clients/{clientId}/key`로 재발급 (이전 키는 즉시 무효). `DELETE …/{clientId}`는 사용 중지.
++5. `/juprovider/api/core/sync/**`는 헤더 `X-JU-Client-Id`, `X-JU-Client-Key`가 맞아야 한다 (아니면 401).
+diff --git a/database/baseline/01_ju_core_baseline.sql b/database/baseline/01_ju_core_baseline.sql
+index b4675a7..d13afd9 100644
+--- a/database/baseline/01_ju_core_baseline.sql
++++ b/database/baseline/01_ju_core_baseline.sql
+@@ -1,5 +1,5 @@
+ -- ============================================================
+--- JuProvider DB Baseline V2.3 (2026-10-26 JU-0A: ju_menu_action(+detail) 추가)
++-- JuProvider DB Baseline V2.4 (2026-10-26 JU-0A: ju_menu_action(+detail) / 2026-10-27 JU-1B: ju_client(+detail), AUTH_ATTR 권한 비트)
+ -- 2026-10-16
+ -- MariaDB 10.6+
+ -- Principles:
+@@ -16,7 +16,7 @@ SET FOREIGN_KEY_CHECKS=0;
+ CREATE TABLE `ju_auth` (
+   `AUTH_ID` bigint(20) NOT NULL AUTO_INCREMENT COMMENT 'JuProvider 권한 식별키',
+   `AUTH_TYPE` varchar(8) NOT NULL COMMENT '권한 유형',
+-  `AUTH_ATTR` longtext DEFAULT NULL COMMENT '메뉴/기능 권한 JSON',
++  `AUTH_ATTR` longtext DEFAULT NULL COMMENT '메뉴 권한 JSON 배열. 항목=메뉴코드(9)+권한비트(16진 2자리, MACT.COM_VAL)',
+   `USE_YN` varchar(8) NOT NULL DEFAULT 'YENO0001' COMMENT '사용여부 공통코드(YENO)',
+   PRIMARY KEY (`AUTH_ID`)
+ ) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='JuProvider 권한';
+@@ -32,6 +32,24 @@ CREATE TABLE `ju_auth_detail` (
+   CONSTRAINT `FK_AUTH_DTL` FOREIGN KEY (`AUTH_ID`) REFERENCES `ju_auth` (`AUTH_ID`) ON DELETE CASCADE
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='권한 표시정보';
+ 
++CREATE TABLE `ju_client` (
++  `CLIENT_ID` varchar(100) NOT NULL COMMENT 'Desktop Client 식별자',
++  `KEY_HASH` varchar(64) NOT NULL COMMENT 'Client 키 SHA-256 해시(16진). 키 원문은 저장하지 않음',
++  `USE_YN` varchar(8) NOT NULL DEFAULT 'YENO0001' COMMENT '사용여부 공통코드(YENO)',
++  `KEY_ISSUED_DT` datetime(3) NOT NULL DEFAULT current_timestamp(3) COMMENT '키 발급 일시',
++  `LAST_SEEN_DT` datetime(3) DEFAULT NULL COMMENT '마지막 인증 성공 일시',
++  `CREATED_DT` datetime(3) NOT NULL DEFAULT current_timestamp(3) COMMENT '등록 일시',
++  PRIMARY KEY (`CLIENT_ID`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Desktop Client 인증';
++
++CREATE TABLE `ju_client_detail` (
++  `CLIENT_ID` varchar(100) NOT NULL COMMENT 'Desktop Client 식별자',
++  `CLIENT_NM` varchar(100) NOT NULL COMMENT 'Client 표시명',
++  `CLIENT_DESC` varchar(500) DEFAULT NULL COMMENT 'Client 설명(설치 위치 등)',
++  PRIMARY KEY (`CLIENT_ID`),
++  CONSTRAINT `FK_CLIENT_DTL` FOREIGN KEY (`CLIENT_ID`) REFERENCES `ju_client` (`CLIENT_ID`) ON DELETE CASCADE
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Desktop Client 표시정보';
++
+ CREATE TABLE `ju_client_audit_hist` (
+   `HIST_ID` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '서버 업무이력 식별키',
+   `CLIENT_ID` varchar(100) NOT NULL COMMENT 'Client 식별자',
+diff --git a/database/migration/05_ju1_auth.sql b/database/migration/05_ju1_auth.sql
+new file mode 100644
+index 0000000..5ba7841
+--- /dev/null
++++ b/database/migration/05_ju1_auth.sql
+@@ -0,0 +1,42 @@
++-- ============================================================
++-- JU-1 인증/권한: 기존 설치 DB 보정
++-- 2026-10-25
++-- 04_ju0_install_fix.sql 다음에 실행한다. 여러 번 실행해도 결과가 같다.
++-- ============================================================
++SET NAMES utf8mb4;
++
++-- 1) Desktop Client 인증 테이블
++CREATE TABLE IF NOT EXISTS `ju_client` (
++  `CLIENT_ID` varchar(100) NOT NULL COMMENT 'Desktop Client 식별자',
++  `KEY_HASH` varchar(64) NOT NULL COMMENT 'Client 키 SHA-256 해시(16진). 키 원문은 저장하지 않음',
++  `USE_YN` varchar(8) NOT NULL DEFAULT 'YENO0001' COMMENT '사용여부 공통코드(YENO)',
++  `KEY_ISSUED_DT` datetime(3) NOT NULL DEFAULT current_timestamp(3) COMMENT '키 발급 일시',
++  `LAST_SEEN_DT` datetime(3) DEFAULT NULL COMMENT '마지막 인증 성공 일시',
++  `CREATED_DT` datetime(3) NOT NULL DEFAULT current_timestamp(3) COMMENT '등록 일시',
++  PRIMARY KEY (`CLIENT_ID`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Desktop Client 인증';
++
++CREATE TABLE IF NOT EXISTS `ju_client_detail` (
++  `CLIENT_ID` varchar(100) NOT NULL COMMENT 'Desktop Client 식별자',
++  `CLIENT_NM` varchar(100) NOT NULL COMMENT 'Client 표시명',
++  `CLIENT_DESC` varchar(500) DEFAULT NULL COMMENT 'Client 설명(설치 위치 등)',
++  PRIMARY KEY (`CLIENT_ID`),
++  CONSTRAINT `FK_CLIENT_DTL` FOREIGN KEY (`CLIENT_ID`) REFERENCES `ju_client` (`CLIENT_ID`) ON DELETE CASCADE
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Desktop Client 표시정보';
++
++-- 2) AUTH_ATTR 형식 변환: 메뉴코드(9자리) → 메뉴코드 + 권한비트(16진 2자리)
++--    어드민(AUTH0001)은 FF(전체), 그 외는 01(조회). 이미 11자리인 항목은 바뀌지 않는다.
++--    (역참조 \1 뒤에 숫자가 바로 오지 않도록 임시 문자 ~를 거친다)
++UPDATE ju_auth
++   SET AUTH_ATTR = REPLACE(REGEXP_REPLACE(AUTH_ATTR, '"(M[0-9]{8})"', '"\\1~"'), '~"', 'FF"')
++ WHERE AUTH_TYPE = 'AUTH0001';
++
++UPDATE ju_auth
++   SET AUTH_ATTR = REPLACE(REGEXP_REPLACE(AUTH_ATTR, '"(M[0-9]{8})"', '"\\1~"'), '~"', '01"')
++ WHERE AUTH_TYPE <> 'AUTH0001';
++
++ALTER TABLE ju_auth
++  MODIFY `AUTH_ATTR` longtext DEFAULT NULL COMMENT '메뉴 권한 JSON 배열. 항목=메뉴코드(9)+권한비트(16진 2자리, MACT.COM_VAL)';
++
++-- 확인
++SELECT AUTH_ID, AUTH_TYPE, LEFT(AUTH_ATTR, 80) AS AUTH_ATTR_HEAD FROM ju_auth ORDER BY AUTH_ID;
+diff --git a/database/seed/02_ju_core_seed.sql b/database/seed/02_ju_core_seed.sql
+index 71ac585..5e14474 100644
+--- a/database/seed/02_ju_core_seed.sql
++++ b/database/seed/02_ju_core_seed.sql
+@@ -1,5 +1,5 @@
+ -- ============================================================
+--- JuProvider Baseline V2.3 Seed
++-- JuProvider Baseline V2.4 Seed
+ -- Fresh-install base data only.
+ -- IMPORTANT: pure DML only; no LOCK/DROP/CREATE/ALTER statements.
+ -- ============================================================
+@@ -7,12 +7,13 @@ SET NAMES utf8mb4;
+ SET FOREIGN_KEY_CHECKS=0;
+ 
+ -- ju_auth
++-- AUTH_ATTR 항목 = 메뉴코드 + 권한비트(16진). 어드민 FF, 그 외 조회(01)
+ INSERT INTO `ju_auth` VALUES
+-(1,'AUTH0001','[\"M01000000\",\"M01010000\",\"M01020000\",\"M01020100\",\"M01020200\",\"M01030000\",\"M01040000\",\"M01050000\",\"M01060000\",\"M01070000\",\"M01070100\",\"M01070200\",\"M01080000\",\"M02000000\",\"M02010000\",\"M02010100\",\"M02010200\",\"M02010300\",\"M02010400\",\"M02020000\",\"M02020100\",\"M02030000\",\"M02030100\",\"M02030200\",\"M02030300\",\"M02030400\",\"M03000000\",\"M04000000\",\"M04010000\"]','YENO0001'),
+-(2,'AUTH0002','[\"M02000000\",\"M02010000\",\"M02010100\",\"M02010200\",\"M02010300\",\"M02010400\",\"M02020000\",\"M02020100\",\"M02030000\",\"M02030100\",\"M02030200\",\"M02030300\",\"M02030400\",\"M03000000\",\"M04000000\",\"M04010000\"]','YENO0001'),
+-(3,'AUTH0003','[\"M02000000\",\"M02010000\",\"M02010100\",\"M02010200\",\"M02010300\",\"M02010400\",\"M02020000\",\"M02020100\",\"M02030000\",\"M02030100\",\"M02030200\",\"M02030300\",\"M02030400\",\"M03000000\",\"M04000000\",\"M04010000\"]','YENO0001'),
+-(4,'AUTH0004','[\"M02000000\",\"M02030000\",\"M02030300\",\"M03000000\"]','YENO0001'),
+-(5,'AUTH0005','[\"M03000000\"]','YENO0001');
++(1,'AUTH0001','[\"M01000000FF\",\"M01010000FF\",\"M01020000FF\",\"M01020100FF\",\"M01020200FF\",\"M01030000FF\",\"M01040000FF\",\"M01050000FF\",\"M01060000FF\",\"M01070000FF\",\"M01070100FF\",\"M01070200FF\",\"M01080000FF\",\"M02000000FF\",\"M02010000FF\",\"M02010100FF\",\"M02010200FF\",\"M02010300FF\",\"M02010400FF\",\"M02020000FF\",\"M02020100FF\",\"M02030000FF\",\"M02030100FF\",\"M02030200FF\",\"M02030300FF\",\"M02030400FF\",\"M03000000FF\",\"M04000000FF\",\"M04010000FF\"]','YENO0001'),
++(2,'AUTH0002','[\"M0200000001\",\"M0201000001\",\"M0201010001\",\"M0201020001\",\"M0201030001\",\"M0201040001\",\"M0202000001\",\"M0202010001\",\"M0203000001\",\"M0203010001\",\"M0203020001\",\"M0203030001\",\"M0203040001\",\"M0300000001\",\"M0400000001\",\"M0401000001\"]','YENO0001'),
++(3,'AUTH0003','[\"M0200000001\",\"M0201000001\",\"M0201010001\",\"M0201020001\",\"M0201030001\",\"M0201040001\",\"M0202000001\",\"M0202010001\",\"M0203000001\",\"M0203010001\",\"M0203020001\",\"M0203030001\",\"M0203040001\",\"M0300000001\",\"M0400000001\",\"M0401000001\"]','YENO0001'),
++(4,'AUTH0004','[\"M0200000001\",\"M0203000001\",\"M0203030001\",\"M0300000001\"]','YENO0001'),
++(5,'AUTH0005','[\"M0300000001\"]','YENO0001');
+ 
+ -- ju_auth_detail
+ INSERT INTO `ju_auth_detail` VALUES
+diff --git a/desktop/juprovider.client/Program.cs b/desktop/juprovider.client/Program.cs
+index c94d7e5..b77a90b 100644
+--- a/desktop/juprovider.client/Program.cs
++++ b/desktop/juprovider.client/Program.cs
+@@ -214,9 +214,22 @@ internal static class Program
+     {
+         try
+         {
++            ClientSettings settings =
++                ClientSettings.Load();
++
++            if (!settings.HasClientCredential)
++            {
++                Debug.WriteLine(
++                    $"[SERVER] Client 자격이 없습니다. " +
++                    $"{ClientSettings.SettingsPath}에 ClientId/ClientKey를 설정하세요."
++                );
++            }
++
+             using JuProviderApiClient apiClient =
+                 new(
+-                    "http://localhost:8081/juprovider/"
++                    settings.ServerUrl,
++                    settings.ClientId,
++                    settings.ClientKey
+                 );
+ 
+             /*
+diff --git a/desktop/juprovider.client/Services/ClientSettings.cs b/desktop/juprovider.client/Services/ClientSettings.cs
+new file mode 100644
+index 0000000..b98c6d9
+--- /dev/null
++++ b/desktop/juprovider.client/Services/ClientSettings.cs
+@@ -0,0 +1,78 @@
++using System.Diagnostics;
++using System.Text.Json;
++
++namespace JuProvider.Client.Services;
++
++/*
++ * Client 실행 설정: {app}\config\client.json
++ *
++ * {
++ *   "ServerUrl": "http://localhost:8081/juprovider/",
++ *   "ClientId":  "서버 관리자 API로 등록한 CLIENT_ID",
++ *   "ClientKey": "등록/재발급 때 한 번만 표시된 키"
++ * }
++ *
++ * 파일이 없거나 읽지 못하면 기본 서버 주소만 사용한다 (Client 자격 없음 → 서버 동기화 실패 → OFFLINE).
++ * ClientKey는 비밀 값이므로 저장소에 올리지 않는다.
++ */
++public sealed class ClientSettings
++{
++    public const string DefaultServerUrl = "http://localhost:8081/juprovider/";
++
++    public static string SettingsPath =>
++        Path.Combine(
++            AppContext.BaseDirectory,
++            "config",
++            "client.json"
++        );
++
++    public string ServerUrl { get; set; } = DefaultServerUrl;
++
++    public string? ClientId { get; set; }
++
++    public string? ClientKey { get; set; }
++
++    public bool HasClientCredential =>
++        !string.IsNullOrWhiteSpace(ClientId)
++        && !string.IsNullOrWhiteSpace(ClientKey);
++
++    public static ClientSettings Load()
++    {
++        try
++        {
++            if (!File.Exists(SettingsPath))
++            {
++                return new ClientSettings();
++            }
++
++            ClientSettings? settings =
++                JsonSerializer.Deserialize<ClientSettings>(
++                    File.ReadAllText(SettingsPath),
++                    new JsonSerializerOptions
++                    {
++                        PropertyNameCaseInsensitive = true
++                    }
++                );
++
++            if (settings == null)
++            {
++                return new ClientSettings();
++            }
++
++            if (string.IsNullOrWhiteSpace(settings.ServerUrl))
++            {
++                settings.ServerUrl = DefaultServerUrl;
++            }
++
++            return settings;
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine(
++                $"[CLIENT SETTINGS ERROR] {ex.Message}"
++            );
++
++            return new ClientSettings();
++        }
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+index f4c0c02..453337f 100644
+--- a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
++++ b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+@@ -15,8 +15,18 @@ public sealed class JuProviderApiClient : IDisposable
+             PropertyNameCaseInsensitive = true
+         };
+ 
++    public const string ClientIdHeader = "X-JU-Client-Id";
++    public const string ClientKeyHeader = "X-JU-Client-Key";
++
++    /*
++     * clientId / clientKey:
++     * 서버 관리자 API(/api/admin/clients)에서 발급받은 Client 자격.
++     * 동기화 API(/api/core/sync/**)는 이 값이 없으면 401로 거부된다.
++     */
+     public JuProviderApiClient(
+-        string baseUrl
++        string baseUrl,
++        string? clientId = null,
++        string? clientKey = null
+     )
+     {
+         if (string.IsNullOrWhiteSpace(baseUrl))
+@@ -40,6 +50,20 @@ public sealed class JuProviderApiClient : IDisposable
+ 
+                 Timeout = TimeSpan.FromSeconds(5)
+             };
++
++        if (!string.IsNullOrWhiteSpace(clientId)
++            && !string.IsNullOrWhiteSpace(clientKey))
++        {
++            _httpClient.DefaultRequestHeaders.Add(
++                ClientIdHeader,
++                clientId.Trim()
++            );
++
++            _httpClient.DefaultRequestHeaders.Add(
++                ClientKeyHeader,
++                clientKey.Trim()
++            );
++        }
+     }
+ 
+     /*
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+index 9ad867c..502471b 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+@@ -12,7 +12,9 @@ import org.springframework.boot.web.servlet.support.SpringBootServletInitializer
+     "com.asdp.juprovider.core.menu.dao",
+     "com.asdp.juprovider.core.device.dao",
+     "com.asdp.juprovider.core.systemcode.dao",
+-    "com.asdp.juprovider.core.language.dao"
++    "com.asdp.juprovider.core.language.dao",
++    "com.asdp.juprovider.core.security.dao",
++    "com.asdp.juprovider.core.client.dao"
+ })
+ public class JuProviderApplication extends SpringBootServletInitializer {
+ 
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java b/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
+index 51947a4..25beb9c 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
+@@ -10,38 +10,53 @@ import org.springframework.security.config.http.SessionCreationPolicy;
+ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+ import org.springframework.security.crypto.password.PasswordEncoder;
+ import org.springframework.security.web.SecurityFilterChain;
++import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+ 
++import com.asdp.juprovider.core.client.service.ClientService;
++import com.asdp.juprovider.security.ClientKeyAuthenticationFilter;
+ import com.asdp.juprovider.security.JsonSecurityErrorHandler;
+ import com.asdp.juprovider.security.UserTokenAuthenticationConverter;
+ import com.asdp.juprovider.service.AuthService;
+ 
+ /**
+- * 인증 구조 (JU-1A)
++ * 인증 구조 (JU-1A + JU-1B)
+  *
+- * 1) Sync 체인 : /api/core/sync/**  → JU-1B(Client 인증) 전까지 임시 permitAll (Desktop 동기화)
++ * 1) Client 체인 : /api/core/sync/**, /api/client/** → Desktop Client Key (X-JU-Client-Id / X-JU-Client-Key)
+  * 2) API 체인  : /api/**            → 사용자 JWT
+  *      - 공개: POST /api/auth/login, /api/health
+  *      - 로그인만: /api/auth/me, /api/auth/password (최초 비밀번호 변경 전에도 허용)
++ *      - /api/admin/**: 어드민(AUTH_TYPE AUTH0001) + 비밀번호 변경 완료
+  *      - 그 외(/api/core/**, /api/action/** 등): 로그인 + 비밀번호 변경 완료(PW_OK). 아니면 403
+- *      - 메뉴 Action 권한(AUTH_ATTR)은 JU-1B
++ *      - Menu Action 실행 권한(AUTH_ATTR 비트)은 Core PermissionService에서 검사
+  * 3) 웹 체인   : 그 밖의 경로 (Vue 정적 파일) 공개
+  */
+ @Configuration
+ public class SecurityConfig {
+ 
++    /** 어드민 (ju_auth.AUTH_TYPE = AUTH0001). 비밀번호 변경 완료 후에만 부여된다 */
++    public static final String ROLE_ADMIN = "ROLE_AUTH0001";
++
+     private final JsonSecurityErrorHandler errorHandler = new JsonSecurityErrorHandler();
+ 
+     @Bean
+     @Order(1)
+-    public SecurityFilterChain syncSecurityFilterChain(HttpSecurity http) throws Exception {
++    public SecurityFilterChain clientSecurityFilterChain(
++            HttpSecurity http,
++            ClientService clientService) throws Exception {
+         http
+-            .securityMatcher("/api/core/sync/**")
++            .securityMatcher("/api/core/sync/**", "/api/client/**")
+             .csrf(csrf -> csrf.disable())
+             .cors(Customizer.withDefaults())
+             .sessionManagement(session ->
+                     session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+-            // TODO(JU-1B): Desktop Client Key 인증으로 교체
+-            .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
++            .addFilterBefore(
++                    new ClientKeyAuthenticationFilter(clientService),
++                    UsernamePasswordAuthenticationFilter.class)
++            .authorizeHttpRequests(auth -> auth
++                    .anyRequest().hasAuthority(ClientKeyAuthenticationFilter.CLIENT_AUTHORITY))
++            .exceptionHandling(ex -> ex
++                    .authenticationEntryPoint(errorHandler)
++                    .accessDeniedHandler(errorHandler));
+         return http.build();
+     }
+ 
+@@ -63,6 +78,7 @@ public class SecurityConfig {
+                     .requestMatchers("/api/health").permitAll()
+                     .requestMatchers("/api/auth/me", "/api/auth/password")
+                             .hasAuthority(UserTokenAuthenticationConverter.AUTHORITY_USER)
++                    .requestMatchers("/api/admin/**").hasAuthority(ROLE_ADMIN)
+                     .anyRequest()
+                             .hasAuthority(UserTokenAuthenticationConverter.AUTHORITY_PASSWORD_OK))
+             .oauth2ResourceServer(oauth2 -> oauth2
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ClientAdminController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ClientAdminController.java
+new file mode 100644
+index 0000000..ee1bf30
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ClientAdminController.java
+@@ -0,0 +1,62 @@
++package com.asdp.juprovider.controller;
++
++import java.util.List;
++
++import org.springframework.web.bind.annotation.DeleteMapping;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.PathVariable;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++
++import com.asdp.juprovider.core.client.dto.IssuedClientKey;
++import com.asdp.juprovider.core.client.service.ClientService;
++import com.asdp.juprovider.dto.ApiResponse;
++import com.asdp.juprovider.dto.ClientInfo;
++import com.asdp.juprovider.dto.ClientRegisterRequest;
++
++import jakarta.validation.Valid;
++
++/**
++ * Desktop Client 등록·키 발급 (어드민 전용, SecurityConfig /api/admin/**).
++ * 발급된 키 원문은 응답에서 한 번만 보여 주고 서버에는 해시만 남는다.
++ */
++@RestController
++@RequestMapping("/api/admin/clients")
++public class ClientAdminController {
++
++    private final ClientService clientService;
++
++    public ClientAdminController(ClientService clientService) {
++        this.clientService = clientService;
++    }
++
++    @GetMapping
++    public ApiResponse<List<ClientInfo>> list() {
++        return ApiResponse.ok(clientService.getClients()
++                .stream()
++                .map(ClientInfo::from)
++                .toList());
++    }
++
++    @PostMapping
++    public ApiResponse<IssuedClientKey> register(
++            @Valid @RequestBody ClientRegisterRequest request) {
++        return ApiResponse.ok(clientService.register(
++                request.clientId(),
++                request.clientName(),
++                request.clientDescription()));
++    }
++
++    @PostMapping("/{clientId}/key")
++    public ApiResponse<IssuedClientKey> reissueKey(@PathVariable String clientId) {
++        return ApiResponse.ok(clientService.reissueKey(clientId));
++    }
++
++    @DeleteMapping("/{clientId}")
++    public ApiResponse<Void> disable(@PathVariable String clientId) {
++        clientService.disable(clientId);
++        return ApiResponse.ok(null);
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java
+index b9ef347..f7e6ee7 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java
+@@ -5,6 +5,9 @@ import com.asdp.juprovider.core.action.service.DynamicActionService;
+ import com.asdp.juprovider.dto.ApiResponse;
+ import com.asdp.juprovider.dto.DynamicActionRequest;
+ import org.springframework.web.bind.annotation.PathVariable;
++import org.springframework.security.core.Authentication;
++
++import com.asdp.juprovider.core.security.ExecutionContext;
+ import org.springframework.web.bind.annotation.PostMapping;
+ import org.springframework.web.bind.annotation.RequestBody;
+ import org.springframework.web.bind.annotation.RequestParam;
+@@ -35,7 +38,8 @@ public class DynamicActionController {
+                     defaultValue = DEFAULT_LANG)
+             String langCd,
+             @RequestBody(required = false)
+-            DynamicActionRequest request) {
++            DynamicActionRequest request,
++            Authentication authentication) {
+ 
+         Map<String, Object> parameters =
+                 request == null
+@@ -48,7 +52,8 @@ public class DynamicActionController {
+                         menuId,
+                         actionCode,
+                         langCd,
+-                        parameters);
++                        parameters,
++                        executionContext(authentication));
+ 
+         if (!result.isSuccess()) {
+             throw new IllegalArgumentException(
+@@ -60,4 +65,13 @@ public class DynamicActionController {
+                 result.getData(),
+                 result.getMessage());
+     }
+-}
+\ No newline at end of file
++
++    /** UserTokenAuthenticationConverter가 넣은 실행 주체 (사용자 ID + 현재 권한 ID) */
++    private static ExecutionContext executionContext(Authentication authentication) {
++        if (authentication != null
++                && authentication.getDetails() instanceof ExecutionContext context) {
++            return context;
++        }
++        return null;
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ClientInfo.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ClientInfo.java
+new file mode 100644
+index 0000000..f3176d8
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ClientInfo.java
+@@ -0,0 +1,27 @@
++package com.asdp.juprovider.dto;
++
++import java.time.LocalDateTime;
++
++import com.asdp.juprovider.core.client.dto.JuClient;
++
++/** Client 목록 응답 (키 해시는 내보내지 않는다) */
++public record ClientInfo(
++        String clientId,
++        String clientName,
++        String clientDescription,
++        String useYn,
++        LocalDateTime keyIssuedAt,
++        LocalDateTime lastSeenAt,
++        LocalDateTime createdAt) {
++
++    public static ClientInfo from(JuClient client) {
++        return new ClientInfo(
++                client.getClientId(),
++                client.getClientName(),
++                client.getClientDescription(),
++                client.getUseYn(),
++                client.getKeyIssuedAt(),
++                client.getLastSeenAt(),
++                client.getCreatedAt());
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ClientRegisterRequest.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ClientRegisterRequest.java
+new file mode 100644
+index 0000000..c8b40db
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ClientRegisterRequest.java
+@@ -0,0 +1,10 @@
++package com.asdp.juprovider.dto;
++
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.Size;
++
++public record ClientRegisterRequest(
++        @NotBlank @Size(max = 100) String clientId,
++        @Size(max = 100) String clientName,
++        @Size(max = 500) String clientDescription) {
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+index 375214f..7712dbf 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+@@ -1,5 +1,6 @@
+ package com.asdp.juprovider.exception;
+ 
++import com.asdp.juprovider.core.security.PermissionDeniedException;
+ import com.asdp.juprovider.dto.ApiResponse;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.http.ResponseEntity;
+@@ -28,6 +29,14 @@ public class GlobalExceptionHandler {
+                 .body(new ApiResponse<>(false, null, exception.getMessage()));
+     }
+ 
++    /** Core 권한 검사 실패 (Menu Action 실행 권한 없음 등) */
++    @ExceptionHandler(PermissionDeniedException.class)
++    public ResponseEntity<ApiResponse<Void>> handlePermissionDenied(
++            PermissionDeniedException exception) {
++        return ResponseEntity.status(HttpStatus.FORBIDDEN)
++                .body(new ApiResponse<>(false, null, exception.getMessage()));
++    }
++
+     /** 요청 DTO 검증(@Valid) 실패 */
+     @ExceptionHandler(MethodArgumentNotValidException.class)
+     public ResponseEntity<ApiResponse<Void>> handleValidation(
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/security/ClientKeyAuthenticationFilter.java b/juprovider.backend/src/main/java/com/asdp/juprovider/security/ClientKeyAuthenticationFilter.java
+new file mode 100644
+index 0000000..7e07472
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/security/ClientKeyAuthenticationFilter.java
+@@ -0,0 +1,65 @@
++package com.asdp.juprovider.security;
++
++import java.io.IOException;
++import java.util.List;
++
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.security.core.authority.SimpleGrantedAuthority;
++import org.springframework.security.core.context.SecurityContext;
++import org.springframework.security.core.context.SecurityContextHolder;
++import org.springframework.web.filter.OncePerRequestFilter;
++
++import com.asdp.juprovider.core.client.service.ClientService;
++
++import jakarta.servlet.FilterChain;
++import jakarta.servlet.ServletException;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++
++/**
++ * Desktop Client 자격 인증.
++ *
++ * 요청 헤더 X-JU-Client-Id, X-JU-Client-Key를 ju_client와 대조한다.
++ * 성공하면 principal = CLIENT_ID, 권한 = CLIENT.
++ * 실패하면 인증 없이 다음 필터로 넘기고, 인가 단계에서 401이 된다.
++ *
++ * Spring Bean으로 등록하지 않는다 (서블릿 필터 자동 등록 방지). SecurityConfig에서 직접 생성한다.
++ */
++public class ClientKeyAuthenticationFilter extends OncePerRequestFilter {
++
++    public static final String HEADER_CLIENT_ID = "X-JU-Client-Id";
++    public static final String HEADER_CLIENT_KEY = "X-JU-Client-Key";
++    public static final String CLIENT_AUTHORITY = "CLIENT";
++
++    private final ClientService clientService;
++
++    public ClientKeyAuthenticationFilter(ClientService clientService) {
++        this.clientService = clientService;
++    }
++
++    @Override
++    protected void doFilterInternal(
++            HttpServletRequest request,
++            HttpServletResponse response,
++            FilterChain filterChain) throws ServletException, IOException {
++
++        String clientId = request.getHeader(HEADER_CLIENT_ID);
++        String clientKey = request.getHeader(HEADER_CLIENT_KEY);
++
++        if (clientId != null && clientKey != null
++                && clientService.verify(clientId.trim(), clientKey.trim())) {
++
++            UsernamePasswordAuthenticationToken authentication =
++                    UsernamePasswordAuthenticationToken.authenticated(
++                            clientId.trim(),
++                            null,
++                            List.of(new SimpleGrantedAuthority(CLIENT_AUTHORITY)));
++
++            SecurityContext context = SecurityContextHolder.createEmptyContext();
++            context.setAuthentication(authentication);
++            SecurityContextHolder.setContext(context);
++        }
++
++        filterChain.doFilter(request, response);
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/security/UserTokenAuthenticationConverter.java b/juprovider.backend/src/main/java/com/asdp/juprovider/security/UserTokenAuthenticationConverter.java
+index ab0b051..3e770f5 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/security/UserTokenAuthenticationConverter.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/security/UserTokenAuthenticationConverter.java
+@@ -11,6 +11,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
+ import org.springframework.security.oauth2.server.resource.InvalidBearerTokenException;
+ import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+ 
++import com.asdp.juprovider.core.security.ExecutionContext;
+ import com.asdp.juprovider.service.AuthService;
+ import com.asdp.juprovider.service.AuthService.UserState;
+ 
+@@ -22,6 +23,7 @@ import com.asdp.juprovider.service.AuthService.UserState;
+  *   USER        : 로그인한 사용자 (/api/auth/me, /api/auth/password)
+  *   PW_OK       : 비밀번호 변경이 끝난 사용자 (그 밖의 보호 API)
+  *   ROLE_{AUTH_TYPE}
++ * details: ExecutionContext(userId, 현재 AUTH_ID) — Core 권한 검사에 사용
+  *
+  * MVC 변환기로 자동 등록되지 않도록 Bean이 아니라 SecurityConfig에서 직접 만든다.
+  */
+@@ -56,6 +58,9 @@ public class UserTokenAuthenticationConverter implements Converter<Jwt, Abstract
+             authorities.add(new SimpleGrantedAuthority(AUTHORITY_PASSWORD_OK));
+             authorities.add(new SimpleGrantedAuthority("ROLE_" + state.authType()));
+         }
+-        return new JwtAuthenticationToken(jwt, authorities, jwt.getSubject());
++        JwtAuthenticationToken token = new JwtAuthenticationToken(jwt, authorities, jwt.getSubject());
++        // Core 실행 주체: 권한 ID는 토큰이 아니라 현재 DB 값
++        token.setDetails(ExecutionContext.ofUser(userId, state.authId()));
++        return token;
+     }
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java b/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
+index 68305a9..5e24e72 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
+@@ -134,7 +134,7 @@ public class AuthService {
+                         .map(auth -> {
+                             JuUserDetail detail = userDetailRepository.findById(userId).orElse(null);
+                             LocalDateTime changedAt = detail == null ? null : detail.getPasswordChangedAt();
+-                            return new UserState(auth.getAuthType(), changedAt == null, passwordVersion(changedAt));
++                            return new UserState(auth.getAuthId(), auth.getAuthType(), changedAt == null, passwordVersion(changedAt));
+                         }));
+     }
+ 
+@@ -153,6 +153,6 @@ public class AuthService {
+                 auth == null ? null : auth.getAuthType());
+     }
+ 
+-    public record UserState(String authType, boolean passwordChangeRequired, long passwordVersion) {
++    public record UserState(Long authId, String authType, boolean passwordChangeRequired, long passwordVersion) {
+     }
+ }
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/security/AuthorityAttributeTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/security/AuthorityAttributeTest.java
+new file mode 100644
+index 0000000..ec88b4e
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/security/AuthorityAttributeTest.java
+@@ -0,0 +1,44 @@
++package com.asdp.juprovider.security;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import org.junit.jupiter.api.Test;
++
++import com.asdp.juprovider.core.security.AuthorityAttribute;
++
++/** AUTH_ATTR 해석 (JU-1B) */
++class AuthorityAttributeTest {
++
++    @Test
++    void parsesElevenDigitItemsWithBits() {
++        AuthorityAttribute a = AuthorityAttribute.parse("[\"M01000000FF\",\"M0201000001\"]");
++        assertEquals(0xFF, a.bitsOf("M01000000"));
++        assertEquals(0x01, a.bitsOf("M02010000"));
++        assertTrue(a.allows("M02010000", 0x01));
++        assertFalse(a.allows("M02010000", 0x02));
++    }
++
++    @Test
++    void legacyNineDigitItemIsMenuOnly() {
++        AuthorityAttribute a = AuthorityAttribute.parse("[\"M03000000\"]");
++        assertTrue(a.hasMenu("M03000000"));
++        assertEquals(0, a.bitsOf("M03000000"));
++        assertFalse(a.allows("M03000000", 0x01));
++    }
++
++    @Test
++    void duplicateMenusMergeBits() {
++        AuthorityAttribute a = AuthorityAttribute.parse("[\"M0201000001\",\"M0201000004\"]");
++        assertEquals(0x05, a.bitsOf("M02010000"));
++    }
++
++    @Test
++    void unknownMenuAndZeroBitAreDenied() {
++        AuthorityAttribute a = AuthorityAttribute.parse("[\"M01000000FF\"]");
++        assertFalse(a.allows("M09000000", 0x01));
++        assertFalse(a.allows("M01000000", 0));
++        assertFalse(AuthorityAttribute.parse(null).hasMenu("M01000000"));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
+index f265a91..8e3c27d 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
+@@ -6,6 +6,8 @@ import com.asdp.juprovider.core.action.ActionResult;
+ import com.asdp.juprovider.core.menu.dto.Menu;
+ import com.asdp.juprovider.core.menu.dto.MenuAction;
+ import com.asdp.juprovider.core.menu.service.MenuService;
++import com.asdp.juprovider.core.security.ExecutionContext;
++import com.asdp.juprovider.core.security.PermissionService;
+ import org.springframework.stereotype.Service;
+ 
+ import java.util.Map;
+@@ -15,20 +17,32 @@ public class DynamicActionService {
+ 
+     private final MenuService menuService;
+     private final ActionRegistry actionRegistry;
++    private final PermissionService permissionService;
+ 
+     public DynamicActionService(
+             MenuService menuService,
+-            ActionRegistry actionRegistry) {
++            ActionRegistry actionRegistry,
++            PermissionService permissionService) {
+ 
+         this.menuService = menuService;
+         this.actionRegistry = actionRegistry;
++        this.permissionService = permissionService;
+     }
+ 
+     public ActionResult<?> execute(
+             Long menuId,
+             String actionCode,
+             String langCd,
+-            Map<String, Object> parameters) {
++            Map<String, Object> parameters,
++            ExecutionContext context) {
++
++        /*
++         * 실행 권한 검사 (AUTH_ATTR 메뉴 비트 & ACT_KIND 비트). 없으면 PermissionDeniedException(403)
++         */
++        permissionService.checkAction(
++                context,
++                menuId,
++                actionCode);
+ 
+         Menu menu =
+                 menuService.getMenu(
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java
+new file mode 100644
+index 0000000..ec6f686
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dao/ClientDao.java
+@@ -0,0 +1,36 @@
++package com.asdp.juprovider.core.client.dao;
++
++import java.util.List;
++
++import org.apache.ibatis.annotations.Param;
++
++import com.asdp.juprovider.core.client.dto.JuClient;
++
++public interface ClientDao {
++
++    JuClient selectClient(
++            @Param("clientId") String clientId);
++
++    List<JuClient> selectClients();
++
++    int insertClient(
++            @Param("clientId") String clientId,
++            @Param("keyHash") String keyHash);
++
++    int upsertClientDetail(
++            @Param("clientId") String clientId,
++            @Param("clientName") String clientName,
++            @Param("clientDescription") String clientDescription);
++
++    /** 키 재발급. 논리 삭제된 Client는 다시 사용으로 바꾼다 (재활성화). */
++    int updateClientKey(
++            @Param("clientId") String clientId,
++            @Param("keyHash") String keyHash);
++
++    int updateUseYn(
++            @Param("clientId") String clientId,
++            @Param("useYn") String useYn);
++
++    int updateLastSeen(
++            @Param("clientId") String clientId);
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dto/IssuedClientKey.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dto/IssuedClientKey.java
+new file mode 100644
+index 0000000..19ac551
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dto/IssuedClientKey.java
+@@ -0,0 +1,9 @@
++package com.asdp.juprovider.core.client.dto;
++
++/**
++ * 새로 발급한 Client 키. 키 원문은 이 응답에서 한 번만 전달한다.
++ */
++public record IssuedClientKey(
++        String clientId,
++        String clientKey) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dto/JuClient.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dto/JuClient.java
+new file mode 100644
+index 0000000..f98d1c2
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/dto/JuClient.java
+@@ -0,0 +1,83 @@
++package com.asdp.juprovider.core.client.dto;
++
++import java.time.LocalDateTime;
++
++/**
++ * Desktop Client 등록 정보 (ju_client + ju_client_detail).
++ * keyHash는 Client 키의 SHA-256 16진 문자열이다. 키 원문은 저장하지 않는다.
++ */
++public class JuClient {
++
++    private String clientId;
++    private String keyHash;
++    private String useYn;
++    private LocalDateTime keyIssuedAt;
++    private LocalDateTime lastSeenAt;
++    private LocalDateTime createdAt;
++    private String clientName;
++    private String clientDescription;
++
++    public String getClientId() {
++        return clientId;
++    }
++
++    public void setClientId(String clientId) {
++        this.clientId = clientId;
++    }
++
++    public String getKeyHash() {
++        return keyHash;
++    }
++
++    public void setKeyHash(String keyHash) {
++        this.keyHash = keyHash;
++    }
++
++    public String getUseYn() {
++        return useYn;
++    }
++
++    public void setUseYn(String useYn) {
++        this.useYn = useYn;
++    }
++
++    public LocalDateTime getKeyIssuedAt() {
++        return keyIssuedAt;
++    }
++
++    public void setKeyIssuedAt(LocalDateTime keyIssuedAt) {
++        this.keyIssuedAt = keyIssuedAt;
++    }
++
++    public LocalDateTime getLastSeenAt() {
++        return lastSeenAt;
++    }
++
++    public void setLastSeenAt(LocalDateTime lastSeenAt) {
++        this.lastSeenAt = lastSeenAt;
++    }
++
++    public LocalDateTime getCreatedAt() {
++        return createdAt;
++    }
++
++    public void setCreatedAt(LocalDateTime createdAt) {
++        this.createdAt = createdAt;
++    }
++
++    public String getClientName() {
++        return clientName;
++    }
++
++    public void setClientName(String clientName) {
++        this.clientName = clientName;
++    }
++
++    public String getClientDescription() {
++        return clientDescription;
++    }
++
++    public void setClientDescription(String clientDescription) {
++        this.clientDescription = clientDescription;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java
+new file mode 100644
+index 0000000..88471b1
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/client/service/ClientService.java
+@@ -0,0 +1,149 @@
++package com.asdp.juprovider.core.client.service;
++
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.security.SecureRandom;
++import java.util.Base64;
++import java.util.HexFormat;
++import java.util.List;
++import java.util.regex.Pattern;
++
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++
++import com.asdp.juprovider.core.client.dao.ClientDao;
++import com.asdp.juprovider.core.client.dto.IssuedClientKey;
++import com.asdp.juprovider.core.client.dto.JuClient;
++
++/**
++ * Desktop Client 등록과 Client 키 검증.
++ *
++ * - 키는 서버가 만든 32바이트 난수(Base64URL)이고, DB에는 SHA-256 해시만 저장한다.
++ * - 키 원문은 발급/재발급 응답에서 한 번만 돌려준다.
++ * - 삭제는 논리 삭제(USE_YN=YENO0002). 같은 CLIENT_ID를 다시 등록하면 새 키로 재활성화한다.
++ */
++@Service
++public class ClientService {
++
++    private static final String USE_YES = "YENO0001";
++    private static final String USE_NO = "YENO0002";
++
++    private static final Pattern CLIENT_ID_PATTERN =
++            Pattern.compile("^[A-Za-z0-9_.-]{1,100}$");
++
++    private final ClientDao clientDao;
++    private final SecureRandom secureRandom = new SecureRandom();
++
++    public ClientService(ClientDao clientDao) {
++        this.clientDao = clientDao;
++    }
++
++    public List<JuClient> getClients() {
++        return clientDao.selectClients();
++    }
++
++    @Transactional
++    public IssuedClientKey register(
++            String clientId,
++            String clientName,
++            String clientDescription) {
++
++        String id = normalizeClientId(clientId);
++        JuClient existing = clientDao.selectClient(id);
++
++        if (existing != null && USE_YES.equals(existing.getUseYn())) {
++            throw new IllegalArgumentException("이미 등록된 Client입니다: " + id);
++        }
++
++        String key = newKey();
++
++        if (existing == null) {
++            clientDao.insertClient(id, hash(key));
++        } else {
++            clientDao.updateClientKey(id, hash(key));
++        }
++
++        clientDao.upsertClientDetail(
++                id,
++                clientName == null || clientName.isBlank() ? id : clientName.trim(),
++                clientDescription);
++
++        return new IssuedClientKey(id, key);
++    }
++
++    @Transactional
++    public IssuedClientKey reissueKey(String clientId) {
++        String id = normalizeClientId(clientId);
++        JuClient existing = clientDao.selectClient(id);
++
++        if (existing == null) {
++            throw new IllegalArgumentException("등록되지 않은 Client입니다: " + id);
++        }
++
++        String key = newKey();
++        clientDao.updateClientKey(id, hash(key));
++        return new IssuedClientKey(id, key);
++    }
++
++    @Transactional
++    public void disable(String clientId) {
++        String id = normalizeClientId(clientId);
++
++        if (clientDao.updateUseYn(id, USE_NO) == 0) {
++            throw new IllegalArgumentException("등록되지 않은 Client입니다: " + id);
++        }
++    }
++
++    /**
++     * Client 키 검증. 성공하면 마지막 접속 일시를 갱신한다.
++     */
++    @Transactional
++    public boolean verify(String clientId, String clientKey) {
++        if (clientId == null || clientKey == null
++                || !CLIENT_ID_PATTERN.matcher(clientId).matches()) {
++            return false;
++        }
++
++        JuClient client = clientDao.selectClient(clientId);
++
++        if (client == null || !USE_YES.equals(client.getUseYn())
++                || client.getKeyHash() == null) {
++            return false;
++        }
++
++        boolean matched = MessageDigest.isEqual(
++                client.getKeyHash().getBytes(StandardCharsets.US_ASCII),
++                hash(clientKey).getBytes(StandardCharsets.US_ASCII));
++
++        if (matched) {
++            clientDao.updateLastSeen(clientId);
++        }
++
++        return matched;
++    }
++
++    private static String normalizeClientId(String clientId) {
++        if (clientId == null || !CLIENT_ID_PATTERN.matcher(clientId.trim()).matches()) {
++            throw new IllegalArgumentException(
++                    "CLIENT_ID는 영문, 숫자, _ . - 로 1~100자여야 합니다.");
++        }
++        return clientId.trim();
++    }
++
++    private String newKey() {
++        byte[] bytes = new byte[32];
++        secureRandom.nextBytes(bytes);
++        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
++    }
++
++    private static String hash(String value) {
++        try {
++            MessageDigest digest = MessageDigest.getInstance("SHA-256");
++            return HexFormat.of().formatHex(
++                    digest.digest(value.getBytes(StandardCharsets.UTF_8)));
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException("SHA-256을 사용할 수 없습니다.", e);
++        }
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/security/AuthorityAttribute.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/AuthorityAttribute.java
+new file mode 100644
+index 0000000..a4b1224
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/AuthorityAttribute.java
+@@ -0,0 +1,86 @@
++package com.asdp.juprovider.core.security;
++
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.Map;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++/**
++ * ju_auth.AUTH_ATTR 해석.
++ *
++ * 형식: 문자열 JSON 배열. 항목 = 메뉴코드(9자리) + 권한 비트(16진 2자리)
++ *   예) ["M01000000FF", "M0201020001"]
++ *
++ * - 비트 값은 공통코드 MACT의 COM_VAL (조회 01, 등록 02, 수정 04, 삭제 08, 실행 10, 내보내기 20)
++ * - 비트가 없는 9자리 항목은 "메뉴 표시만 허용"(비트 0)으로 본다.
++ * - 같은 메뉴가 여러 번 나오면 비트를 합친다.
++ */
++public final class AuthorityAttribute {
++
++    private static final Pattern ITEM = Pattern.compile("\"([^\"]+)\"");
++
++    private static final Pattern MENU_WITH_BITS =
++            Pattern.compile("^(M[0-9]{8})([0-9A-Fa-f]{2})$");
++
++    private final Map<String, Integer> menuBits;
++
++    private AuthorityAttribute(Map<String, Integer> menuBits) {
++        this.menuBits = Collections.unmodifiableMap(menuBits);
++    }
++
++    public static AuthorityAttribute parse(String authAttr) {
++        Map<String, Integer> result = new LinkedHashMap<>();
++
++        if (authAttr != null) {
++            Matcher matcher = ITEM.matcher(authAttr);
++
++            while (matcher.find()) {
++                String item = matcher.group(1).trim();
++
++                if (item.isEmpty()) {
++                    continue;
++                }
++
++                Matcher withBits = MENU_WITH_BITS.matcher(item);
++
++                String menuCode;
++                int bits;
++
++                if (withBits.matches()) {
++                    menuCode = withBits.group(1);
++                    bits = Integer.parseInt(withBits.group(2), 16);
++                } else {
++                    menuCode = item;
++                    bits = 0;
++                }
++
++                result.merge(menuCode, bits, (a, b) -> a | b);
++            }
++        }
++
++        return new AuthorityAttribute(result);
++    }
++
++    public boolean hasMenu(String menuCode) {
++        return menuCode != null && menuBits.containsKey(menuCode);
++    }
++
++    public int bitsOf(String menuCode) {
++        Integer bits = menuCode == null ? null : menuBits.get(menuCode);
++        return bits == null ? 0 : bits;
++    }
++
++    public boolean allows(String menuCode, int actionBit) {
++        return actionBit != 0 && (bitsOf(menuCode) & actionBit) != 0;
++    }
++
++    public Map<String, Integer> menuBits() {
++        return menuBits;
++    }
++
++    /** 비트를 16진 2자리 문자열로 표시 (예: 15 -> "0F") */
++    public static String toHex(int bits) {
++        return String.format("%02X", bits & 0xFF);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/security/PermissionDeniedException.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/PermissionDeniedException.java
+new file mode 100644
+index 0000000..c5b658f
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/PermissionDeniedException.java
+@@ -0,0 +1,11 @@
++package com.asdp.juprovider.core.security;
++
++/**
++ * 권한이 없어 업무를 실행할 수 없을 때 발생한다. Backend에서 HTTP 403으로 변환한다.
++ */
++public class PermissionDeniedException extends RuntimeException {
++
++    public PermissionDeniedException(String message) {
++        super(message);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/security/PermissionService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/PermissionService.java
+new file mode 100644
+index 0000000..dcf7d7d
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/PermissionService.java
+@@ -0,0 +1,107 @@
++package com.asdp.juprovider.core.security;
++
++import java.util.List;
++
++import org.springframework.stereotype.Service;
++
++import com.asdp.juprovider.core.menu.dto.Menu;
++import com.asdp.juprovider.core.menu.service.MenuService;
++import com.asdp.juprovider.core.security.dao.PermissionDao;
++import com.asdp.juprovider.core.security.dto.ActionPermission;
++
++/**
++ * 메뉴 표시 권한과 Menu Action 실행 권한 검사.
++ *
++ * 권한 데이터(ju_auth.AUTH_ATTR)는 매번 DB에서 읽는다.
++ * 권한을 바꾸면 다시 로그인하지 않아도 바로 적용된다.
++ */
++@Service
++public class PermissionService {
++
++    private final PermissionDao permissionDao;
++    private final MenuService menuService;
++
++    public PermissionService(
++            PermissionDao permissionDao,
++            MenuService menuService) {
++        this.permissionDao = permissionDao;
++        this.menuService = menuService;
++    }
++
++    public AuthorityAttribute getAuthority(Long authId) {
++        if (authId == null) {
++            throw new PermissionDeniedException("권한 정보가 없습니다.");
++        }
++
++        String authAttr = permissionDao.selectActiveAuthAttr(authId);
++
++        if (authAttr == null) {
++            throw new PermissionDeniedException("사용할 수 없는 권한입니다.");
++        }
++
++        return AuthorityAttribute.parse(authAttr);
++    }
++
++    /**
++     * Menu Action 실행 권한 검사.
++     * 권한 비트 & ACT_KIND 비트가 0이면 PermissionDeniedException.
++     */
++    public void checkAction(
++            ExecutionContext context,
++            Long menuId,
++            String actionCode) {
++
++        if (context == null || !context.hasUser()) {
++            throw new PermissionDeniedException("로그인 사용자만 실행할 수 있습니다.");
++        }
++
++        ActionPermission permission =
++                permissionDao.selectActionPermission(menuId, actionCode);
++
++        if (permission == null) {
++            throw new IllegalArgumentException(
++                    "사용할 수 없는 Menu Action입니다. "
++                            + "menuId=" + menuId
++                            + ", actionCode=" + actionCode);
++        }
++
++        int actionBit = parseBit(permission.getActionBit());
++
++        if (actionBit == 0) {
++            throw new PermissionDeniedException(
++                    "Action 종류의 권한 비트가 정의되지 않았습니다. ACT_KIND="
++                            + permission.getActionKind());
++        }
++
++        AuthorityAttribute authority = getAuthority(context.authId());
++
++        if (!authority.allows(permission.getMenuCode(), actionBit)) {
++            throw new PermissionDeniedException(
++                    "실행 권한이 없습니다. menu=" + permission.getMenuCode()
++                            + ", action=" + actionCode);
++        }
++    }
++
++    /** 권한에 포함된 메뉴만 반환한다. (사용·활성 메뉴 기준) */
++    public List<Menu> getPermittedMenus(
++            AuthorityAttribute authority,
++            String langCd) {
++
++        return menuService.getMenus(langCd)
++                .stream()
++                .filter(menu -> authority.hasMenu(menu.getMenuCode()))
++                .toList();
++    }
++
++    private static int parseBit(String value) {
++        if (value == null || value.isBlank()) {
++            return 0;
++        }
++
++        try {
++            return Integer.parseInt(value.trim(), 16);
++        } catch (NumberFormatException e) {
++            return 0;
++        }
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/security/dao/PermissionDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/dao/PermissionDao.java
+new file mode 100644
+index 0000000..672df49
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/dao/PermissionDao.java
+@@ -0,0 +1,17 @@
++package com.asdp.juprovider.core.security.dao;
++
++import org.apache.ibatis.annotations.Param;
++
++import com.asdp.juprovider.core.security.dto.ActionPermission;
++
++public interface PermissionDao {
++
++    /** 사용 중인 권한의 AUTH_ATTR. 권한이 없거나 미사용이면 null */
++    String selectActiveAuthAttr(
++            @Param("authId") Long authId);
++
++    /** 사용 중인 Menu + Action의 권한 판단 정보. 없으면 null */
++    ActionPermission selectActionPermission(
++            @Param("menuId") Long menuId,
++            @Param("actionCode") String actionCode);
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/security/dto/ActionPermission.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/dto/ActionPermission.java
+new file mode 100644
+index 0000000..f4834f1
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/security/dto/ActionPermission.java
+@@ -0,0 +1,37 @@
++package com.asdp.juprovider.core.security.dto;
++
++/**
++ * Menu Action 실행 권한 판단 정보.
++ *
++ * actionBit: ACT_KIND(MACT) 공통코드의 COM_VAL (16진 문자열)
++ */
++public class ActionPermission {
++
++    private String menuCode;
++    private String actionKind;
++    private String actionBit;
++
++    public String getMenuCode() {
++        return menuCode;
++    }
++
++    public void setMenuCode(String menuCode) {
++        this.menuCode = menuCode;
++    }
++
++    public String getActionKind() {
++        return actionKind;
++    }
++
++    public void setActionKind(String actionKind) {
++        this.actionKind = actionKind;
++    }
++
++    public String getActionBit() {
++        return actionBit;
++    }
++
++    public void setActionBit(String actionBit) {
++        this.actionBit = actionBit;
++    }
++}
+diff --git a/juprovider.core/src/main/resources/mapper/ClientMapper.xml b/juprovider.core/src/main/resources/mapper/ClientMapper.xml
+new file mode 100644
+index 0000000..078826d
+--- /dev/null
++++ b/juprovider.core/src/main/resources/mapper/ClientMapper.xml
+@@ -0,0 +1,95 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
++        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
++
++<mapper namespace="com.asdp.juprovider.core.client.dao.ClientDao">
++
++    <resultMap id="clientResultMap"
++               type="com.asdp.juprovider.core.client.dto.JuClient">
++        <id property="clientId" column="CLIENT_ID"/>
++        <result property="keyHash" column="KEY_HASH"/>
++        <result property="useYn" column="USE_YN"/>
++        <result property="keyIssuedAt" column="KEY_ISSUED_DT"/>
++        <result property="lastSeenAt" column="LAST_SEEN_DT"/>
++        <result property="createdAt" column="CREATED_DT"/>
++        <result property="clientName" column="CLIENT_NM"/>
++        <result property="clientDescription" column="CLIENT_DESC"/>
++    </resultMap>
++
++    <sql id="clientColumns">
++        c.CLIENT_ID,
++        c.KEY_HASH,
++        c.USE_YN,
++        c.KEY_ISSUED_DT,
++        c.LAST_SEEN_DT,
++        c.CREATED_DT,
++        d.CLIENT_NM,
++        d.CLIENT_DESC
++    </sql>
++
++    <select id="selectClient" resultMap="clientResultMap">
++        SELECT <include refid="clientColumns"/>
++          FROM ju_client c
++          LEFT JOIN ju_client_detail d
++            ON d.CLIENT_ID = c.CLIENT_ID
++         WHERE c.CLIENT_ID = #{clientId}
++    </select>
++
++    <select id="selectClients" resultMap="clientResultMap">
++        SELECT <include refid="clientColumns"/>
++          FROM ju_client c
++          LEFT JOIN ju_client_detail d
++            ON d.CLIENT_ID = c.CLIENT_ID
++         ORDER BY c.CLIENT_ID
++    </select>
++
++    <insert id="insertClient">
++        INSERT INTO ju_client (
++            CLIENT_ID,
++            KEY_HASH,
++            USE_YN,
++            KEY_ISSUED_DT
++        ) VALUES (
++            #{clientId},
++            #{keyHash},
++            'YENO0001',
++            CURRENT_TIMESTAMP(3)
++        )
++    </insert>
++
++    <insert id="upsertClientDetail">
++        INSERT INTO ju_client_detail (
++            CLIENT_ID,
++            CLIENT_NM,
++            CLIENT_DESC
++        ) VALUES (
++            #{clientId},
++            #{clientName},
++            #{clientDescription}
++        )
++        ON DUPLICATE KEY UPDATE
++            CLIENT_NM = VALUES(CLIENT_NM),
++            CLIENT_DESC = VALUES(CLIENT_DESC)
++    </insert>
++
++    <update id="updateClientKey">
++        UPDATE ju_client
++           SET KEY_HASH = #{keyHash},
++               KEY_ISSUED_DT = CURRENT_TIMESTAMP(3),
++               USE_YN = 'YENO0001'
++         WHERE CLIENT_ID = #{clientId}
++    </update>
++
++    <update id="updateUseYn">
++        UPDATE ju_client
++           SET USE_YN = #{useYn}
++         WHERE CLIENT_ID = #{clientId}
++    </update>
++
++    <update id="updateLastSeen">
++        UPDATE ju_client
++           SET LAST_SEEN_DT = CURRENT_TIMESTAMP(3)
++         WHERE CLIENT_ID = #{clientId}
++    </update>
++
++</mapper>
+diff --git a/juprovider.core/src/main/resources/mapper/PermissionMapper.xml b/juprovider.core/src/main/resources/mapper/PermissionMapper.xml
+new file mode 100644
+index 0000000..80efb4e
+--- /dev/null
++++ b/juprovider.core/src/main/resources/mapper/PermissionMapper.xml
+@@ -0,0 +1,34 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
++        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
++
++<mapper namespace="com.asdp.juprovider.core.security.dao.PermissionDao">
++
++    <select id="selectActiveAuthAttr" resultType="java.lang.String">
++        SELECT a.AUTH_ATTR
++          FROM ju_auth a
++         WHERE a.AUTH_ID = #{authId}
++           AND a.USE_YN = 'YENO0001'
++    </select>
++
++    <select id="selectActionPermission"
++            resultType="com.asdp.juprovider.core.security.dto.ActionPermission">
++        SELECT m.MNU_CD   AS menuCode,
++               a.ACT_KIND AS actionKind,
++               c.COM_VAL  AS actionBit
++          FROM ju_menu_action a
++          JOIN ju_menu m
++            ON m.MNU_ID = a.MNU_ID
++           AND m.USE_YN = 'YENO0001'
++           AND m.ENABLED_YN = 'YENO0001'
++          LEFT JOIN ju_com_code c
++            ON c.GRP_CD = 'MACT'
++           AND c.COM_CD = a.ACT_KIND
++           AND c.USE_YN = 'YENO0001'
++         WHERE a.MNU_ID = #{menuId}
++           AND a.ACT_CD = #{actionCode}
++           AND a.USE_YN = 'YENO0001'
++           AND a.ENABLED_YN = 'YENO0001'
++    </select>
++
++</mapper>
