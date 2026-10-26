@@ -14,8 +14,7 @@
 | 작업 | 위치 | 상태 |
 |---|---|---|
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 재사용 후보. PC-A 미적용 |
-| SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | 재사용 후보. PC-A 미적용 |
-
+| SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
 | SYS-01 | **PC-A juproject `feature/sys-01`** 미커밋 | 빌드·migtest Up/Down/재Up·smoke 19건 PASS, 검토 대기 |
 
 ## 최근 확인
