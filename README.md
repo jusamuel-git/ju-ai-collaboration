@@ -11,6 +11,7 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 | 설계 | [architecture/DB_CORE_API.md](architecture/DB_CORE_API.md) (ChatGPT v1.2 — v1.3 재설계 승인, 단계별 구현 중) |
 | 유효한 결정 | [decisions/CURRENT.md](decisions/CURRENT.md) |
 | 지금 할 일 | [worklog/CURRENT.md](worklog/CURRENT.md) |
+| **운영 방식 (토큰 절약)** | [WORKFLOW_EFFICIENT.md](WORKFLOW_EFFICIENT.md) — 세션 시작 때 읽는 범위, 단계 지시·보고 형식, Claude Code 구현 중심 |
 | 개발 환경 | [environment/DEV_ENVIRONMENT_STANDARD.md](environment/DEV_ENVIRONMENT_STANDARD.md) |
 | 빌드 환경 | [environment/BUILD_ENVIRONMENT_STANDARD.md](environment/BUILD_ENVIRONMENT_STANDARD.md) |
 | PC별 상태 | [environment/PC_A.md](environment/PC_A.md) (기준 PC), [environment/PC_B.md](environment/PC_B.md) |
@@ -38,6 +39,7 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 | `reviews/claude/`, `reviews/chatgpt/` | 조사·검토·설계 요청 원문 (`YYYY-MM-DD_주제.md`) |
 | `worklog/` | `CURRENT.md` + 날짜별 작업 기록 |
 | `tools/` | 환경 점검·로컬 빌드 스크립트 |
+| `templates/` | 제품 저장소용 `CLAUDE.md` 등 |
 
 ## 규칙 요약
 

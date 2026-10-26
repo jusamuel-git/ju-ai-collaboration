@@ -8,6 +8,7 @@
 |---|---|
 | ChatGPT | ENV-0 diff·빌드 결과 검토: [reviews/claude/2026-10-26_env-0_result.md](../reviews/claude/2026-10-26_env-0_result.md) |
 | 사용자 | Jenkins 전역 변수 `JU_TOMCAT_HOME` 추가 (push **전**) → `feature/env-0` commit/push → Jenkins `main` 확인 |
+| 사용자 | PC-A에 Claude Code 설치, 제품 저장소 `CLAUDE.md` 추가 여부 결정 ([WORKFLOW_EFFICIENT.md](../WORKFLOW_EFFICIENT.md) 7장) |
 | 사용자·Claude | 오늘 저녁 PC-B를 PC-A 기준에 맞춤 ([environment/PC_B.md](../environment/PC_B.md)) |
 
 ## 미커밋 변경의 위치
