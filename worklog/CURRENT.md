@@ -7,7 +7,7 @@
 | 담당 | 내용 |
 |---|---|
 | ChatGPT | JU-0A diff 검토: [reviews/claude/2026-10-26_ju-0a_result.md](../reviews/claude/2026-10-26_ju-0a_result.md) |
-| 사용자 | JU-0A SQL DB 검증 실행 승인 여부 |
+| ChatGPT | JU-0A 테스트 DB 결과 확인 → 최종 승인: [reviews/claude/2026-10-26_ju-0a_db_test.md](../reviews/claude/2026-10-26_ju-0a_db_test.md) |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
 ## 미커밋 변경의 위치
@@ -21,3 +21,4 @@
 - 2026-10-26 10:31 PC-A `feature/env-0`: 환경검사 PASS 30 / WARN 4 / FAIL 0, 로컬 빌드 5종 PASS, `global.json` → SDK 10.0.402
 - 2026-10-26 14:28 PC-A `feature/ju-0a`: 로컬 빌드 5종 PASS
 - 2026-10-26 14:40 **ENV-0 완료**: Jenkins `juprovider-ai` #12 (`e36a0ed`, `HTTP_PORT` 8081·Health Check OK), `juproject-ai` #2 (`50d7ac3`, SDK 10.0.402) SUCCESS
+- 2026-10-26 14:59 JU-0A 테스트 DB 검증 PASS (신규 설치 = 기존 설치+04 = PC-A 사본+04, 04 재실행 무변경)
