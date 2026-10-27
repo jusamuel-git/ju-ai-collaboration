@@ -1,0 +1,1697 @@
+diff --git a/database/README.md b/database/README.md
+index ccfe1b9..fd2ddcc 100644
+--- a/database/README.md
++++ b/database/README.md
+@@ -22,6 +22,7 @@ mysql -u <user> -p juprovider < migration/03_validate_baseline.sql
+ |---|---|---|
+ | `migration/04_ju0_install_fix.sql` | seed V2.2로 설치한 DB | 프로토콜 유형 코드, .NET 버전, 장치 유형 코드 정정, 초기 관리자 생성(사용자가 없을 때만), `ju_menu_action`(+detail), 메뉴 Action 종류 공통코드 MACT |
+ | `migration/05_ju1_auth.sql` | 04 적용 DB | `ju_client`(+detail) 생성, `AUTH_ATTR`를 메뉴코드+권한비트 형식으로 변환 (재실행 안전) |
++| `migration/06_protocol_actions.sql` | 05 적용 DB | 프로토콜관리(`M02010100`) Menu Action 10개(+detail, 다국어). 스키마 변경 없음 (재실행 안전) |
+ 
+ ## 초기 관리자
+ 
+diff --git a/database/migration/06_protocol_actions.sql b/database/migration/06_protocol_actions.sql
+new file mode 100644
+index 0000000..eaf6e00
+--- /dev/null
++++ b/database/migration/06_protocol_actions.sql
+@@ -0,0 +1,85 @@
++-- ============================================================
++-- Protocol Reference Implementation: 프로토콜관리(M02010100) Menu Action
++-- 2026-10-27 (결정 AC1~AC13, PR-Q1~Q5)
++-- 05_ju1_auth.sql 다음에 실행한다. 여러 번 실행해도 결과가 같다. 스키마 변경 없음.
++-- MNU_ID는 MNU_CD로 찾는다 (대리키 하드코딩 없음).
++-- ============================================================
++SET NAMES utf8mb4;
++
++-- 1) Action (ACT_CD, ACT_KIND, HANDLER_ID, SORT_ORD)
++INSERT INTO ju_menu_action (MNU_ID, ACT_CD, ACT_KIND, HANDLER_ID, USE_YN, ENABLED_YN, SORT_ORD)
++SELECT m.MNU_ID, v.ACT_CD, v.ACT_KIND, v.HANDLER_ID, 'YENO0001', 'YENO0001', v.SORT_ORD
++  FROM ju_menu m
++  JOIN (
++        SELECT 'GRP_SEARCH' AS ACT_CD, 'MACT0001' AS ACT_KIND, 'PROTOCOL.GRP_SEARCH' AS HANDLER_ID, 10 AS SORT_ORD
++        UNION ALL SELECT 'GRP_GET',    'MACT0001', 'PROTOCOL.GRP_GET',    20
++        UNION ALL SELECT 'GRP_CREATE', 'MACT0003', 'PROTOCOL.GRP_CREATE', 30
++        UNION ALL SELECT 'GRP_UPDATE', 'MACT0004', 'PROTOCOL.GRP_UPDATE', 40
++        UNION ALL SELECT 'GRP_DELETE', 'MACT0005', 'PROTOCOL.GRP_DELETE', 50
++        UNION ALL SELECT 'SEARCH',     'MACT0001', 'PROTOCOL.SEARCH',     60
++        UNION ALL SELECT 'GET',        'MACT0001', 'PROTOCOL.GET',        70
++        UNION ALL SELECT 'CREATE',     'MACT0003', 'PROTOCOL.CREATE',     80
++        UNION ALL SELECT 'UPDATE',     'MACT0004', 'PROTOCOL.UPDATE',     90
++        UNION ALL SELECT 'DELETE',     'MACT0005', 'PROTOCOL.DELETE',     100
++       ) v
++ WHERE m.MNU_CD = 'M02010100'
++   AND NOT EXISTS (SELECT 1 FROM ju_menu_action a WHERE a.MNU_ID = m.MNU_ID AND a.ACT_CD = v.ACT_CD)
++ ORDER BY v.SORT_ORD;
++
++-- 2) Action 표시정보 (다국어 키 = ACTION.PROTOCOL.{ACT_CD}.NM/.DESC)
++INSERT INTO ju_menu_action_detail (ACT_ID, ACT_NM, ACT_DESC, ACT_NM_KEY, ACT_DESC_KEY)
++SELECT a.ACT_ID, v.ACT_NM, v.ACT_DESC,
++       CONCAT('ACTION.PROTOCOL.', a.ACT_CD, '.NM'),
++       CONCAT('ACTION.PROTOCOL.', a.ACT_CD, '.DESC')
++  FROM ju_menu m
++  JOIN ju_menu_action a ON a.MNU_ID = m.MNU_ID
++  JOIN (
++        SELECT 'GRP_SEARCH' AS ACT_CD, '그룹조회' AS ACT_NM, '프로토콜 그룹 목록을 조회합니다.' AS ACT_DESC
++        UNION ALL SELECT 'GRP_GET',    '그룹상세', '프로토콜 그룹 상세정보를 조회합니다.'
++        UNION ALL SELECT 'GRP_CREATE', '그룹추가', '프로토콜 그룹을 등록하고 기본 프로토콜을 만듭니다.'
++        UNION ALL SELECT 'GRP_UPDATE', '그룹수정', '프로토콜 그룹 정보를 수정합니다.'
++        UNION ALL SELECT 'GRP_DELETE', '그룹삭제', '프로토콜 그룹과 하위 프로토콜을 삭제합니다.'
++        UNION ALL SELECT 'SEARCH',     '조회',     '프로토콜 목록을 조회합니다.'
++        UNION ALL SELECT 'GET',        '상세조회', '프로토콜과 패킷 정의를 조회합니다.'
++        UNION ALL SELECT 'CREATE',     '추가',     '프로토콜을 등록합니다.'
++        UNION ALL SELECT 'UPDATE',     '수정',     '프로토콜과 패킷 정의를 수정합니다.'
++        UNION ALL SELECT 'DELETE',     '삭제',     '프로토콜을 삭제합니다.'
++       ) v ON v.ACT_CD = a.ACT_CD
++ WHERE m.MNU_CD = 'M02010100'
++   AND NOT EXISTS (SELECT 1 FROM ju_menu_action_detail d WHERE d.ACT_ID = a.ACT_ID);
++
++-- 3) 다국어 (Action명)
++INSERT INTO ju_multi_lang (LANG_CD, RES_KEY, RES_VAL)
++SELECT v.LANG_CD, v.RES_KEY, v.RES_VAL
++  FROM (
++        SELECT 'LANG0001' AS LANG_CD, 'ACTION.PROTOCOL.GRP_SEARCH.NM' AS RES_KEY, '그룹조회' AS RES_VAL
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.GRP_GET.NM',    '그룹상세'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.GRP_CREATE.NM', '그룹추가'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.GRP_UPDATE.NM', '그룹수정'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.GRP_DELETE.NM', '그룹삭제'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.SEARCH.NM',     '조회'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.GET.NM',        '상세조회'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.CREATE.NM',     '추가'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.UPDATE.NM',     '수정'
++        UNION ALL SELECT 'LANG0001', 'ACTION.PROTOCOL.DELETE.NM',     '삭제'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.GRP_SEARCH.NM', 'Search groups'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.GRP_GET.NM',    'Group detail'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.GRP_CREATE.NM', 'Add group'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.GRP_UPDATE.NM', 'Edit group'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.GRP_DELETE.NM', 'Delete group'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.SEARCH.NM',     'Search'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.GET.NM',        'Detail'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.CREATE.NM',     'Add'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.UPDATE.NM',     'Edit'
++        UNION ALL SELECT 'LANG0002', 'ACTION.PROTOCOL.DELETE.NM',     'Delete'
++       ) v
++ WHERE EXISTS (SELECT 1 FROM ju_language l WHERE l.LANG_CD = v.LANG_CD)
++   AND NOT EXISTS (SELECT 1 FROM ju_multi_lang x WHERE x.LANG_CD = v.LANG_CD AND x.RES_KEY = v.RES_KEY);
++
++-- 확인
++SELECT a.ACT_CD, a.ACT_KIND, a.HANDLER_ID, d.ACT_NM
++  FROM ju_menu m
++  JOIN ju_menu_action a ON a.MNU_ID = m.MNU_ID
++  LEFT JOIN ju_menu_action_detail d ON d.ACT_ID = a.ACT_ID
++ WHERE m.MNU_CD = 'M02010100'
++ ORDER BY a.SORT_ORD;
+diff --git a/database/seed/02_ju_core_seed.sql b/database/seed/02_ju_core_seed.sql
+index 5e14474..48a5250 100644
+--- a/database/seed/02_ju_core_seed.sql
++++ b/database/seed/02_ju_core_seed.sql
+@@ -1,5 +1,5 @@
+ -- ============================================================
+--- JuProvider Baseline V2.4 Seed
++-- JuProvider Baseline V2.4 Seed (+ 2026-10-27 06: 프로토콜관리 M02010100 Menu Action)
+ -- Fresh-install base data only.
+ -- IMPORTANT: pure DML only; no LOCK/DROP/CREATE/ALTER statements.
+ -- ============================================================
+@@ -420,7 +420,7 @@ INSERT INTO `ju_menu` VALUES
+ (29,'M04010000',28,'MENU0002',2,'@ai','YENO0001','YENO0001',29);
+ 
+ -- ju_menu_action
+--- 시스템장치관리(MNU_ID 15) 화면 Action. ACT_KIND는 공통코드 MACT
++-- 시스템장치관리(MNU_ID 15)·프로토콜관리(MNU_ID 16) 화면 Action. ACT_KIND는 공통코드 MACT
+ INSERT INTO `ju_menu_action` VALUES
+ (1,15,'SEARCH','MACT0001','DEVICE.SEARCH','YENO0001','YENO0001',10),
+ (2,15,'GET','MACT0001','DEVICE.GET','YENO0001','YENO0001',20),
+@@ -431,7 +431,17 @@ INSERT INTO `ju_menu_action` VALUES
+ (7,15,'DISCONNECT','MACT0002','DEVICE.DISCONNECT','YENO0001','YENO0001',70),
+ (8,15,'STATUS','MACT0001','DEVICE.STATUS','YENO0001','YENO0001',80),
+ (9,15,'START','MACT0002','DEVICE.START','YENO0001','YENO0001',90),
+-(10,15,'STOP','MACT0002','DEVICE.STOP','YENO0001','YENO0001',100);
++(10,15,'STOP','MACT0002','DEVICE.STOP','YENO0001','YENO0001',100),
++(11,16,'GRP_SEARCH','MACT0001','PROTOCOL.GRP_SEARCH','YENO0001','YENO0001',10),
++(12,16,'GRP_GET','MACT0001','PROTOCOL.GRP_GET','YENO0001','YENO0001',20),
++(13,16,'GRP_CREATE','MACT0003','PROTOCOL.GRP_CREATE','YENO0001','YENO0001',30),
++(14,16,'GRP_UPDATE','MACT0004','PROTOCOL.GRP_UPDATE','YENO0001','YENO0001',40),
++(15,16,'GRP_DELETE','MACT0005','PROTOCOL.GRP_DELETE','YENO0001','YENO0001',50),
++(16,16,'SEARCH','MACT0001','PROTOCOL.SEARCH','YENO0001','YENO0001',60),
++(17,16,'GET','MACT0001','PROTOCOL.GET','YENO0001','YENO0001',70),
++(18,16,'CREATE','MACT0003','PROTOCOL.CREATE','YENO0001','YENO0001',80),
++(19,16,'UPDATE','MACT0004','PROTOCOL.UPDATE','YENO0001','YENO0001',90),
++(20,16,'DELETE','MACT0005','PROTOCOL.DELETE','YENO0001','YENO0001',100);
+ 
+ -- ju_menu_action_detail
+ INSERT INTO `ju_menu_action_detail` VALUES
+@@ -444,7 +454,17 @@ INSERT INTO `ju_menu_action_detail` VALUES
+ (7,'연결해제','선택한 장치의 연결을 해제합니다.','ACTION.DEVICE.DISCONNECT.NM','ACTION.DEVICE.DISCONNECT.DESC'),
+ (8,'상태조회','장치의 현재 상태를 조회합니다.','ACTION.DEVICE.STATUS.NM','ACTION.DEVICE.STATUS.DESC'),
+ (9,'시작','장치 데이터 수집을 시작합니다.','ACTION.DEVICE.START.NM','ACTION.DEVICE.START.DESC'),
+-(10,'정지','장치 데이터 수집을 정지합니다.','ACTION.DEVICE.STOP.NM','ACTION.DEVICE.STOP.DESC');
++(10,'정지','장치 데이터 수집을 정지합니다.','ACTION.DEVICE.STOP.NM','ACTION.DEVICE.STOP.DESC'),
++(11,'그룹조회','프로토콜 그룹 목록을 조회합니다.','ACTION.PROTOCOL.GRP_SEARCH.NM','ACTION.PROTOCOL.GRP_SEARCH.DESC'),
++(12,'그룹상세','프로토콜 그룹 상세정보를 조회합니다.','ACTION.PROTOCOL.GRP_GET.NM','ACTION.PROTOCOL.GRP_GET.DESC'),
++(13,'그룹추가','프로토콜 그룹을 등록하고 기본 프로토콜을 만듭니다.','ACTION.PROTOCOL.GRP_CREATE.NM','ACTION.PROTOCOL.GRP_CREATE.DESC'),
++(14,'그룹수정','프로토콜 그룹 정보를 수정합니다.','ACTION.PROTOCOL.GRP_UPDATE.NM','ACTION.PROTOCOL.GRP_UPDATE.DESC'),
++(15,'그룹삭제','프로토콜 그룹과 하위 프로토콜을 삭제합니다.','ACTION.PROTOCOL.GRP_DELETE.NM','ACTION.PROTOCOL.GRP_DELETE.DESC'),
++(16,'조회','프로토콜 목록을 조회합니다.','ACTION.PROTOCOL.SEARCH.NM','ACTION.PROTOCOL.SEARCH.DESC'),
++(17,'상세조회','프로토콜과 패킷 정의를 조회합니다.','ACTION.PROTOCOL.GET.NM','ACTION.PROTOCOL.GET.DESC'),
++(18,'추가','프로토콜을 등록합니다.','ACTION.PROTOCOL.CREATE.NM','ACTION.PROTOCOL.CREATE.DESC'),
++(19,'수정','프로토콜과 패킷 정의를 수정합니다.','ACTION.PROTOCOL.UPDATE.NM','ACTION.PROTOCOL.UPDATE.DESC'),
++(20,'삭제','프로토콜을 삭제합니다.','ACTION.PROTOCOL.DELETE.NM','ACTION.PROTOCOL.DELETE.DESC');
+ 
+ -- ju_menu_detail
+ INSERT INTO `ju_menu_detail` VALUES
+@@ -788,6 +808,16 @@ INSERT INTO `ju_multi_lang` VALUES
+ ('LANG0001','ACTION.DEVICE.STATUS.NM','상태조회'),
+ ('LANG0001','ACTION.DEVICE.START.NM','시작'),
+ ('LANG0001','ACTION.DEVICE.STOP.NM','정지'),
++('LANG0001','ACTION.PROTOCOL.GRP_SEARCH.NM','그룹조회'),
++('LANG0001','ACTION.PROTOCOL.GRP_GET.NM','그룹상세'),
++('LANG0001','ACTION.PROTOCOL.GRP_CREATE.NM','그룹추가'),
++('LANG0001','ACTION.PROTOCOL.GRP_UPDATE.NM','그룹수정'),
++('LANG0001','ACTION.PROTOCOL.GRP_DELETE.NM','그룹삭제'),
++('LANG0001','ACTION.PROTOCOL.SEARCH.NM','조회'),
++('LANG0001','ACTION.PROTOCOL.GET.NM','상세조회'),
++('LANG0001','ACTION.PROTOCOL.CREATE.NM','추가'),
++('LANG0001','ACTION.PROTOCOL.UPDATE.NM','수정'),
++('LANG0001','ACTION.PROTOCOL.DELETE.NM','삭제'),
+ ('LANG0002','ACTION.DEVICE.SEARCH.NM','Search'),
+ ('LANG0002','ACTION.DEVICE.GET.NM','Detail'),
+ ('LANG0002','ACTION.DEVICE.CREATE.NM','Create'),
+@@ -797,7 +827,17 @@ INSERT INTO `ju_multi_lang` VALUES
+ ('LANG0002','ACTION.DEVICE.DISCONNECT.NM','Disconnect'),
+ ('LANG0002','ACTION.DEVICE.STATUS.NM','Status'),
+ ('LANG0002','ACTION.DEVICE.START.NM','Start'),
+-('LANG0002','ACTION.DEVICE.STOP.NM','Stop');
++('LANG0002','ACTION.DEVICE.STOP.NM','Stop'),
++('LANG0002','ACTION.PROTOCOL.GRP_SEARCH.NM','Search groups'),
++('LANG0002','ACTION.PROTOCOL.GRP_GET.NM','Group detail'),
++('LANG0002','ACTION.PROTOCOL.GRP_CREATE.NM','Add group'),
++('LANG0002','ACTION.PROTOCOL.GRP_UPDATE.NM','Edit group'),
++('LANG0002','ACTION.PROTOCOL.GRP_DELETE.NM','Delete group'),
++('LANG0002','ACTION.PROTOCOL.SEARCH.NM','Search'),
++('LANG0002','ACTION.PROTOCOL.GET.NM','Detail'),
++('LANG0002','ACTION.PROTOCOL.CREATE.NM','Add'),
++('LANG0002','ACTION.PROTOCOL.UPDATE.NM','Edit'),
++('LANG0002','ACTION.PROTOCOL.DELETE.NM','Delete');
+ 
+ -- ju_protocol
+ INSERT INTO `ju_protocol` VALUES
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+index 38cd6c9..ecfe20c 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+@@ -15,7 +15,8 @@ import org.springframework.boot.web.servlet.support.SpringBootServletInitializer
+     "com.asdp.juprovider.core.language.dao",
+     "com.asdp.juprovider.core.security.dao",
+     "com.asdp.juprovider.core.client.dao",
+-    "com.asdp.juprovider.core.action.dao"
++    "com.asdp.juprovider.core.action.dao",
++    "com.asdp.juprovider.core.protocol.dao"
+ })
+ public class JuProviderApplication extends SpringBootServletInitializer {
+ 
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/action/ProtocolContractTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/action/ProtocolContractTest.java
+new file mode 100644
+index 0000000..9304c4b
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/action/ProtocolContractTest.java
+@@ -0,0 +1,92 @@
++package com.asdp.juprovider.action;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.Mockito.mock;
++
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.stream.Collectors;
++
++import org.junit.jupiter.api.Test;
++
++import com.asdp.juprovider.core.action.ActionHandler;
++import com.asdp.juprovider.core.action.contract.ActionInputValidator;
++import com.asdp.juprovider.core.action.contract.ActionOutputNormalizer;
++import com.asdp.juprovider.core.action.contract.ListOutput;
++import com.asdp.juprovider.core.action.contract.OutputKind;
++import com.asdp.juprovider.core.action.exception.ActionValidationException;
++import com.asdp.juprovider.core.protocol.ProtocolI18nKeys;
++import com.asdp.juprovider.core.protocol.action.*;
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++class ProtocolContractTest {
++
++    private final ProtocolService service = mock(ProtocolService.class);
++
++    private final List<ActionHandler> handlers = List.of(
++            new ProtocolGroupSearchAction(service), new ProtocolGroupGetAction(service),
++            new ProtocolGroupCreateAction(service), new ProtocolGroupUpdateAction(service),
++            new ProtocolGroupDeleteAction(service), new ProtocolSearchAction(service),
++            new ProtocolGetAction(service), new ProtocolCreateAction(service),
++            new ProtocolUpdateAction(service), new ProtocolDeleteAction(service));
++
++    private final ActionInputValidator validator = new ActionInputValidator(
++            grp -> "PROT".equals(grp) ? Set.of("PROT0000", "PROT0003") : Set.of("YENO0000", "YENO0001", "YENO0002"));
++
++    @Test
++    void allTenHandlersDeclareVersion1Contracts() {
++        Set<String> ids = handlers.stream().map(ActionHandler::getHandlerId).collect(Collectors.toSet());
++        assertEquals(Set.of(
++                "PROTOCOL.GRP_SEARCH", "PROTOCOL.GRP_GET", "PROTOCOL.GRP_CREATE", "PROTOCOL.GRP_UPDATE", "PROTOCOL.GRP_DELETE",
++                "PROTOCOL.SEARCH", "PROTOCOL.GET", "PROTOCOL.CREATE", "PROTOCOL.UPDATE", "PROTOCOL.DELETE"), ids);
++        for (ActionHandler h : handlers) {
++            assertEquals(1, h.contract().contractVersion(), h.getHandlerId());
++            assertTrue(!h.contract().output().isEmpty(), h.getHandlerId());
++        }
++        assertEquals(OutputKind.LIST, ProtocolContracts.GRP_SEARCH.outputKind());
++        assertEquals(OutputKind.RECORD, ProtocolContracts.GET.outputKind());
++        assertEquals(OutputKind.KEY, ProtocolContracts.GRP_DELETE.outputKind());
++    }
++
++    @Test
++    void createInputContract() {
++        validator.validate(ProtocolContracts.CREATE, Map.of(
++                "ptlGrpCd", "SMK", "ptlCd", "SMK0001", "ptlType", "PROT0003", "ptlNm", "n",
++                "packets", List.of(Map.of("packetSeq", 1, "direction", "TX"))));
++        ActionValidationException e = assertThrows(ActionValidationException.class,
++                () -> validator.validate(ProtocolContracts.GRP_CREATE, Map.of("ptlGrpCd", "ABCDEFGHIJKLMNOPQ", "ptlGrpNm", "n")));
++        assertEquals("MAX_LENGTH", e.getErrors().get(0).code());
++    }
++
++    @Test
++    void deterministicI18nKeys() {
++        assertEquals("PROTOCOL_GROUP.GTEC.NM", ProtocolI18nKeys.groupName("GTEC"));
++        assertEquals("PROTOCOL_GROUP.GTEC.DESC", ProtocolI18nKeys.groupDesc("GTEC"));
++        assertEquals("PROTOCOL.GTEC.GTEC0001.NM", ProtocolI18nKeys.protocolName("GTEC", "GTEC0001"));
++        assertEquals("PROTOCOL.GTEC.GTEC0001.DESC", ProtocolI18nKeys.protocolDesc("GTEC", "GTEC0001"));
++    }
++
++    @Test
++    @SuppressWarnings("unchecked")
++    void outputIsNormalizedToDeclaredFieldsInOrder() {
++        java.util.Map<String, Object> raw = new java.util.HashMap<>();
++        raw.put("ptlCd", "GTEC0001");
++        raw.put("ptlGrpCd", "GTEC");
++        raw.put("internal", "x");
++        raw.put("packets", List.of(new java.util.HashMap<>(Map.of("direction", "TX", "packetSeq", 1, "secret", 1))));
++        Map<String, Object> out = (Map<String, Object>) ActionOutputNormalizer.normalize(ProtocolContracts.GET, raw);
++        assertEquals(List.of("ptlGrpCd", "ptlCd", "ptlType", "ptlTypeNm", "ptlLen", "ptlNm", "ptlDesc", "useYn",
++                "ptlVal", "ptlNmKey", "ptlDescKey", "packets"), List.copyOf(out.keySet()));
++        assertTrue(out.containsKey("ptlLen") && out.get("ptlLen") == null);
++        Map<String, Object> packet = (Map<String, Object>) ((List<?>) out.get("packets")).get(0);
++        assertTrue(!packet.containsKey("secret") && packet.containsKey("dataPosition"));
++
++        ListOutput<?> list = (ListOutput<?>) ActionOutputNormalizer.normalize(
++                ProtocolContracts.GRP_SEARCH, ListOutput.of(List.of(Map.of("ptlGrpCd", "A"))));
++        assertEquals(1, list.total());
++        assertEquals(9, ((Map<?, ?>) list.items().get(0)).size());
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionFieldError.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionFieldError.java
+index 9c7c05e..73a71ee 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionFieldError.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionFieldError.java
+@@ -17,4 +17,8 @@ public record ActionFieldError(
+     public static final String INVALID_CODE = "INVALID_CODE";
+     public static final String UNKNOWN_FIELD = "UNKNOWN_FIELD";
+     public static final String CONTRACT_VERSION_MISMATCH = "CONTRACT_VERSION_MISMATCH";
++    /** 형은 맞지만 업무 규칙상 허용되지 않는 값 (범위, 허용 목록 등) */
++    public static final String INVALID_VALUE = "INVALID_VALUE";
++    /** 목록 안의 중복 (예: packets[].packetSeq) */
++    public static final String DUPLICATE = "DUPLICATE";
+ }
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionOutputNormalizer.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionOutputNormalizer.java
+new file mode 100644
+index 0000000..2ff85c0
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionOutputNormalizer.java
+@@ -0,0 +1,62 @@
++package com.asdp.juprovider.core.action.contract;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Output 계약 모양 고정 (결정 AC4)
++ *
++ * Map 결과(LIST의 items 원소, RECORD, KEY)를 계약에 선언된 필드만, 선언 순서대로 담은 Map으로 바꾼다.
++ * - 값이 없는 선언 필드는 null로 포함 (필드가 빠지지 않음 → Binding 안정)
++ * - 선언되지 않은 필드는 제외
++ * - LIST 형 필드(원소가 OBJECT)는 원소도 같은 규칙
++ * Map이 아닌 결과(bean 등)와 output 선언이 비어 있는 계약은 그대로 둔다.
++ */
++public final class ActionOutputNormalizer {
++
++    private ActionOutputNormalizer() {
++    }
++
++    public static Object normalize(ActionContract contract, Object data) {
++        if (data == null || contract.output().isEmpty()) {
++            return data;
++        }
++        return switch (contract.outputKind()) {
++            case LIST -> data instanceof ListOutput<?> list
++                    ? new ListOutput<>(normalizeList(contract.output(), list.items()), list.total())
++                    : data;
++            case RECORD, KEY -> normalizeValue(contract.output(), data);
++            case NONE -> data;
++        };
++    }
++
++    private static List<Object> normalizeList(List<FieldSpec> fields, List<?> items) {
++        List<Object> result = new ArrayList<>(items.size());
++        for (Object item : items) {
++            result.add(normalizeValue(fields, item));
++        }
++        return result;
++    }
++
++    private static Object normalizeValue(List<FieldSpec> fields, Object value) {
++        if (!(value instanceof Map<?, ?> map)) {
++            return value;
++        }
++        Map<String, Object> result = new LinkedHashMap<>();
++        for (FieldSpec spec : fields) {
++            Object v = map.get(spec.name());
++            if (v != null && spec.type() == FieldType.LIST
++                    && spec.element() != null
++                    && spec.element().type() == FieldType.OBJECT
++                    && v instanceof List<?> list) {
++                v = normalizeList(spec.element().fields(), list);
++            } else if (v != null && spec.type() == FieldType.OBJECT) {
++                v = normalizeValue(spec.fields(), v);
++            }
++            result.put(spec.name(), v);
++        }
++        return result;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
+index 4ea69f4..c3226a7 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
+@@ -19,6 +19,7 @@ import com.asdp.juprovider.core.action.contract.ActionContract;
+ import com.asdp.juprovider.core.action.contract.ActionFieldError;
+ import com.asdp.juprovider.core.action.contract.ActionInput;
+ import com.asdp.juprovider.core.action.contract.ActionInputValidator;
++import com.asdp.juprovider.core.action.contract.ActionOutputNormalizer;
+ import com.asdp.juprovider.core.action.contract.ListOutput;
+ import com.asdp.juprovider.core.action.dao.ActionCodeDao;
+ import com.asdp.juprovider.core.action.exception.ActionNotFoundException;
+@@ -204,6 +205,12 @@ public class DynamicActionService {
+ 
+         if (contract != null && result.isSuccess()) {
+             checkOutputKind(contract, result.getData(), handlerId);
++            /*
++             * 출력 모양 고정: 선언 필드만, 선언 순서, 값 없으면 null (결정 AC4)
++             */
++            result = ActionResult.ok(
++                    ActionOutputNormalizer.normalize(contract, result.getData()),
++                    result.getMessage());
+         }
+ 
+         return new ActionExecution(
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/ProtocolI18nKeys.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/ProtocolI18nKeys.java
+new file mode 100644
+index 0000000..eb1ee8a
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/ProtocolI18nKeys.java
+@@ -0,0 +1,33 @@
++package com.asdp.juprovider.core.protocol;
++
++/**
++ * 다국어 리소스 키 결정적 규칙 (결정 AC9): 도메인 + 자연키 + 필드
++ *
++ *   PROTOCOL_GROUP.{ptlGrpCd}.NM / .DESC
++ *   PROTOCOL.{ptlGrpCd}.{ptlCd}.NM / .DESC
++ *
++ * 기존 seed 키(PROTOCOL_GROUP.GTEC.NM, PROTOCOL.GTEC.GTEC0001.NM)와 같은 형식.
++ */
++public final class ProtocolI18nKeys {
++
++    public static final String BASE_LANG = "LANG0001";
++
++    private ProtocolI18nKeys() {
++    }
++
++    public static String groupName(String ptlGrpCd) {
++        return "PROTOCOL_GROUP." + ptlGrpCd + ".NM";
++    }
++
++    public static String groupDesc(String ptlGrpCd) {
++        return "PROTOCOL_GROUP." + ptlGrpCd + ".DESC";
++    }
++
++    public static String protocolName(String ptlGrpCd, String ptlCd) {
++        return "PROTOCOL." + ptlGrpCd + "." + ptlCd + ".NM";
++    }
++
++    public static String protocolDesc(String ptlGrpCd, String ptlCd) {
++        return "PROTOCOL." + ptlGrpCd + "." + ptlCd + ".DESC";
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolActionHandler.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolActionHandler.java
+new file mode 100644
+index 0000000..a4e221c
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolActionHandler.java
+@@ -0,0 +1,45 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import java.util.function.BiFunction;
++
++import com.asdp.juprovider.core.action.ActionHandler;
++import com.asdp.juprovider.core.action.ActionRequest;
++import com.asdp.juprovider.core.action.ActionResult;
++import com.asdp.juprovider.core.action.contract.ActionContract;
++import com.asdp.juprovider.core.action.contract.ActionInput;
++
++/**
++ * 프로토콜 Action Handler 공통: HANDLER_ID = PROTOCOL.{ACT_CD}, 계약 선언, 검증된 입력으로 Service 호출
++ */
++public abstract class ProtocolActionHandler implements ActionHandler {
++
++    private final String handlerId;
++
++    private final ActionContract contract;
++
++    private final BiFunction<ActionInput, String, Object> operation;
++
++    protected ProtocolActionHandler(
++            String actionCode,
++            ActionContract contract,
++            BiFunction<ActionInput, String, Object> operation) {
++        this.handlerId = "PROTOCOL." + actionCode;
++        this.contract = contract;
++        this.operation = operation;
++    }
++
++    @Override
++    public String getHandlerId() {
++        return handlerId;
++    }
++
++    @Override
++    public ActionContract contract() {
++        return contract;
++    }
++
++    @Override
++    public ActionResult<?> execute(ActionRequest request) {
++        return ActionResult.ok(operation.apply(request.getInput(), request.getLangCd()));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolContracts.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolContracts.java
+new file mode 100644
+index 0000000..e16aeb1
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolContracts.java
+@@ -0,0 +1,174 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import static com.asdp.juprovider.core.action.contract.FieldSpec.code;
++import static com.asdp.juprovider.core.action.contract.FieldSpec.integer;
++import static com.asdp.juprovider.core.action.contract.FieldSpec.listOf;
++import static com.asdp.juprovider.core.action.contract.FieldSpec.string;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import com.asdp.juprovider.core.action.contract.ActionContract;
++import com.asdp.juprovider.core.action.contract.FieldSpec;
++import com.asdp.juprovider.core.action.contract.OutputKind;
++
++/**
++ * 프로토콜관리(M02010100) Action 계약 — 모두 contractVersion 1 (결정 AC3·AC4·AC8·AC11)
++ * Designer는 이 계약(필드명·형·필수·출력 kind)에 Binding 한다.
++ */
++public final class ProtocolContracts {
++
++    public static final int VERSION = 1;
++
++    private ProtocolContracts() {
++    }
++
++    // ----- 공통 필드 -----
++
++    private static FieldSpec grpKey() {
++        return string("ptlGrpCd", true, 20);
++    }
++
++    private static FieldSpec ptlKey() {
++        return string("ptlCd", true, 20);
++    }
++
++    private static List<FieldSpec> groupOutput(boolean detail) {
++        List<FieldSpec> f = new ArrayList<>(List.of(
++                string("ptlGrpCd", true, 20),
++                string("ptlGrpNm", false, 100),
++                string("ptlGrpDesc", false, 500),
++                integer("pollingIntval", true),
++                integer("timeoutMs", true),
++                integer("retryCnt", true),
++                code("useYn", true, "YENO"),
++                integer("sortOrd", true),
++                integer("protocolCount", true)));
++        if (detail) {
++            f.add(string("ptlGrpNmKey", false, 200));
++            f.add(string("ptlGrpDescKey", false, 200));
++        }
++        return f;
++    }
++
++    private static List<FieldSpec> packetFields() {
++        return List.of(
++                integer("packetSeq", true),
++                string("packetType", false, 30),
++                string("direction", true, 10),
++                string("packetExpr", false, 4000),
++                string("responsePtlCd", false, 20),
++                string("parseRule", false, 4000),
++                integer("dataCount", false),
++                string("dataType", false, 30),
++                string("dataPosition", false, 100));
++    }
++
++    private static List<FieldSpec> protocolOutput(boolean detail) {
++        List<FieldSpec> f = new ArrayList<>(List.of(
++                string("ptlGrpCd", true, 20),
++                string("ptlCd", true, 20),
++                code("ptlType", true, "PROT"),
++                string("ptlTypeNm", false, 100),
++                integer("ptlLen", false),
++                string("ptlNm", false, 100),
++                string("ptlDesc", false, 500),
++                code("useYn", true, "YENO")));
++        if (detail) {
++            f.add(string("ptlVal", false, 4000));
++            f.add(string("ptlNmKey", false, 200));
++            f.add(string("ptlDescKey", false, 200));
++            List<FieldSpec> packet = new ArrayList<>(packetFields());
++            packet.add(code("useYn", true, "YENO"));
++            f.add(listOf("packets", true, packet));
++        } else {
++            f.add(integer("packetCount", true));
++        }
++        return f;
++    }
++
++    private static List<FieldSpec> groupKeyOutput() {
++        return List.of(string("ptlGrpCd", true, 20));
++    }
++
++    private static List<FieldSpec> protocolKeyOutput() {
++        return List.of(string("ptlGrpCd", true, 20), string("ptlCd", true, 20));
++    }
++
++    // ----- Group -----
++
++    public static final ActionContract GRP_SEARCH = ActionContract.of(VERSION, OutputKind.LIST,
++            List.of(string("keyword", false, 100), code("useYn", false, "YENO")),
++            groupOutput(false));
++
++    public static final ActionContract GRP_GET = ActionContract.of(VERSION, OutputKind.RECORD,
++            List.of(grpKey()),
++            groupOutput(true));
++
++    /** ptlGrpCd는 16자 이하 (기본 프로토콜 {그룹}0000 이 PTL_CD 20자에 들어가야 함) */
++    public static final ActionContract GRP_CREATE = ActionContract.of(VERSION, OutputKind.KEY,
++            List.of(
++                    string("ptlGrpCd", true, 16),
++                    string("ptlGrpNm", true, 100),
++                    string("ptlGrpDesc", false, 500),
++                    integer("pollingIntval", false),
++                    integer("timeoutMs", false),
++                    integer("retryCnt", false),
++                    integer("sortOrd", false)),
++            groupKeyOutput());
++
++    public static final ActionContract GRP_UPDATE = ActionContract.of(VERSION, OutputKind.KEY,
++            List.of(
++                    grpKey(),
++                    string("ptlGrpNm", false, 100),
++                    string("ptlGrpDesc", false, 500),
++                    integer("pollingIntval", false),
++                    integer("timeoutMs", false),
++                    integer("retryCnt", false),
++                    integer("sortOrd", false),
++                    code("useYn", false, "YENO")),
++            groupKeyOutput());
++
++    public static final ActionContract GRP_DELETE = ActionContract.of(VERSION, OutputKind.KEY,
++            List.of(grpKey()),
++            groupKeyOutput());
++
++    // ----- Protocol -----
++
++    public static final ActionContract SEARCH = ActionContract.of(VERSION, OutputKind.LIST,
++            List.of(grpKey(), string("keyword", false, 100), code("useYn", false, "YENO")),
++            protocolOutput(false));
++
++    public static final ActionContract GET = ActionContract.of(VERSION, OutputKind.RECORD,
++            List.of(grpKey(), ptlKey()),
++            protocolOutput(true));
++
++    public static final ActionContract CREATE = ActionContract.of(VERSION, OutputKind.KEY,
++            List.of(
++                    grpKey(),
++                    ptlKey(),
++                    code("ptlType", true, "PROT"),
++                    integer("ptlLen", false),
++                    string("ptlVal", false, 4000),
++                    string("ptlNm", true, 100),
++                    string("ptlDesc", false, 500),
++                    listOf("packets", false, packetFields())),
++            protocolKeyOutput());
++
++    public static final ActionContract UPDATE = ActionContract.of(VERSION, OutputKind.KEY,
++            List.of(
++                    grpKey(),
++                    ptlKey(),
++                    code("ptlType", false, "PROT"),
++                    integer("ptlLen", false),
++                    string("ptlVal", false, 4000),
++                    string("ptlNm", false, 100),
++                    string("ptlDesc", false, 500),
++                    code("useYn", false, "YENO"),
++                    listOf("packets", false, packetFields())),
++            protocolKeyOutput());
++
++    public static final ActionContract DELETE = ActionContract.of(VERSION, OutputKind.KEY,
++            List.of(grpKey(), ptlKey()),
++            protocolKeyOutput());
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolCreateAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolCreateAction.java
+new file mode 100644
+index 0000000..34a5f01
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolCreateAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.CREATE (M02010100/CREATE, contractVersion 1) */
++@Component
++public class ProtocolCreateAction extends ProtocolActionHandler {
++
++    public ProtocolCreateAction(ProtocolService service) {
++        super("CREATE", ProtocolContracts.CREATE, (in, lang) -> service.createProtocol(in));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolDeleteAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolDeleteAction.java
+new file mode 100644
+index 0000000..554e491
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolDeleteAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.DELETE (M02010100/DELETE, contractVersion 1) */
++@Component
++public class ProtocolDeleteAction extends ProtocolActionHandler {
++
++    public ProtocolDeleteAction(ProtocolService service) {
++        super("DELETE", ProtocolContracts.DELETE, (in, lang) -> service.deleteProtocol(in));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGetAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGetAction.java
+new file mode 100644
+index 0000000..ecb064d
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGetAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.GET (M02010100/GET, contractVersion 1) */
++@Component
++public class ProtocolGetAction extends ProtocolActionHandler {
++
++    public ProtocolGetAction(ProtocolService service) {
++        super("GET", ProtocolContracts.GET, (in, lang) -> service.getProtocol(in, lang));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupCreateAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupCreateAction.java
+new file mode 100644
+index 0000000..545b313
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupCreateAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.GRP_CREATE (M02010100/GRP_CREATE, contractVersion 1) */
++@Component
++public class ProtocolGroupCreateAction extends ProtocolActionHandler {
++
++    public ProtocolGroupCreateAction(ProtocolService service) {
++        super("GRP_CREATE", ProtocolContracts.GRP_CREATE, (in, lang) -> service.createGroup(in));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupDeleteAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupDeleteAction.java
+new file mode 100644
+index 0000000..1d8c631
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupDeleteAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.GRP_DELETE (M02010100/GRP_DELETE, contractVersion 1) */
++@Component
++public class ProtocolGroupDeleteAction extends ProtocolActionHandler {
++
++    public ProtocolGroupDeleteAction(ProtocolService service) {
++        super("GRP_DELETE", ProtocolContracts.GRP_DELETE, (in, lang) -> service.deleteGroup(in));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupGetAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupGetAction.java
+new file mode 100644
+index 0000000..6e996db
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupGetAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.GRP_GET (M02010100/GRP_GET, contractVersion 1) */
++@Component
++public class ProtocolGroupGetAction extends ProtocolActionHandler {
++
++    public ProtocolGroupGetAction(ProtocolService service) {
++        super("GRP_GET", ProtocolContracts.GRP_GET, (in, lang) -> service.getGroup(in, lang));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupSearchAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupSearchAction.java
+new file mode 100644
+index 0000000..7b497ca
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupSearchAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.GRP_SEARCH (M02010100/GRP_SEARCH, contractVersion 1) */
++@Component
++public class ProtocolGroupSearchAction extends ProtocolActionHandler {
++
++    public ProtocolGroupSearchAction(ProtocolService service) {
++        super("GRP_SEARCH", ProtocolContracts.GRP_SEARCH, (in, lang) -> service.searchGroups(in, lang));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupUpdateAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupUpdateAction.java
+new file mode 100644
+index 0000000..67f19f5
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolGroupUpdateAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.GRP_UPDATE (M02010100/GRP_UPDATE, contractVersion 1) */
++@Component
++public class ProtocolGroupUpdateAction extends ProtocolActionHandler {
++
++    public ProtocolGroupUpdateAction(ProtocolService service) {
++        super("GRP_UPDATE", ProtocolContracts.GRP_UPDATE, (in, lang) -> service.updateGroup(in));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolSearchAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolSearchAction.java
+new file mode 100644
+index 0000000..f46b5b5
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolSearchAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.SEARCH (M02010100/SEARCH, contractVersion 1) */
++@Component
++public class ProtocolSearchAction extends ProtocolActionHandler {
++
++    public ProtocolSearchAction(ProtocolService service) {
++        super("SEARCH", ProtocolContracts.SEARCH, (in, lang) -> service.searchProtocols(in, lang));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolUpdateAction.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolUpdateAction.java
+new file mode 100644
+index 0000000..f256091
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolUpdateAction.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocol.action;
++
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** PROTOCOL.UPDATE (M02010100/UPDATE, contractVersion 1) */
++@Component
++public class ProtocolUpdateAction extends ProtocolActionHandler {
++
++    public ProtocolUpdateAction(ProtocolService service) {
++        super("UPDATE", ProtocolContracts.UPDATE, (in, lang) -> service.updateProtocol(in));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/dao/ProtocolDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/dao/ProtocolDao.java
+new file mode 100644
+index 0000000..b64f694
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/dao/ProtocolDao.java
+@@ -0,0 +1,89 @@
++package com.asdp.juprovider.core.protocol.dao;
++
++import java.util.List;
++import java.util.Map;
++
++import org.apache.ibatis.annotations.Param;
++
++/**
++ * Protocol Reference Implementation DAO (ProtocolMapper.xml)
++ */
++public interface ProtocolDao {
++
++    List<Map<String, Object>> selectGroups(
++            @Param("keyword") String keyword,
++            @Param("useYn") String useYn,
++            @Param("langCd") String langCd);
++
++    Map<String, Object> selectGroup(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("langCd") String langCd);
++
++    String selectGroupUseYn(@Param("ptlGrpCd") String ptlGrpCd);
++
++    int insertGroup(Map<String, Object> group);
++
++    int insertGroupDetail(Map<String, Object> detail);
++
++    int updateGroup(Map<String, Object> group);
++
++    int updateGroupDetail(Map<String, Object> detail);
++
++    List<String> selectActiveDevicesByGroup(@Param("ptlGrpCd") String ptlGrpCd);
++
++    List<String> selectExperimentRefsByGroup(@Param("ptlGrpCd") String ptlGrpCd);
++
++    List<String> selectExperimentRefsByProtocol(@Param("ptlCd") String ptlCd);
++
++    int softDeletePacketsByGroup(@Param("ptlGrpCd") String ptlGrpCd);
++
++    int softDeleteProtocolsByGroup(@Param("ptlGrpCd") String ptlGrpCd);
++
++    int softDeleteGroup(@Param("ptlGrpCd") String ptlGrpCd);
++
++    List<Map<String, Object>> selectProtocols(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("keyword") String keyword,
++            @Param("useYn") String useYn,
++            @Param("langCd") String langCd);
++
++    Map<String, Object> selectProtocol(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("ptlCd") String ptlCd,
++            @Param("langCd") String langCd);
++
++    List<Map<String, Object>> selectPackets(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("ptlCd") String ptlCd);
++
++    String selectProtocolUseYn(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("ptlCd") String ptlCd);
++
++    int insertProtocol(Map<String, Object> protocol);
++
++    int insertProtocolDetail(Map<String, Object> detail);
++
++    int updateProtocol(Map<String, Object> protocol);
++
++    int updateProtocolDetail(Map<String, Object> detail);
++
++    int deletePackets(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("ptlCd") String ptlCd);
++
++    int insertPacket(Map<String, Object> packet);
++
++    int softDeletePackets(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("ptlCd") String ptlCd);
++
++    int softDeleteProtocol(
++            @Param("ptlGrpCd") String ptlGrpCd,
++            @Param("ptlCd") String ptlCd);
++
++    int upsertMultiLang(
++            @Param("langCd") String langCd,
++            @Param("resKey") String resKey,
++            @Param("resVal") String resVal);
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/service/ProtocolService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/service/ProtocolService.java
+new file mode 100644
+index 0000000..0472742
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/service/ProtocolService.java
+@@ -0,0 +1,422 @@
++package com.asdp.juprovider.core.protocol.service;
++
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
++
++import com.asdp.juprovider.core.action.contract.ActionFieldError;
++import com.asdp.juprovider.core.action.contract.ActionInput;
++import com.asdp.juprovider.core.action.contract.ListOutput;
++import com.asdp.juprovider.core.action.exception.ActionConflictException;
++import com.asdp.juprovider.core.action.exception.ActionNotFoundException;
++import com.asdp.juprovider.core.action.exception.ActionValidationException;
++import com.asdp.juprovider.core.protocol.ProtocolI18nKeys;
++import com.asdp.juprovider.core.protocol.dao.ProtocolDao;
++
++/**
++ * Protocol Reference Implementation 업무 Service (결정 AC8·AC9, PR-Q1~Q5)
++ *
++ * - 쓰기 메서드는 Action 실행 트랜잭션(DynamicActionService) 안에서 호출되며, 단독 호출 시에도 @Transactional
++ * - 삭제는 논리 삭제(USE_YN=YENO0002)
++ * - GRP_CREATE: 그룹 + 기본 프로토콜 {그룹}0000 을 같은 트랜잭션에서 생성 (PR-Q1)
++ * - GRP_DELETE: 장치 + 하위 프로토콜의 실험 참조를 전체 선검사 → 하나라도 사용 중이면 409,
++ *               아니면 Packet → Protocol → Group 순서로 같은 트랜잭션에서 논리 삭제 (PR-Q3)
++ */
++@Service
++public class ProtocolService {
++
++    public static final String YES = "YENO0001";
++
++    public static final String NO = "YENO0002";
++
++    public static final String DEFAULT_PROTOCOL_SUFFIX = "0000";
++
++    public static final String DEFAULT_PROTOCOL_TYPE = "PROT0000";
++
++    public static final String DEFAULT_PROTOCOL_NAME = "기본 TX/RX";
++
++    public static final String DEFAULT_PROTOCOL_DESC = "그룹 생성 시 자동 생성";
++
++    private static final Set<String> DIRECTIONS = Set.of("TX", "RX");
++
++    private final ProtocolDao protocolDao;
++
++    public ProtocolService(ProtocolDao protocolDao) {
++        this.protocolDao = protocolDao;
++    }
++
++    // ===== Group =====
++
++    public ListOutput<Map<String, Object>> searchGroups(ActionInput in, String langCd) {
++        return ListOutput.of(protocolDao.selectGroups(
++                in.getString("keyword"),
++                in.getString("useYn"),
++                langCd));
++    }
++
++    public Map<String, Object> getGroup(ActionInput in, String langCd) {
++        String grp = in.getString("ptlGrpCd");
++        Map<String, Object> group = protocolDao.selectGroup(grp, langCd);
++        if (group == null) {
++            throw new ActionNotFoundException("프로토콜 그룹이 없습니다. ptlGrpCd=" + grp);
++        }
++        return group;
++    }
++
++    @Transactional
++    public Map<String, Object> createGroup(ActionInput in) {
++        String grp = in.getString("ptlGrpCd");
++
++        List<ActionFieldError> errors = new ArrayList<>();
++        Integer polling = positive(in, "pollingIntval", 1, errors);
++        Integer timeout = positive(in, "timeoutMs", 1, errors);
++        Integer retry = positive(in, "retryCnt", 0, errors);
++        failIfAny(errors);
++
++        if (protocolDao.selectGroupUseYn(grp) != null) {
++            throw new ActionConflictException("이미 있는 프로토콜 그룹입니다. ptlGrpCd=" + grp);
++        }
++
++        Map<String, Object> group = new HashMap<>();
++        group.put("ptlGrpCd", grp);
++        group.put("pollingIntval", polling == null ? 1000 : polling);
++        group.put("timeoutMs", timeout == null ? 3000 : timeout);
++        group.put("retryCnt", retry == null ? 3 : retry);
++        group.put("sortOrd", in.has("sortOrd") ? in.getInteger("sortOrd") : 0);
++        protocolDao.insertGroup(group);
++
++        Map<String, Object> detail = new HashMap<>();
++        detail.put("ptlGrpCd", grp);
++        detail.put("ptlGrpNm", in.getString("ptlGrpNm"));
++        detail.put("ptlGrpDesc", in.getString("ptlGrpDesc"));
++        detail.put("nmKey", ProtocolI18nKeys.groupName(grp));
++        detail.put("descKey", ProtocolI18nKeys.groupDesc(grp));
++        protocolDao.insertGroupDetail(detail);
++        upsertLang(ProtocolI18nKeys.groupName(grp), in.getString("ptlGrpNm"));
++        upsertLang(ProtocolI18nKeys.groupDesc(grp), in.getString("ptlGrpDesc"));
++
++        /*
++         * PR-Q1: 기본 프로토콜 {그룹}0000 — 같은 트랜잭션. 실패하면 그룹도 함께 rollback.
++         */
++        String defaultCd = grp + DEFAULT_PROTOCOL_SUFFIX;
++        insertProtocolRows(grp, defaultCd, DEFAULT_PROTOCOL_TYPE, null, null,
++                DEFAULT_PROTOCOL_NAME, DEFAULT_PROTOCOL_DESC);
++
++        return key(grp, null);
++    }
++
++    @Transactional
++    public Map<String, Object> updateGroup(ActionInput in) {
++        String grp = in.getString("ptlGrpCd");
++        if (protocolDao.selectGroupUseYn(grp) == null) {
++            throw new ActionNotFoundException("프로토콜 그룹이 없습니다. ptlGrpCd=" + grp);
++        }
++
++        List<ActionFieldError> errors = new ArrayList<>();
++        Integer polling = positive(in, "pollingIntval", 1, errors);
++        Integer timeout = positive(in, "timeoutMs", 1, errors);
++        Integer retry = positive(in, "retryCnt", 0, errors);
++        String useYn = reactivateOnly(in, errors);
++        failIfAny(errors);
++
++        Map<String, Object> group = new HashMap<>();
++        group.put("ptlGrpCd", grp);
++        group.put("pollingIntval", polling);
++        group.put("timeoutMs", timeout);
++        group.put("retryCnt", retry);
++        group.put("sortOrd", in.has("sortOrd") ? in.getInteger("sortOrd") : null);
++        group.put("useYn", useYn);
++        protocolDao.updateGroup(group);
++
++        Map<String, Object> detail = new HashMap<>();
++        detail.put("ptlGrpCd", grp);
++        detail.put("ptlGrpNm", in.getString("ptlGrpNm"));
++        detail.put("ptlGrpDesc", in.getString("ptlGrpDesc"));
++        protocolDao.updateGroupDetail(detail);
++        upsertLang(ProtocolI18nKeys.groupName(grp), in.getString("ptlGrpNm"));
++        upsertLang(ProtocolI18nKeys.groupDesc(grp), in.getString("ptlGrpDesc"));
++
++        return key(grp, null);
++    }
++
++    @Transactional
++    public Map<String, Object> deleteGroup(ActionInput in) {
++        String grp = in.getString("ptlGrpCd");
++        if (!YES.equals(protocolDao.selectGroupUseYn(grp))) {
++            throw new ActionNotFoundException("사용 중인 프로토콜 그룹이 없습니다. ptlGrpCd=" + grp);
++        }
++
++        /*
++         * PR-Q3: 전체 선검사 — 장치 참조 + 하위 프로토콜의 실험 참조. 하나라도 있으면 409 (아무것도 바꾸지 않음)
++         */
++        List<String> devices = protocolDao.selectActiveDevicesByGroup(grp);
++        List<String> experiments = protocolDao.selectExperimentRefsByGroup(grp);
++        if (!devices.isEmpty() || !experiments.isEmpty()) {
++            throw new ActionConflictException(
++                    "사용 중인 프로토콜 그룹은 삭제할 수 없습니다. ptlGrpCd=" + grp
++                            + (devices.isEmpty() ? "" : ", 장치=" + devices)
++                            + (experiments.isEmpty() ? "" : ", 실험(실험ID:프로토콜)=" + experiments));
++        }
++
++        /*
++         * Packet → Protocol → Group (같은 트랜잭션)
++         */
++        protocolDao.softDeletePacketsByGroup(grp);
++        protocolDao.softDeleteProtocolsByGroup(grp);
++        protocolDao.softDeleteGroup(grp);
++
++        return key(grp, null);
++    }
++
++    // ===== Protocol =====
++
++    public ListOutput<Map<String, Object>> searchProtocols(ActionInput in, String langCd) {
++        return ListOutput.of(protocolDao.selectProtocols(
++                in.getString("ptlGrpCd"),
++                in.getString("keyword"),
++                in.getString("useYn"),
++                langCd));
++    }
++
++    public Map<String, Object> getProtocol(ActionInput in, String langCd) {
++        String grp = in.getString("ptlGrpCd");
++        String cd = in.getString("ptlCd");
++        Map<String, Object> protocol = protocolDao.selectProtocol(grp, cd, langCd);
++        if (protocol == null) {
++            throw new ActionNotFoundException("프로토콜이 없습니다. ptlGrpCd=" + grp + ", ptlCd=" + cd);
++        }
++        Map<String, Object> result = new LinkedHashMap<>(protocol);
++        result.put("packets", protocolDao.selectPackets(grp, cd));
++        return result;
++    }
++
++    @Transactional
++    public Map<String, Object> createProtocol(ActionInput in) {
++        String grp = in.getString("ptlGrpCd");
++        String cd = in.getString("ptlCd");
++
++        List<ActionFieldError> errors = new ArrayList<>();
++        Integer len = positive(in, "ptlLen", 0, errors);
++        List<Map<String, Object>> packets = packets(in, grp, cd, errors);
++        failIfAny(errors);
++
++        requireActiveGroup(grp);
++        if (protocolDao.selectProtocolUseYn(grp, cd) != null) {
++            throw new ActionConflictException("이미 있는 프로토콜입니다. ptlGrpCd=" + grp + ", ptlCd=" + cd);
++        }
++
++        insertProtocolRows(grp, cd, in.getString("ptlType"), len, in.getString("ptlVal"),
++                in.getString("ptlNm"), in.getString("ptlDesc"));
++        if (packets != null) {
++            packets.forEach(protocolDao::insertPacket);
++        }
++
++        return key(grp, cd);
++    }
++
++    @Transactional
++    public Map<String, Object> updateProtocol(ActionInput in) {
++        String grp = in.getString("ptlGrpCd");
++        String cd = in.getString("ptlCd");
++
++        List<ActionFieldError> errors = new ArrayList<>();
++        Integer len = positive(in, "ptlLen", 0, errors);
++        String useYn = reactivateOnly(in, errors);
++        List<Map<String, Object>> packets = packets(in, grp, cd, errors);
++        failIfAny(errors);
++
++        if (protocolDao.selectProtocolUseYn(grp, cd) == null) {
++            throw new ActionNotFoundException("프로토콜이 없습니다. ptlGrpCd=" + grp + ", ptlCd=" + cd);
++        }
++        requireActiveGroup(grp);
++
++        Map<String, Object> protocol = new HashMap<>();
++        protocol.put("ptlGrpCd", grp);
++        protocol.put("ptlCd", cd);
++        protocol.put("ptlType", in.getString("ptlType"));
++        protocol.put("ptlLen", len);
++        protocol.put("ptlVal", in.getString("ptlVal"));
++        protocol.put("useYn", useYn);
++        protocolDao.updateProtocol(protocol);
++
++        Map<String, Object> detail = new HashMap<>();
++        detail.put("ptlGrpCd", grp);
++        detail.put("ptlCd", cd);
++        detail.put("ptlNm", in.getString("ptlNm"));
++        detail.put("ptlDesc", in.getString("ptlDesc"));
++        protocolDao.updateProtocolDetail(detail);
++        upsertLang(ProtocolI18nKeys.protocolName(grp, cd), in.getString("ptlNm"));
++        upsertLang(ProtocolI18nKeys.protocolDesc(grp, cd), in.getString("ptlDesc"));
++
++        /*
++         * packets를 보내면 전체 교체 (보내지 않으면 유지)
++         */
++        if (packets != null) {
++            protocolDao.deletePackets(grp, cd);
++            packets.forEach(protocolDao::insertPacket);
++        }
++
++        return key(grp, cd);
++    }
++
++    @Transactional
++    public Map<String, Object> deleteProtocol(ActionInput in) {
++        String grp = in.getString("ptlGrpCd");
++        String cd = in.getString("ptlCd");
++        if (!YES.equals(protocolDao.selectProtocolUseYn(grp, cd))) {
++            throw new ActionNotFoundException("사용 중인 프로토콜이 없습니다. ptlGrpCd=" + grp + ", ptlCd=" + cd);
++        }
++
++        List<String> experiments = protocolDao.selectExperimentRefsByProtocol(cd);
++        if (!experiments.isEmpty()) {
++            throw new ActionConflictException(
++                    "실험에서 사용 중인 프로토콜은 삭제할 수 없습니다. ptlCd=" + cd
++                            + ", 실험(실험ID:프로토콜)=" + experiments);
++        }
++
++        protocolDao.softDeletePackets(grp, cd);
++        protocolDao.softDeleteProtocol(grp, cd);
++
++        return key(grp, cd);
++    }
++
++    // ===== 내부 =====
++
++    private void insertProtocolRows(
++            String grp,
++            String cd,
++            String type,
++            Integer len,
++            String val,
++            String name,
++            String desc) {
++        Map<String, Object> protocol = new HashMap<>();
++        protocol.put("ptlGrpCd", grp);
++        protocol.put("ptlCd", cd);
++        protocol.put("ptlType", type);
++        protocol.put("ptlLen", len);
++        protocol.put("ptlVal", val);
++        protocolDao.insertProtocol(protocol);
++
++        Map<String, Object> detail = new HashMap<>();
++        detail.put("ptlGrpCd", grp);
++        detail.put("ptlCd", cd);
++        detail.put("ptlNm", name);
++        detail.put("ptlDesc", desc);
++        detail.put("nmKey", ProtocolI18nKeys.protocolName(grp, cd));
++        detail.put("descKey", ProtocolI18nKeys.protocolDesc(grp, cd));
++        protocolDao.insertProtocolDetail(detail);
++        upsertLang(ProtocolI18nKeys.protocolName(grp, cd), name);
++        upsertLang(ProtocolI18nKeys.protocolDesc(grp, cd), desc);
++    }
++
++    private void requireActiveGroup(String grp) {
++        String useYn = protocolDao.selectGroupUseYn(grp);
++        if (useYn == null) {
++            throw new ActionNotFoundException("프로토콜 그룹이 없습니다. ptlGrpCd=" + grp);
++        }
++        if (!YES.equals(useYn)) {
++            throw new ActionConflictException("삭제된 프로토콜 그룹입니다. ptlGrpCd=" + grp);
++        }
++    }
++
++    /** LANG0001 값만 저장 (결정 AC9). 값이 없으면 건드리지 않는다. */
++    private void upsertLang(String key, String value) {
++        if (value != null) {
++            protocolDao.upsertMultiLang(ProtocolI18nKeys.BASE_LANG, key, value);
++        }
++    }
++
++    private static Integer positive(ActionInput in, String name, int min, List<ActionFieldError> errors) {
++        if (!in.has(name)) {
++            return null;
++        }
++        Long value = in.getLong(name);
++        if (value < min || value > Integer.MAX_VALUE) {
++            errors.add(new ActionFieldError(name, ActionFieldError.INVALID_VALUE, min + " 이상이어야 합니다."));
++            return null;
++        }
++        return value.intValue();
++    }
++
++    /** 수정 Action의 useYn은 재사용(YENO0001)만 허용. 삭제는 DELETE Action으로만 (선검사 우회 방지) */
++    private static String reactivateOnly(ActionInput in, List<ActionFieldError> errors) {
++        if (!in.has("useYn")) {
++            return null;
++        }
++        String useYn = in.getString("useYn");
++        if (!YES.equals(useYn)) {
++            errors.add(new ActionFieldError("useYn", ActionFieldError.INVALID_VALUE,
++                    "수정에서는 재사용(YENO0001)만 지정할 수 있습니다. 삭제는 삭제 Action을 사용하세요."));
++            return null;
++        }
++        return useYn;
++    }
++
++    private static List<Map<String, Object>> packets(
++            ActionInput in,
++            String grp,
++            String cd,
++            List<ActionFieldError> errors) {
++        List<ActionInput> items = in.getObjectList("packets");
++        if (items == null) {
++            return null;
++        }
++        List<Map<String, Object>> rows = new ArrayList<>();
++        Set<Long> seqs = new HashSet<>();
++        for (int i = 0; i < items.size(); i++) {
++            ActionInput p = items.get(i);
++            String prefix = "packets[" + i + "].";
++            Long seq = p.getLong("packetSeq");
++            if (seq < 1 || seq > Integer.MAX_VALUE) {
++                errors.add(new ActionFieldError(prefix + "packetSeq", ActionFieldError.INVALID_VALUE, "1 이상이어야 합니다."));
++            } else if (!seqs.add(seq)) {
++                errors.add(new ActionFieldError(prefix + "packetSeq", ActionFieldError.DUPLICATE, "패킷 순번이 중복됩니다."));
++            }
++            if (!DIRECTIONS.contains(p.getString("direction"))) {
++                errors.add(new ActionFieldError(prefix + "direction", ActionFieldError.INVALID_VALUE, "TX 또는 RX만 허용됩니다."));
++            }
++            Long count = p.has("dataCount") ? p.getLong("dataCount") : 0L;
++            if (count < 0 || count > Integer.MAX_VALUE) {
++                errors.add(new ActionFieldError(prefix + "dataCount", ActionFieldError.INVALID_VALUE, "0 이상이어야 합니다."));
++            }
++
++            Map<String, Object> row = new HashMap<>();
++            row.put("ptlGrpCd", grp);
++            row.put("ptlCd", cd);
++            row.put("packetSeq", seq);
++            row.put("packetType", p.getString("packetType"));
++            row.put("direction", p.getString("direction"));
++            row.put("packetExpr", p.getString("packetExpr"));
++            row.put("responsePtlCd", p.getString("responsePtlCd"));
++            row.put("parseRule", p.getString("parseRule"));
++            row.put("dataCount", count);
++            row.put("dataType", p.getString("dataType"));
++            row.put("dataPosition", p.getString("dataPosition"));
++            rows.add(row);
++        }
++        return rows;
++    }
++
++    private static void failIfAny(List<ActionFieldError> errors) {
++        if (!errors.isEmpty()) {
++            throw new ActionValidationException(errors);
++        }
++    }
++
++    private static Map<String, Object> key(String grp, String cd) {
++        Map<String, Object> key = new LinkedHashMap<>();
++        key.put("ptlGrpCd", grp);
++        if (cd != null) {
++            key.put("ptlCd", cd);
++        }
++        return key;
++    }
++}
+diff --git a/juprovider.core/src/main/resources/mapper/ProtocolMapper.xml b/juprovider.core/src/main/resources/mapper/ProtocolMapper.xml
+new file mode 100644
+index 0000000..fc157a1
+--- /dev/null
++++ b/juprovider.core/src/main/resources/mapper/ProtocolMapper.xml
+@@ -0,0 +1,283 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
++        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
++
++<!--
++  Protocol Reference Implementation (결정 AC8·AC9, PR-Q1~Q5)
++  결과 Map의 키는 Action Output 계약 필드명(camelCase)과 같다.
++  useYn 조건: null → 사용 중(YENO0001)만, 'YENO0000' → 전체
++-->
++<mapper namespace="com.asdp.juprovider.core.protocol.dao.ProtocolDao">
++
++    <sql id="useYnFilter">
++        <choose>
++            <when test="useYn == null">AND ${alias}.USE_YN = 'YENO0001'</when>
++            <when test="useYn == 'YENO0000'"></when>
++            <otherwise>AND ${alias}.USE_YN = #{useYn}</otherwise>
++        </choose>
++    </sql>
++
++    <!-- ===== Group ===== -->
++
++    <select id="selectGroups" resultType="map">
++        SELECT g.PTL_GRP_CD                          AS ptlGrpCd,
++               COALESCE(ml.RES_VAL, d.PTL_GRP_NM)    AS ptlGrpNm,
++               COALESCE(md.RES_VAL, d.PTL_GRP_DESC)  AS ptlGrpDesc,
++               g.POLLING_INTVAL                      AS pollingIntval,
++               g.TIMEOUT_MS                          AS timeoutMs,
++               g.RETRY_CNT                           AS retryCnt,
++               g.USE_YN                              AS useYn,
++               g.SORT_ORD                            AS sortOrd,
++               (SELECT COUNT(*) FROM ju_protocol p
++                 WHERE p.PTL_GRP_CD = g.PTL_GRP_CD
++                   AND p.USE_YN = 'YENO0001')        AS protocolCount
++          FROM ju_protocol_group g
++          LEFT JOIN ju_protocol_group_detail d ON d.PTL_GRP_CD = g.PTL_GRP_CD
++          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_GRP_NM_KEY
++          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_GRP_DESC_KEY
++         WHERE 1 = 1
++           <include refid="useYnFilter"><property name="alias" value="g"/></include>
++           <if test="keyword != null">
++           AND (g.PTL_GRP_CD LIKE CONCAT('%', #{keyword}, '%')
++                OR COALESCE(ml.RES_VAL, d.PTL_GRP_NM) LIKE CONCAT('%', #{keyword}, '%'))
++           </if>
++         ORDER BY g.SORT_ORD, g.PTL_GRP_CD
++    </select>
++
++    <select id="selectGroup" resultType="map">
++        SELECT g.PTL_GRP_CD                          AS ptlGrpCd,
++               COALESCE(ml.RES_VAL, d.PTL_GRP_NM)    AS ptlGrpNm,
++               COALESCE(md.RES_VAL, d.PTL_GRP_DESC)  AS ptlGrpDesc,
++               g.POLLING_INTVAL                      AS pollingIntval,
++               g.TIMEOUT_MS                          AS timeoutMs,
++               g.RETRY_CNT                           AS retryCnt,
++               g.USE_YN                              AS useYn,
++               g.SORT_ORD                            AS sortOrd,
++               d.PTL_GRP_NM_KEY                      AS ptlGrpNmKey,
++               d.PTL_GRP_DESC_KEY                    AS ptlGrpDescKey,
++               (SELECT COUNT(*) FROM ju_protocol p
++                 WHERE p.PTL_GRP_CD = g.PTL_GRP_CD
++                   AND p.USE_YN = 'YENO0001')        AS protocolCount
++          FROM ju_protocol_group g
++          LEFT JOIN ju_protocol_group_detail d ON d.PTL_GRP_CD = g.PTL_GRP_CD
++          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_GRP_NM_KEY
++          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_GRP_DESC_KEY
++         WHERE g.PTL_GRP_CD = #{ptlGrpCd}
++    </select>
++
++    <select id="selectGroupUseYn" resultType="string">
++        SELECT USE_YN FROM ju_protocol_group WHERE PTL_GRP_CD = #{ptlGrpCd}
++    </select>
++
++    <insert id="insertGroup">
++        INSERT INTO ju_protocol_group (PTL_GRP_CD, POLLING_INTVAL, TIMEOUT_MS, RETRY_CNT, USE_YN, SORT_ORD)
++        VALUES (#{ptlGrpCd}, #{pollingIntval}, #{timeoutMs}, #{retryCnt}, 'YENO0001', #{sortOrd})
++    </insert>
++
++    <insert id="insertGroupDetail">
++        INSERT INTO ju_protocol_group_detail (PTL_GRP_CD, PTL_GRP_NM, PTL_GRP_DESC, PTL_GRP_NM_KEY, PTL_GRP_DESC_KEY)
++        VALUES (#{ptlGrpCd}, #{ptlGrpNm}, #{ptlGrpDesc,jdbcType=VARCHAR}, #{nmKey}, #{descKey})
++    </insert>
++
++    <update id="updateGroup">
++        UPDATE ju_protocol_group
++           SET POLLING_INTVAL = COALESCE(#{pollingIntval,jdbcType=INTEGER}, POLLING_INTVAL),
++               TIMEOUT_MS     = COALESCE(#{timeoutMs,jdbcType=INTEGER}, TIMEOUT_MS),
++               RETRY_CNT      = COALESCE(#{retryCnt,jdbcType=INTEGER}, RETRY_CNT),
++               SORT_ORD       = COALESCE(#{sortOrd,jdbcType=INTEGER}, SORT_ORD),
++               USE_YN         = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN)
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++    </update>
++
++    <update id="updateGroupDetail">
++        UPDATE ju_protocol_group_detail
++           SET PTL_GRP_NM   = COALESCE(#{ptlGrpNm,jdbcType=VARCHAR}, PTL_GRP_NM),
++               PTL_GRP_DESC = COALESCE(#{ptlGrpDesc,jdbcType=VARCHAR}, PTL_GRP_DESC)
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++    </update>
++
++    <!-- GRP_DELETE 선검사: 이 그룹을 쓰는 사용 중 장치 -->
++    <select id="selectActiveDevicesByGroup" resultType="string">
++        SELECT DEV_CD FROM ju_device
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++           AND USE_YN = 'YENO0001'
++         ORDER BY DEV_CD
++    </select>
++
++    <!-- GRP_DELETE 선검사: 그룹의 사용 중 프로토콜을 참조하는 사용 중 실험 -->
++    <select id="selectExperimentRefsByGroup" resultType="string">
++        SELECT DISTINCT CONCAT(edg.EXP_ID, ':', p.PTL_CD)
++          FROM ju_protocol p
++          JOIN ju_experiment_data_group edg
++            ON p.PTL_CD IN (edg.START_PTL_CD, edg.PAUSE_PTL_CD, edg.STOP_PTL_CD)
++           AND edg.USE_YN = 'YENO0001'
++          JOIN ju_experiment e
++            ON e.EXP_ID = edg.EXP_ID
++           AND e.USE_YN = 'YENO0001'
++         WHERE p.PTL_GRP_CD = #{ptlGrpCd}
++           AND p.USE_YN = 'YENO0001'
++         ORDER BY 1
++    </select>
++
++    <!-- DELETE 선검사: 이 프로토콜을 참조하는 사용 중 실험 -->
++    <select id="selectExperimentRefsByProtocol" resultType="string">
++        SELECT DISTINCT CONCAT(edg.EXP_ID, ':', #{ptlCd})
++          FROM ju_experiment_data_group edg
++          JOIN ju_experiment e
++            ON e.EXP_ID = edg.EXP_ID
++           AND e.USE_YN = 'YENO0001'
++         WHERE #{ptlCd} IN (edg.START_PTL_CD, edg.PAUSE_PTL_CD, edg.STOP_PTL_CD)
++           AND edg.USE_YN = 'YENO0001'
++         ORDER BY 1
++    </select>
++
++    <!-- 논리 삭제 (Packet → Protocol → Group 순서, 같은 Transaction) -->
++    <update id="softDeletePacketsByGroup">
++        UPDATE ju_protocol_packet SET USE_YN = 'YENO0002'
++         WHERE PTL_GRP_CD = #{ptlGrpCd} AND USE_YN = 'YENO0001'
++    </update>
++
++    <update id="softDeleteProtocolsByGroup">
++        UPDATE ju_protocol SET USE_YN = 'YENO0002'
++         WHERE PTL_GRP_CD = #{ptlGrpCd} AND USE_YN = 'YENO0001'
++    </update>
++
++    <update id="softDeleteGroup">
++        UPDATE ju_protocol_group SET USE_YN = 'YENO0002'
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++    </update>
++
++    <!-- ===== Protocol ===== -->
++
++    <select id="selectProtocols" resultType="map">
++        SELECT p.PTL_GRP_CD                          AS ptlGrpCd,
++               p.PTL_CD                              AS ptlCd,
++               p.PTL_TYPE                            AS ptlType,
++               COALESCE(tl.RES_VAL, td.COM_NM)       AS ptlTypeNm,
++               p.PTL_LEN                             AS ptlLen,
++               COALESCE(ml.RES_VAL, d.PTL_NM)        AS ptlNm,
++               COALESCE(md.RES_VAL, d.PTL_DESC)      AS ptlDesc,
++               p.USE_YN                              AS useYn,
++               (SELECT COUNT(*) FROM ju_protocol_packet k
++                 WHERE k.PTL_GRP_CD = p.PTL_GRP_CD AND k.PTL_CD = p.PTL_CD
++                   AND k.USE_YN = 'YENO0001')        AS packetCount
++          FROM ju_protocol p
++          LEFT JOIN ju_protocol_detail d ON d.PTL_GRP_CD = p.PTL_GRP_CD AND d.PTL_CD = p.PTL_CD
++          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_NM_KEY
++          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_DESC_KEY
++          LEFT JOIN ju_com_code_detail td ON td.GRP_CD = 'PROT' AND td.COM_CD = p.PTL_TYPE
++          LEFT JOIN ju_multi_lang tl ON tl.LANG_CD = #{langCd} AND tl.RES_KEY = td.COM_NM_KEY
++         WHERE p.PTL_GRP_CD = #{ptlGrpCd}
++           <include refid="useYnFilter"><property name="alias" value="p"/></include>
++           <if test="keyword != null">
++           AND (p.PTL_CD LIKE CONCAT('%', #{keyword}, '%')
++                OR COALESCE(ml.RES_VAL, d.PTL_NM) LIKE CONCAT('%', #{keyword}, '%'))
++           </if>
++         ORDER BY p.PTL_CD
++    </select>
++
++    <select id="selectProtocol" resultType="map">
++        SELECT p.PTL_GRP_CD                          AS ptlGrpCd,
++               p.PTL_CD                              AS ptlCd,
++               p.PTL_TYPE                            AS ptlType,
++               COALESCE(tl.RES_VAL, td.COM_NM)       AS ptlTypeNm,
++               p.PTL_LEN                             AS ptlLen,
++               p.PTL_VAL                             AS ptlVal,
++               COALESCE(ml.RES_VAL, d.PTL_NM)        AS ptlNm,
++               COALESCE(md.RES_VAL, d.PTL_DESC)      AS ptlDesc,
++               d.PTL_NM_KEY                          AS ptlNmKey,
++               d.PTL_DESC_KEY                        AS ptlDescKey,
++               p.USE_YN                              AS useYn
++          FROM ju_protocol p
++          LEFT JOIN ju_protocol_detail d ON d.PTL_GRP_CD = p.PTL_GRP_CD AND d.PTL_CD = p.PTL_CD
++          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_NM_KEY
++          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_DESC_KEY
++          LEFT JOIN ju_com_code_detail td ON td.GRP_CD = 'PROT' AND td.COM_CD = p.PTL_TYPE
++          LEFT JOIN ju_multi_lang tl ON tl.LANG_CD = #{langCd} AND tl.RES_KEY = td.COM_NM_KEY
++         WHERE p.PTL_GRP_CD = #{ptlGrpCd}
++           AND p.PTL_CD = #{ptlCd}
++    </select>
++
++    <select id="selectPackets" resultType="map">
++        SELECT PACKET_SEQ      AS packetSeq,
++               PACKET_TYPE     AS packetType,
++               DIRECTION       AS direction,
++               PACKET_EXPR     AS packetExpr,
++               RESPONSE_PTL_CD AS responsePtlCd,
++               PARSE_RULE      AS parseRule,
++               DATA_COUNT      AS dataCount,
++               DATA_TYPE       AS dataType,
++               DATA_POSITION   AS dataPosition,
++               USE_YN          AS useYn
++          FROM ju_protocol_packet
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++           AND PTL_CD = #{ptlCd}
++           AND USE_YN = 'YENO0001'
++         ORDER BY PACKET_SEQ
++    </select>
++
++    <select id="selectProtocolUseYn" resultType="string">
++        SELECT USE_YN FROM ju_protocol WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd}
++    </select>
++
++    <insert id="insertProtocol">
++        INSERT INTO ju_protocol (PTL_GRP_CD, PTL_CD, PTL_TYPE, PTL_LEN, PTL_VAL, USE_YN)
++        VALUES (#{ptlGrpCd}, #{ptlCd}, #{ptlType}, #{ptlLen,jdbcType=INTEGER}, #{ptlVal,jdbcType=VARCHAR}, 'YENO0001')
++    </insert>
++
++    <insert id="insertProtocolDetail">
++        INSERT INTO ju_protocol_detail (PTL_GRP_CD, PTL_CD, PTL_NM, PTL_DESC, PTL_NM_KEY, PTL_DESC_KEY)
++        VALUES (#{ptlGrpCd}, #{ptlCd}, #{ptlNm}, #{ptlDesc,jdbcType=VARCHAR}, #{nmKey}, #{descKey})
++    </insert>
++
++    <update id="updateProtocol">
++        UPDATE ju_protocol
++           SET PTL_TYPE = COALESCE(#{ptlType,jdbcType=VARCHAR}, PTL_TYPE),
++               PTL_LEN  = COALESCE(#{ptlLen,jdbcType=INTEGER}, PTL_LEN),
++               PTL_VAL  = COALESCE(#{ptlVal,jdbcType=VARCHAR}, PTL_VAL),
++               USE_YN   = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN)
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++           AND PTL_CD = #{ptlCd}
++    </update>
++
++    <update id="updateProtocolDetail">
++        UPDATE ju_protocol_detail
++           SET PTL_NM   = COALESCE(#{ptlNm,jdbcType=VARCHAR}, PTL_NM),
++               PTL_DESC = COALESCE(#{ptlDesc,jdbcType=VARCHAR}, PTL_DESC)
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++           AND PTL_CD = #{ptlCd}
++    </update>
++
++    <delete id="deletePackets">
++        DELETE FROM ju_protocol_packet WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd}
++    </delete>
++
++    <insert id="insertPacket">
++        INSERT INTO ju_protocol_packet
++            (PTL_GRP_CD, PTL_CD, PACKET_SEQ, PACKET_TYPE, DIRECTION, PACKET_EXPR, RESPONSE_PTL_CD,
++             PARSE_RULE, DATA_COUNT, DATA_TYPE, DATA_POSITION, USE_YN)
++        VALUES
++            (#{ptlGrpCd}, #{ptlCd}, #{packetSeq}, #{packetType,jdbcType=VARCHAR}, #{direction},
++             #{packetExpr,jdbcType=VARCHAR}, #{responsePtlCd,jdbcType=VARCHAR}, #{parseRule,jdbcType=VARCHAR},
++             #{dataCount}, #{dataType,jdbcType=VARCHAR}, #{dataPosition,jdbcType=VARCHAR}, 'YENO0001')
++    </insert>
++
++    <update id="softDeletePackets">
++        UPDATE ju_protocol_packet SET USE_YN = 'YENO0002'
++         WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd} AND USE_YN = 'YENO0001'
++    </update>
++
++    <update id="softDeleteProtocol">
++        UPDATE ju_protocol SET USE_YN = 'YENO0002'
++         WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd}
++    </update>
++
++    <!-- ===== 다국어 (결정 AC9) ===== -->
++
++    <insert id="upsertMultiLang">
++        INSERT INTO ju_multi_lang (LANG_CD, RES_KEY, RES_VAL)
++        VALUES (#{langCd}, #{resKey}, #{resVal})
++        ON DUPLICATE KEY UPDATE RES_VAL = VALUES(RES_VAL)
++    </insert>
++
++</mapper>
