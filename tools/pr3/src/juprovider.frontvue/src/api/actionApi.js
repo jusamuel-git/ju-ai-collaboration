@@ -45,7 +45,7 @@ export async function executeAction(
  * menuCode        : ju_menu.MNU_CD (예: M02010100)
  * actionCode      : GRP_SEARCH, SEARCH, GET, CREATE ...
  * parameters      : 입력 계약(Input Contract)에 선언된 필드만 보낸다 (그 외 UNKNOWN_FIELD)
- * contractVersion : 화면이 기대하는 계약 버전. 서버와 다르면 409 CONTRACT_VERSION_MISMATCH
+ * contractVersion : 화면이 기대하는 계약 버전. 서버와 다르면 400 VALIDATION (errors[].code CONTRACT_VERSION_MISMATCH)
  *
  * 성공: ApiResponse { success, data, contractVersion }
  * 실패: axios 오류. error.response.data = { message, code, errors: [{ field, code, message }] }

@@ -114,7 +114,7 @@ if ($ready) {
     $r = Call 'POST' '/api/action/M02010100/GRP_SEARCH' $ta @{ contractVersion = 1; parameters = @{} } $null
     Check 'executeByCode 형태 GRP_SEARCH v1 → 200 {items,total}' (($r.code -eq 200) -and ($r.raw -match '"items"')) ("code=" + $r.code)
     $r = Call 'POST' '/api/action/M02010100/GRP_SEARCH' $ta @{ contractVersion = 2; parameters = @{} } $null
-    Check 'contractVersion 2 → 409 CONTRACT_VERSION_MISMATCH' (($r.code -eq 409) -and ($r.raw -match 'CONTRACT_VERSION_MISMATCH')) ("code=" + $r.code)
+    Check 'contractVersion 2 → 400 CONTRACT_VERSION_MISMATCH' (($r.code -eq 400) -and ($r.raw -match 'CONTRACT_VERSION_MISMATCH')) ("code=" + $r.code)
     $r = Call 'GET' '/api/auth/me' $tm $null $null
     $pm = @($r.json.data.menus | Where-Object { $_.menuCode -eq 'M02010100' })
     Check '/me smoke_mgr M02010100 permission 01 (버튼 숨김 기준)' (($pm.Count -eq 1) -and ($pm[0].permission -eq '01')) ("perm=" + $pm[0].permission)

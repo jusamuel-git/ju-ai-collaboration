@@ -1,0 +1,777 @@
+From ece48fd09fcf9b53215ae11a9fa124ca6a5f3a5d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 08:47:36 +0900
+Subject: [PATCH] feat(protocol): add protocol management Vue screen on action
+ contracts (PR-3)
+
+- ProtocolManagement.vue (M02010100): group grid, protocol grid, detail form,
+  packet grid, group dialog; all data via Action (MNU_CD + ACT_CD, contractVersion 1)
+- Buttons follow /auth/me permission bits (01/02/04/08); field errors shown per input
+- actionApi.executeByCode / actionError, session.menuPermission / canAction
+- Route /console/device/protocol (meta.menuCode M02010100)
+- Remove legacy /api/core/protocol-groups and /api/core/protocols/{grp} (AC10)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../juprovider/controller/CoreController.java |  10 +-
+ .../com/asdp/juprovider/dao/CoreQueryDao.java |   5 -
+ .../juprovider/service/CoreQueryService.java  |   8 -
+ .../main/resources/mapper/CoreQueryDao.xml    |  24 -
+ juprovider.frontvue/src/api/actionApi.js      |  64 ++-
+ juprovider.frontvue/src/auth/session.js       |  17 +
+ juprovider.frontvue/src/router/index.js       |   8 +
+ .../src/views/device/ProtocolManagement.vue   | 519 ++++++++++++++++++
+ 8 files changed, 608 insertions(+), 47 deletions(-)
+ create mode 100644 juprovider.frontvue/src/views/device/ProtocolManagement.vue
+
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/CoreController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/CoreController.java
+index 788587e..e008c76 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/CoreController.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/CoreController.java
+@@ -49,15 +49,7 @@ public class CoreController {
+         return ApiResponse.ok(coreQueryService.devices());
+     }
+ 
+-    @GetMapping("/protocol-groups")
+-    public ApiResponse<?> protocolGroups() {
+-        return ApiResponse.ok(coreQueryService.protocolGroups());
+-    }
+-
+-    @GetMapping("/protocols/{ptlGrpCd}")
+-    public ApiResponse<?> protocols(@PathVariable String ptlGrpCd) {
+-        return ApiResponse.ok(coreQueryService.protocols(ptlGrpCd));
+-    }
++    // PR-3 (AC10): /protocol-groups, /protocols/{ptlGrpCd} 제거 → 프로토콜관리 Action(M02010100)으로 대체
+ 
+     @GetMapping("/data-groups")
+     public ApiResponse<?> dataGroups() {
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dao/CoreQueryDao.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dao/CoreQueryDao.java
+index d2e2a39..9426862 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/dao/CoreQueryDao.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dao/CoreQueryDao.java
+@@ -21,11 +21,6 @@ public interface CoreQueryDao {
+ 
+     List<Map<String, Object>> selectDevices();
+ 
+-    List<Map<String, Object>> selectProtocolGroups();
+-
+-    List<Map<String, Object>> selectProtocols(
+-            @Param("ptlGrpCd") String ptlGrpCd);
+-
+     List<Map<String, Object>> selectDataGroups();
+ 
+     List<Map<String, Object>> selectDataTags(
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/service/CoreQueryService.java b/juprovider.backend/src/main/java/com/asdp/juprovider/service/CoreQueryService.java
+index 1e0f9fc..db0010b 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/service/CoreQueryService.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/service/CoreQueryService.java
+@@ -35,14 +35,6 @@ public class CoreQueryService {
+         return coreQueryDao.selectDevices();
+     }
+ 
+-    public List<Map<String, Object>> protocolGroups() {
+-        return coreQueryDao.selectProtocolGroups();
+-    }
+-
+-    public List<Map<String, Object>> protocols(String ptlGrpCd) {
+-        return coreQueryDao.selectProtocols(ptlGrpCd);
+-    }
+-
+     public List<Map<String, Object>> dataGroups() {
+         return coreQueryDao.selectDataGroups();
+     }
+diff --git a/juprovider.backend/src/main/resources/mapper/CoreQueryDao.xml b/juprovider.backend/src/main/resources/mapper/CoreQueryDao.xml
+index 1b6ddd0..c69806a 100644
+--- a/juprovider.backend/src/main/resources/mapper/CoreQueryDao.xml
++++ b/juprovider.backend/src/main/resources/mapper/CoreQueryDao.xml
+@@ -95,30 +95,6 @@
+          ORDER BY d.DEV_CD
+     </select>
+ 
+-    <select id="selectProtocolGroups" resultType="map">
+-        SELECT g.*,
+-               d.PTL_GRP_NM,
+-               d.PTL_GRP_DESC
+-          FROM ju_protocol_group g
+-          LEFT JOIN ju_protocol_group_detail d
+-            ON d.PTL_GRP_CD = g.PTL_GRP_CD
+-         WHERE g.USE_YN = 'YENO0001'
+-         ORDER BY g.SORT_ORD, g.PTL_GRP_CD
+-    </select>
+-
+-    <select id="selectProtocols" resultType="map">
+-        SELECT p.*,
+-               d.PTL_NM,
+-               d.PTL_DESC
+-          FROM ju_protocol p
+-          LEFT JOIN ju_protocol_detail d
+-            ON d.PTL_GRP_CD = p.PTL_GRP_CD
+-           AND d.PTL_CD = p.PTL_CD
+-         WHERE p.PTL_GRP_CD = #{ptlGrpCd}
+-           AND p.USE_YN = 'YENO0001'
+-         ORDER BY p.PTL_CD
+-    </select>
+-
+     <select id="selectDataGroups" resultType="map">
+         SELECT g.*,
+                d.DAT_GR_NM,
+diff --git a/juprovider.frontvue/src/api/actionApi.js b/juprovider.frontvue/src/api/actionApi.js
+index 5d9b6d2..8892f5f 100644
+--- a/juprovider.frontvue/src/api/actionApi.js
++++ b/juprovider.frontvue/src/api/actionApi.js
+@@ -37,8 +37,70 @@ export async function executeAction(
+   return response.data
+ }
+ 
++/**
++ * 메뉴코드 기반 Action 호출 (PR-3, Action Contract)
++ *
++ * POST /api/action/{MNU_CD}/{ACT_CD}  body { contractVersion, parameters }
++ *
++ * menuCode        : ju_menu.MNU_CD (예: M02010100)
++ * actionCode      : GRP_SEARCH, SEARCH, GET, CREATE ...
++ * parameters      : 입력 계약(Input Contract)에 선언된 필드만 보낸다 (그 외 UNKNOWN_FIELD)
++ * contractVersion : 화면이 기대하는 계약 버전. 서버와 다르면 400 VALIDATION (errors[].code CONTRACT_VERSION_MISMATCH)
++ *
++ * 성공: ApiResponse { success, data, contractVersion }
++ * 실패: axios 오류. error.response.data = { message, code, errors: [{ field, code, message }] }
++ */
++export async function executeByCode(
++  menuCode,
++  actionCode,
++  parameters = {},
++  { contractVersion, langCd = 'LANG0001' } = {}
++) {
++  if (!/^M\d{8}$/.test(menuCode || '')) {
++    throw new Error('menuCode 형식이 올바르지 않습니다: ' + menuCode)
++  }
++
++  if (!actionCode) {
++    throw new Error('actionCode가 필요합니다.')
++  }
++
++  const body = { parameters }
++
++  if (contractVersion != null) {
++    body.contractVersion = contractVersion
++  }
++
++  const response = await api.post(
++    `/action/${menuCode}/${actionCode}`,
++    body,
++    { params: { langCd } }
++  )
++
++  return response.data
++}
++
++/** Action 오류 응답 → { message, code, fieldErrors: { field: message } } */
++export function actionError(error, fallback = '요청을 처리하지 못했습니다.') {
++  const data = error?.response?.data || {}
++  const fieldErrors = {}
++
++  for (const item of data.errors || []) {
++    if (item?.field && !fieldErrors[item.field]) {
++      fieldErrors[item.field] = item.message || item.code
++    }
++  }
++
++  return {
++    status: error?.response?.status || 0,
++    code: data.code || '',
++    message: data.message || error?.message || fallback,
++    fieldErrors
++  }
++}
++
+ export const actionApi = {
+-  execute: executeAction
++  execute: executeAction,
++  executeByCode
+ }
+ 
+ export default actionApi
+\ No newline at end of file
+diff --git a/juprovider.frontvue/src/auth/session.js b/juprovider.frontvue/src/auth/session.js
+index d392f25..4191d47 100644
+--- a/juprovider.frontvue/src/auth/session.js
++++ b/juprovider.frontvue/src/auth/session.js
+@@ -56,6 +56,23 @@ export function hasMenu(menuCode) {
+   return session.menus.some(menu => menu.menuCode === menuCode)
+ }
+ 
++/**
++ * 메뉴 Action 권한 비트 (PR-3)
++ * /auth/me menus[].permission = AUTH_ATTR 16진 2자리. 01 조회, 02 등록, 04 수정, 08 삭제, 10 실행, 20 기타
++ * 화면 버튼 표시용이다. 실제 권한 검사는 서버가 Action마다 한다 (403).
++ */
++export const PERM = Object.freeze({ VIEW: 0x01, CREATE: 0x02, UPDATE: 0x04, DELETE: 0x08, EXECUTE: 0x10 })
++
++export function menuPermission(menuCode) {
++  const menu = session.menus.find(item => item.menuCode === menuCode)
++  const bits = parseInt(menu?.permission || '0', 16)
++  return Number.isNaN(bits) ? 0 : bits
++}
++
++export function canAction(menuCode, bit) {
++  return (menuPermission(menuCode) & bit) === bit
++}
++
+ /** 로그인 응답 { accessToken, expiresAt, user, passwordChangeRequired } 저장 */
+ export function saveLogin(loginResponse) {
+   sessionStorage.setItem(TOKEN_KEY, loginResponse.accessToken)
+diff --git a/juprovider.frontvue/src/router/index.js b/juprovider.frontvue/src/router/index.js
+index 4be7f2a..76082b6 100644
+--- a/juprovider.frontvue/src/router/index.js
++++ b/juprovider.frontvue/src/router/index.js
+@@ -1,6 +1,7 @@
+ import { createRouter, createWebHistory } from 'vue-router'
+ 
+ import DeviceManagement from '../views/device/DeviceManagement.vue'
++import ProtocolManagement from '../views/device/ProtocolManagement.vue'
+ import LoginView from '../views/auth/LoginView.vue'
+ import PasswordChangeView from '../views/auth/PasswordChangeView.vue'
+ import ForbiddenView from '../views/auth/ForbiddenView.vue'
+@@ -35,6 +36,13 @@ const routes = [
+     component: DeviceManagement,
+     // ju_menu M02010000 (장치관리, MNU_ID 15) 권한이 있어야 한다
+     meta: { menuCode: 'M02010000' }
++  },
++  {
++    path: '/console/device/protocol',
++    name: 'protocol-management',
++    component: ProtocolManagement,
++    // ju_menu M02010100 (프로토콜관리, MNU_URL 동일). 데이터는 모두 Action(MNU_CD)으로 호출
++    meta: { menuCode: 'M02010100' }
+   }
+ ]
+ 
+diff --git a/juprovider.frontvue/src/views/device/ProtocolManagement.vue b/juprovider.frontvue/src/views/device/ProtocolManagement.vue
+new file mode 100644
+index 0000000..562a876
+--- /dev/null
++++ b/juprovider.frontvue/src/views/device/ProtocolManagement.vue
+@@ -0,0 +1,519 @@
++<script setup>
++/*
++ * 프로토콜관리 (M02010100) — PR-3 Protocol Reference 화면
++ *
++ * - 데이터는 모두 Action(MNU_CD + ACT_CD, contractVersion 1)으로만 호출한다.
++ * - 화면은 Designer가 이후 저장할 단위(Grid / Form / Button / Dialog)로 나누고,
++ *   각 단위의 열·필드는 아래 정의 배열(= 계약 필드 Binding)로 그린다.
++ * - 버튼 표시는 /auth/me 권한 비트(01 조회, 02 등록, 04 수정, 08 삭제). 실제 검사는 서버(403).
++ * - 필드 오류(errors[].field)는 해당 입력 옆에, 패킷 오류(packets[i].필드)는 해당 칸에 표시한다.
++ */
++import { computed, onMounted, reactive, ref } from 'vue'
++import api from '../../api/api'
++import { actionError, executeByCode } from '../../api/actionApi'
++import { PERM, canAction } from '../../auth/session'
++
++const MENU = 'M02010100'
++const CONTRACT = 1
++const YES = 'YENO0001'
++const ALL = 'YENO0000'
++
++const perm = computed(() => ({
++  create: canAction(MENU, PERM.CREATE),
++  update: canAction(MENU, PERM.UPDATE),
++  remove: canAction(MENU, PERM.DELETE)
++}))
++
++function call(actCd, parameters) {
++  return executeByCode(MENU, actCd, parameters, { contractVersion: CONTRACT })
++}
++
++/* 빈 값은 보내지 않는다 (선택 항목 미입력 = 미지정/유지). 숫자 필드는 정수로 바꾼다. */
++function compact(source, fields, numberFields = []) {
++  const out = {}
++  for (const f of fields) {
++    const v = source[f]
++    if (v === undefined || v === null || v === '') continue
++    out[f] = numberFields.includes(f) && /^-?\d+$/.test(String(v)) ? Number(v) : v
++  }
++  return out
++}
++
++/* ---------- 공통코드 (PROT, YENO) ---------- */
++const codes = reactive({ PROT: [], YENO: [] })
++
++async function loadCode(grpCd) {
++  try {
++    const r = await api.get(`/core/system-codes/${grpCd}`, { params: { langCd: 'LANG0001' } })
++    codes[grpCd] = Array.isArray(r.data) ? r.data : []
++  } catch {
++    codes[grpCd] = []
++  }
++}
++
++function codeName(grpCd, value) {
++  const c = codes[grpCd].find(item => item.COM_CD === value)
++  return c?.DISPLAY_NM || c?.COM_NM || value || '-'
++}
++
++const message = ref('')
++const messageKind = ref('info')
++
++function notify(text, kind = 'info') {
++  message.value = text
++  messageKind.value = kind
++}
++
++function fail(e, fallback) {
++  const err = actionError(e, fallback)
++  notify(err.message + (err.code ? ` (${err.code})` : ''), 'error')
++  return err
++}
++
++/* ================= Grid: 프로토콜 그룹 (GRP_SEARCH) ================= */
++const groupColumns = [
++  { field: 'ptlGrpCd', label: '그룹코드' },
++  { field: 'ptlGrpNm', label: '그룹명' },
++  { field: 'protocolCount', label: '프로토콜', align: 'num' },
++  { field: 'useYn', label: '사용', code: 'YENO' }
++]
++const groupQuery = reactive({ keyword: '', includeInactive: false })
++const groups = ref([])
++const groupLoading = ref(false)
++const selectedGroup = ref(null)
++
++async function searchGroups(keepCode) {
++  groupLoading.value = true
++  try {
++    const r = await call('GRP_SEARCH', compact({
++      keyword: groupQuery.keyword,
++      useYn: groupQuery.includeInactive ? ALL : ''
++    }, ['keyword', 'useYn']))
++    groups.value = r.data?.items || []
++    const code = keepCode ?? selectedGroup.value?.ptlGrpCd
++    const again = groups.value.find(g => g.ptlGrpCd === code)
++    if (again) {
++      selectedGroup.value = again
++    } else {
++      selectedGroup.value = null
++      protocols.value = []
++      closeForm()
++    }
++  } catch (e) {
++    groups.value = []
++    fail(e, '프로토콜 그룹 조회에 실패했습니다.')
++  } finally {
++    groupLoading.value = false
++  }
++}
++
++async function selectGroup(row) {
++  selectedGroup.value = row
++  closeForm()
++  await searchProtocols()
++}
++
++/* ================= Dialog: 그룹 등록·수정 (GRP_GET / GRP_CREATE / GRP_UPDATE) ================= */
++const groupFields = [
++  { field: 'ptlGrpCd', label: '그룹코드', required: true, max: 16, key: true },
++  { field: 'ptlGrpNm', label: '그룹명', required: true, max: 100 },
++  { field: 'ptlGrpDesc', label: '설명', max: 500, wide: true },
++  { field: 'pollingIntval', label: 'Polling 간격(ms)', number: true },
++  { field: 'timeoutMs', label: 'Timeout(ms)', number: true },
++  { field: 'retryCnt', label: '재시도 횟수', number: true },
++  { field: 'sortOrd', label: '정렬순서', number: true }
++]
++const groupNumberFields = groupFields.filter(f => f.number).map(f => f.field)
++const dialog = reactive({ open: false, mode: 'create', model: {}, errors: {}, saving: false, useYn: YES })
++
++function openGroupCreate() {
++  dialog.mode = 'create'
++  dialog.model = {}
++  dialog.errors = {}
++  dialog.useYn = YES
++  dialog.open = true
++}
++
++async function openGroupEdit() {
++  if (!selectedGroup.value) return
++  try {
++    const r = await call('GRP_GET', { ptlGrpCd: selectedGroup.value.ptlGrpCd })
++    dialog.mode = 'update'
++    dialog.model = { ...r.data }
++    dialog.errors = {}
++    dialog.useYn = r.data.useYn
++    dialog.open = true
++  } catch (e) {
++    fail(e, '프로토콜 그룹 상세 조회에 실패했습니다.')
++  }
++}
++
++async function saveGroup(reactivate = false) {
++  dialog.saving = true
++  dialog.errors = {}
++  const fields = groupFields.map(f => f.field)
++  const params = compact(dialog.model, fields, groupNumberFields)
++  if (reactivate) params.useYn = YES
++  try {
++    const r = await call(dialog.mode === 'create' ? 'GRP_CREATE' : 'GRP_UPDATE', params)
++    dialog.open = false
++    notify(dialog.mode === 'create'
++      ? `그룹 ${r.data.ptlGrpCd}을(를) 등록했습니다. 기본 프로토콜 ${r.data.ptlGrpCd}0000이 함께 만들어졌습니다.`
++      : `그룹 ${r.data.ptlGrpCd}을(를) 저장했습니다.`)
++    await searchGroups(r.data.ptlGrpCd)
++    if (selectedGroup.value) await searchProtocols()
++  } catch (e) {
++    dialog.errors = fail(e, '프로토콜 그룹 저장에 실패했습니다.').fieldErrors
++  } finally {
++    dialog.saving = false
++  }
++}
++
++async function deleteGroup() {
++  const g = selectedGroup.value
++  if (!g) return
++  if (!window.confirm(`그룹 ${g.ptlGrpCd}와 하위 프로토콜·패킷을 모두 삭제(사용안함)합니다. 계속할까요?`)) return
++  try {
++    await call('GRP_DELETE', { ptlGrpCd: g.ptlGrpCd })
++    notify(`그룹 ${g.ptlGrpCd}을(를) 삭제했습니다.`)
++    await searchGroups()
++  } catch (e) {
++    fail(e, '프로토콜 그룹 삭제에 실패했습니다.')
++  }
++}
++
++/* ================= Grid: 프로토콜 (SEARCH) ================= */
++const protocolColumns = [
++  { field: 'ptlCd', label: '프로토콜코드' },
++  { field: 'ptlNm', label: '프로토콜명' },
++  { field: 'ptlType', label: '유형', code: 'PROT' },
++  { field: 'ptlLen', label: '길이', align: 'num' },
++  { field: 'packetCount', label: '패킷', align: 'num' },
++  { field: 'useYn', label: '사용', code: 'YENO' }
++]
++const protocolQuery = reactive({ keyword: '', includeInactive: false })
++const protocols = ref([])
++const protocolLoading = ref(false)
++
++async function searchProtocols() {
++  if (!selectedGroup.value) return
++  protocolLoading.value = true
++  try {
++    const r = await call('SEARCH', compact({
++      ptlGrpCd: selectedGroup.value.ptlGrpCd,
++      keyword: protocolQuery.keyword,
++      useYn: protocolQuery.includeInactive ? ALL : ''
++    }, ['ptlGrpCd', 'keyword', 'useYn']))
++    protocols.value = r.data?.items || []
++  } catch (e) {
++    protocols.value = []
++    fail(e, '프로토콜 조회에 실패했습니다.')
++  } finally {
++    protocolLoading.value = false
++  }
++}
++
++/* ================= Form: 프로토콜 상세 (GET / CREATE / UPDATE / DELETE) ================= */
++const protocolFields = [
++  { field: 'ptlCd', label: '프로토콜코드', required: true, max: 20, key: true },
++  { field: 'ptlNm', label: '프로토콜명', required: true, max: 100 },
++  { field: 'ptlType', label: '유형', required: true, code: 'PROT' },
++  { field: 'ptlLen', label: '길이', number: true },
++  { field: 'ptlVal', label: '프로토콜 값', max: 4000, wide: true },
++  { field: 'ptlDesc', label: '설명', max: 500, wide: true }
++]
++const packetColumns = [
++  { field: 'packetSeq', label: '순번', number: true, required: true, width: '64px' },
++  { field: 'packetType', label: '패킷유형', max: 30 },
++  { field: 'direction', label: '방향', required: true, options: ['TX', 'RX'], width: '80px' },
++  { field: 'packetExpr', label: '패킷식', max: 4000 },
++  { field: 'responsePtlCd', label: '응답 프로토콜', max: 20 },
++  { field: 'parseRule', label: '해석규칙', max: 4000 },
++  { field: 'dataCount', label: '데이터수', number: true, width: '72px' },
++  { field: 'dataType', label: '데이터형', max: 30 },
++  { field: 'dataPosition', label: '데이터위치', max: 100 }
++]
++const packetFieldNames = packetColumns.map(c => c.field)
++const packetNumberFields = packetColumns.filter(c => c.number).map(c => c.field)
++
++const form = reactive({ open: false, mode: 'create', model: {}, packets: [], errors: {}, saving: false, loading: false, useYn: YES })
++const formEditable = computed(() => form.mode === 'create' ? perm.value.create : perm.value.update)
++
++function closeForm() {
++  form.open = false
++  form.model = {}
++  form.packets = []
++  form.errors = {}
++}
++
++function openProtocolCreate() {
++  if (!selectedGroup.value) return
++  form.mode = 'create'
++  form.model = { ptlType: 'PROT0000' }
++  form.packets = []
++  form.errors = {}
++  form.useYn = YES
++  form.open = true
++}
++
++async function selectProtocol(row) {
++  form.loading = true
++  try {
++    const r = await call('GET', { ptlGrpCd: row.ptlGrpCd, ptlCd: row.ptlCd })
++    form.mode = 'update'
++    form.model = { ...r.data }
++    form.packets = (r.data.packets || []).map(p => ({ ...p }))
++    form.errors = {}
++    form.useYn = r.data.useYn
++    form.open = true
++  } catch (e) {
++    fail(e, '프로토콜 상세 조회에 실패했습니다.')
++  } finally {
++    form.loading = false
++  }
++}
++
++function addPacket() {
++  const next = form.packets.reduce((m, p) => Math.max(m, Number(p.packetSeq) || 0), 0) + 1
++  form.packets.push({ packetSeq: next, direction: 'TX' })
++}
++
++function removePacket(index) {
++  form.packets.splice(index, 1)
++}
++
++async function saveProtocol(reactivate = false) {
++  form.saving = true
++  form.errors = {}
++  const fields = protocolFields.map(f => f.field)
++  const params = {
++    ptlGrpCd: selectedGroup.value.ptlGrpCd,
++    ...compact(form.model, fields, ['ptlLen']),
++    // 보내면 서버가 패킷을 전체 교체한다. 출력 전용 필드(useYn)는 보내지 않는다.
++    packets: form.packets.map(p => compact(p, packetFieldNames, packetNumberFields))
++  }
++  if (reactivate) params.useYn = YES
++  try {
++    const r = await call(form.mode === 'create' ? 'CREATE' : 'UPDATE', params)
++    notify(`프로토콜 ${r.data.ptlCd}을(를) 저장했습니다.`)
++    await searchProtocols()
++    await searchGroups(r.data.ptlGrpCd)
++    await selectProtocol(r.data)
++  } catch (e) {
++    form.errors = fail(e, '프로토콜 저장에 실패했습니다.').fieldErrors
++  } finally {
++    form.saving = false
++  }
++}
++
++async function deleteProtocol() {
++  const m = form.model
++  if (!window.confirm(`프로토콜 ${m.ptlCd}와 패킷을 삭제(사용안함)합니다. 계속할까요?`)) return
++  try {
++    await call('DELETE', { ptlGrpCd: m.ptlGrpCd, ptlCd: m.ptlCd })
++    notify(`프로토콜 ${m.ptlCd}을(를) 삭제했습니다.`)
++    closeForm()
++    await searchProtocols()
++    await searchGroups()
++  } catch (e) {
++    fail(e, '프로토콜 삭제에 실패했습니다.')
++  }
++}
++
++function cell(row, col) {
++  const v = row[col.field]
++  return col.code ? codeName(col.code, v) : (v ?? '-')
++}
++
++onMounted(async () => {
++  await Promise.all([loadCode('PROT'), loadCode('YENO')])
++  await searchGroups()
++})
++</script>
++
++<template>
++  <section class="page">
++    <div class="head">
++      <h2>프로토콜관리</h2>
++      <p>프로토콜 그룹과 프로토콜·패킷을 관리합니다. 삭제는 사용안함 처리이며, 장치·실험에서 사용 중이면 삭제할 수 없습니다.</p>
++    </div>
++
++    <p v-if="message" :class="['msg', messageKind]" data-test="message">{{ message }}</p>
++
++    <div class="layout">
++      <!-- Grid: 프로토콜 그룹 -->
++      <div class="box groups" data-test="group-grid">
++        <div class="box-head">
++          <strong>프로토콜 그룹</strong>
++          <span class="buttons">
++            <button v-if="perm.create" data-test="group-new" @click="openGroupCreate">신규</button>
++            <button v-if="perm.update" data-test="group-edit" :disabled="!selectedGroup" @click="openGroupEdit">수정</button>
++            <button v-if="perm.remove" data-test="group-delete" class="danger" :disabled="!selectedGroup || selectedGroup.useYn !== YES" @click="deleteGroup">삭제</button>
++          </span>
++        </div>
++        <div class="search">
++          <input v-model="groupQuery.keyword" placeholder="그룹코드 또는 그룹명" @keyup.enter="searchGroups()">
++          <label><input v-model="groupQuery.includeInactive" type="checkbox" @change="searchGroups()"> 사용안함 포함</label>
++          <button :disabled="groupLoading" @click="searchGroups()">조회</button>
++        </div>
++        <table>
++          <thead><tr><th v-for="c in groupColumns" :key="c.field" :class="c.align">{{ c.label }}</th></tr></thead>
++          <tbody>
++            <tr v-if="!groups.length" class="empty"><td :colspan="groupColumns.length">{{ groupLoading ? '조회중...' : '그룹이 없습니다.' }}</td></tr>
++            <tr v-for="g in groups" :key="g.ptlGrpCd"
++                :class="{ selected: selectedGroup?.ptlGrpCd === g.ptlGrpCd, inactive: g.useYn !== YES }"
++                @click="selectGroup(g)">
++              <td v-for="c in groupColumns" :key="c.field" :class="c.align">{{ cell(g, c) }}</td>
++            </tr>
++          </tbody>
++        </table>
++      </div>
++
++      <div class="right">
++        <!-- Grid: 프로토콜 -->
++        <div class="box" data-test="protocol-grid">
++          <div class="box-head">
++            <strong>프로토콜 <span v-if="selectedGroup" class="sub">{{ selectedGroup.ptlGrpCd }} · {{ selectedGroup.ptlGrpNm }}</span></strong>
++            <span class="buttons">
++              <button v-if="perm.create" data-test="protocol-new" :disabled="!selectedGroup || selectedGroup.useYn !== YES" @click="openProtocolCreate">신규</button>
++            </span>
++          </div>
++          <div v-if="selectedGroup" class="search">
++            <input v-model="protocolQuery.keyword" placeholder="프로토콜코드 또는 프로토콜명" @keyup.enter="searchProtocols">
++            <label><input v-model="protocolQuery.includeInactive" type="checkbox" @change="searchProtocols"> 사용안함 포함</label>
++            <button :disabled="protocolLoading" @click="searchProtocols">조회</button>
++          </div>
++          <table>
++            <thead><tr><th v-for="c in protocolColumns" :key="c.field" :class="c.align">{{ c.label }}</th></tr></thead>
++            <tbody>
++              <tr v-if="!selectedGroup" class="empty"><td :colspan="protocolColumns.length">왼쪽에서 그룹을 선택하세요.</td></tr>
++              <tr v-else-if="!protocols.length" class="empty"><td :colspan="protocolColumns.length">{{ protocolLoading ? '조회중...' : '프로토콜이 없습니다.' }}</td></tr>
++              <tr v-for="p in protocols" :key="p.ptlCd"
++                  :class="{ selected: form.open && form.mode === 'update' && form.model.ptlCd === p.ptlCd, inactive: p.useYn !== YES }"
++                  @click="selectProtocol(p)">
++                <td v-for="c in protocolColumns" :key="c.field" :class="c.align">{{ cell(p, c) }}</td>
++              </tr>
++            </tbody>
++          </table>
++        </div>
++
++        <!-- Form: 프로토콜 상세 + 패킷 Grid -->
++        <div v-if="form.open" class="box" data-test="protocol-form">
++          <div class="box-head">
++            <strong>{{ form.mode === 'create' ? '프로토콜 등록' : '프로토콜 상세' }}</strong>
++            <span class="buttons">
++              <button v-if="formEditable && form.useYn === YES" data-test="protocol-save" :disabled="form.saving" @click="saveProtocol()">저장</button>
++              <button v-if="form.mode === 'update' && perm.update && form.useYn !== YES" data-test="protocol-reactivate" :disabled="form.saving" @click="saveProtocol(true)">다시 사용</button>
++              <button v-if="form.mode === 'update' && perm.remove && form.useYn === YES" data-test="protocol-delete" class="danger" @click="deleteProtocol">삭제</button>
++              <button @click="closeForm">닫기</button>
++            </span>
++          </div>
++          <div class="form">
++            <label v-for="f in protocolFields" :key="f.field" :class="{ wide: f.wide }">
++              <span>{{ f.label }}<em v-if="f.required">*</em></span>
++              <select v-if="f.code" v-model="form.model[f.field]" :disabled="!formEditable" :data-field="f.field">
++                <option v-for="c in codes[f.code]" :key="c.COM_CD" :value="c.COM_CD">{{ c.DISPLAY_NM || c.COM_NM }}</option>
++              </select>
++              <textarea v-else-if="f.wide && f.max > 500" v-model="form.model[f.field]" :maxlength="f.max" :disabled="!formEditable" :data-field="f.field" rows="2" />
++              <input v-else v-model="form.model[f.field]" :type="f.number ? 'number' : 'text'" :maxlength="f.max"
++                     :disabled="!formEditable || (f.key && form.mode === 'update')" :data-field="f.field">
++              <small v-if="form.errors[f.field]" class="field-error">{{ form.errors[f.field] }}</small>
++            </label>
++          </div>
++          <div class="packet-head">
++            <strong>패킷</strong>
++            <button v-if="formEditable" data-test="packet-add" @click="addPacket">패킷 추가</button>
++          </div>
++          <small v-if="form.errors.packets" class="field-error">{{ form.errors.packets }}</small>
++          <table class="packets">
++            <thead>
++              <tr>
++                <th v-for="c in packetColumns" :key="c.field" :style="{ width: c.width }">{{ c.label }}<em v-if="c.required">*</em></th>
++                <th v-if="formEditable" />
++              </tr>
++            </thead>
++            <tbody>
++              <tr v-if="!form.packets.length" class="empty"><td :colspan="packetColumns.length + 1">패킷이 없습니다.</td></tr>
++              <tr v-for="(p, i) in form.packets" :key="i">
++                <td v-for="c in packetColumns" :key="c.field">
++                  <select v-if="c.options" v-model="p[c.field]" :disabled="!formEditable">
++                    <option v-for="o in c.options" :key="o" :value="o">{{ o }}</option>
++                  </select>
++                  <input v-else v-model="p[c.field]" :type="c.number ? 'number' : 'text'" :maxlength="c.max" :disabled="!formEditable"
++                         :data-field="`packets[${i}].${c.field}`">
++                  <small v-if="form.errors[`packets[${i}].${c.field}`]" class="field-error">{{ form.errors[`packets[${i}].${c.field}`] }}</small>
++                </td>
++                <td v-if="formEditable"><button class="link" @click="removePacket(i)">삭제</button></td>
++              </tr>
++            </tbody>
++          </table>
++        </div>
++      </div>
++    </div>
++
++    <!-- Dialog: 그룹 등록·수정 -->
++    <div v-if="dialog.open" class="dialog-backdrop" @click.self="dialog.open = false">
++      <div class="dialog" data-test="group-dialog">
++        <div class="box-head">
++          <strong>{{ dialog.mode === 'create' ? '프로토콜 그룹 등록' : '프로토콜 그룹 수정' }}</strong>
++        </div>
++        <div class="form">
++          <label v-for="f in groupFields" :key="f.field" :class="{ wide: f.wide }">
++            <span>{{ f.label }}<em v-if="f.required && (dialog.mode === 'create' || f.key)">*</em></span>
++            <input v-model="dialog.model[f.field]" :type="f.number ? 'number' : 'text'" :maxlength="f.max"
++                   :disabled="(f.key && dialog.mode === 'update') || dialog.useYn !== YES" :data-field="f.field">
++            <small v-if="dialog.errors[f.field]" class="field-error">{{ dialog.errors[f.field] }}</small>
++          </label>
++        </div>
++        <p v-if="dialog.mode === 'create'" class="hint">등록하면 기본 프로토콜 <code>{그룹코드}0000</code>(기본 TX/RX)이 함께 만들어집니다.</p>
++        <div class="dialog-buttons">
++          <button v-if="dialog.useYn === YES" data-test="group-save" :disabled="dialog.saving" @click="saveGroup()">저장</button>
++          <button v-else data-test="group-reactivate" :disabled="dialog.saving" @click="saveGroup(true)">다시 사용</button>
++          <button @click="dialog.open = false">취소</button>
++        </div>
++      </div>
++    </div>
++  </section>
++</template>
++
++<style scoped>
++.page { padding: 20px; }
++.head h2 { margin-bottom: 6px; }
++.head p { margin: 0; color: #667085; }
++.msg { margin: 12px 0 0; padding: 8px 12px; border-radius: 4px; background: #eef4ff; color: #1d3f8a; }
++.msg.error { background: #fdecec; color: #a12020; }
++.layout { display: grid; grid-template-columns: minmax(280px, 1fr) 2fr; gap: 16px; margin-top: 16px; align-items: start; }
++.right { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
++.box { background: #fff; border: 1px solid #d9e0e8; overflow: auto; }
++.box-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid #e5e9ef; background: #fafbfc; }
++.box-head .sub { margin-left: 8px; font-weight: normal; color: #667085; }
++.buttons { display: flex; gap: 6px; }
++.search { display: flex; gap: 8px; align-items: center; padding: 10px 12px; }
++.search input[type="text"], .search input:not([type]) { flex: 1; min-width: 0; }
++.search label { white-space: nowrap; font-size: 13px; color: #475467; }
++table { width: 100%; border-collapse: collapse; }
++th, td { padding: 8px; border-bottom: 1px solid #e5e9ef; text-align: left; font-size: 14px; }
++th { background: #f5f7fa; }
++td.num, th.num { text-align: right; }
++tbody tr:not(.empty) { cursor: pointer; }
++tbody tr:hover { background: #f7f9fc; }
++tbody tr.selected { background: #eaf2ff; }
++tbody tr.inactive td { color: #98a2b3; }
++tr.empty td { color: #98a2b3; text-align: center; cursor: default; }
++.form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; padding: 12px; }
++.form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #344054; }
++.form label.wide { grid-column: 1 / -1; }
++.form input, .form select, .form textarea { padding: 6px 8px; font-size: 14px; }
++em { color: #d92d20; font-style: normal; margin-left: 2px; }
++.field-error { color: #d92d20; font-size: 12px; }
++.packet-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-top: 1px solid #e5e9ef; }
++.packets td { vertical-align: top; cursor: default; }
++.packets input, .packets select { width: 100%; box-sizing: border-box; padding: 4px 6px; }
++button.danger { color: #b42318; }
++button.link { background: none; border: none; color: #b42318; cursor: pointer; padding: 0; }
++.dialog-backdrop { position: fixed; inset: 0; background: rgba(16, 24, 40, 0.4); display: flex; align-items: center; justify-content: center; z-index: 10; }
++.dialog { background: #fff; width: min(640px, calc(100vw - 32px)); border-radius: 6px; overflow: hidden; }
++.dialog .hint { margin: 0 12px; font-size: 13px; color: #667085; }
++.dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; padding: 12px; }
++@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .form { grid-template-columns: 1fr; } }
++</style>
+-- 
+2.43.0
+
