@@ -5,6 +5,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자·ChatGPT | **SYSINFO-02 단계별 계획 + 보완 과제 A1~A5 검토·승인 (G1)**: [reviews/claude/2026-10-28_sysinfo-02_plan.md](../reviews/claude/2026-10-28_sysinfo-02_plan.md) — 서버 build-info·`/api/system/version`, migration 07 `ju_schema_version`(기존 이력 검증 후 기록), Desktop 공통 Version, 빈 template.accdb·client.sample.json, 통합 절차(I-1~I-7), 결정 S2-Q1~Q5. **제품 코드 수정 없음, 승인 대기** |
 | 사용자·ChatGPT | **SEC-S1 결과 검토**: [reviews/claude/2026-10-28_sec-s1_result.md](../reviews/claude/2026-10-28_sec-s1_result.md) — `feature/sec-s1` 로컬 commit `4187280` (push 없음), 빌드 5종·테스트 9/9·smoke 25/25 |
 | ChatGPT·사용자 | **SYSINFO-01 조사·설계안 검토**: [reviews/claude/2026-10-28_sysinfo-01_precheck.md](../reviews/claude/2026-10-28_sysinfo-01_precheck.md) — 최소 계약 S1~S7, 결정 요청 SI-Q1~Q6, 후속 항목 분리 (코드 수정 없음) |
 | ChatGPT·사용자 | **PC-B 재현 검증 PASS 검토**: [reviews/claude/2026-10-27_pcb-protocol-ref_verify.md](../reviews/claude/2026-10-27_pcb-protocol-ref_verify.md) — 빌드 5종 PASS, 테스트 23/23, 06(1·2회·신규 설치 동일), HTTP smoke 64/64 + 보완 14/14 (PC-A와 차이 없음). 다음: PR-2 검토 결과에 따라 PR-3 또는 main 반영 판단. **main merge/push 금지 유지** |
@@ -49,5 +50,7 @@
 - 2026-10-28 08:14 SYSINFO-01 결정: S1~S7 승인, SI-Q1~Q6 (로컬 override 우선, Client PUT 차단, template 저장소화, ju_schema_version, Sync 응답 변경은 PR-3 이후, 순서 SEC-S1 → PR-3 → SYSINFO-02 → SYSINFO-03 → SYNC-01)
 - 2026-10-28 08:25 **SEC-S1 로컬 commit `4187280`** (`feature/sec-s1` ← main): Client 체인 sync GET만 허용, Device PUT 제거, Desktop SaveDeviceAsync 제거. 빌드 5종, 테스트 9/9, smoke 25/25, 장치 정의 무변경. 남은 문제: Client 403 메시지 문구
 - 2026-10-28 08:47 **PR-3 로컬 commit `1d1c1ab`** (`feature/protocol-ref`): ProtocolManagement.vue(Action v1만 사용), executeByCode, 권한 비트 버튼, 레거시 protocol 조회 API 제거. 브라우저 smoke: 필드 오류 표시(REQUIRED·INVALID_VALUE·DUPLICATE), 기본 프로토콜 자동생성, 409 무변경, 조회자 버튼 숨김·서버 403. 남은 문제: 선택 항목 비우기 불가(COALESCE)
+- 2026-10-28 08:52 사용자 판단: PR-1 승인, PR-2 기능 PASS(최종 코드 검토 문서 없음), PR-3 조건부 승인, SEC-S1 통합 대기, main 금지 유지. 보완 과제 5건 + SYSINFO-02 계획 요청
+- 2026-10-28 09:10 SYSINFO-02 계획 업로드 (A1 빈 문자열=지우기 계약, A2 PTL_CD 한계 기록, A3 403 문구 수정 계획, A4 smoke 재실행은 통합 검증에서, A5 통합·06 적용 절차) — 코드 수정 없음
 - 2026-10-28 08:30 SYSINFO-01 사전 조사 업로드: 버전 정보 노출·스키마 버전 테이블 없음, Device 전체 동기화만(비활성 장치 로컬 잔존), 장치 설정 전역 1벌(ClientId 구분 없음), Client→서버 장치 PUT 경로 존재(미호출), template.accdb 저장소 없음 (코드 수정 없음)
 - 2026-10-28 07:53 사용자: PC-B 서버 정상 확인, Client는 template.accdb 없음(환경 문제). 오늘은 PC-A 작업, PC-B는 저녁에 미커밋 삭제·환경 정렬

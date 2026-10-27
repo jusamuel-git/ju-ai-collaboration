@@ -74,3 +74,9 @@
 | PR-Q4 | `PTL_VAL` 편집 허용 | 10/27 |
 | PR-Q5 | 비관리자 `M02010100` = `01`(조회만) 유지 | 10/27 |
 | PR-E1 | 정의 없는 Action = 404, DB Action 존재 + Handler 없음 = 501 (두 경로 모두) | 10/27 |
+
+## 기록된 한계 (2026-10-28)
+| # | 내용 | 처리 |
+|---|---|---|
+| PR-L1 | 실험 참조(`ju_experiment_data_group.START/PAUSE/STOP_PTL_CD`)에 그룹코드가 없어 GRP_DELETE·DELETE의 실험 참조 검사는 PTL_CD만 비교. 다른 그룹의 같은 코드가 쓰이면 삭제가 막힘(안전 쪽 오판). 잘못 삭제되는 경우는 없음 | 실험관리 단계에서 결정 (그룹코드 추가 / PTL_CD 전역 고유 / 장치로 추론) |
+| PR-L2 | Protocol UPDATE에서 선택 텍스트를 비울 수 없음 (빈 문자열=미입력, COALESCE) | 계약 설계안 A1 (`clearable`), 승인 대기 |
