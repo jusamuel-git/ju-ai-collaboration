@@ -1,14 +1,13 @@
-# 지금 할 일 (2026-10-27 10:36 기준)
+# 지금 할 일 (2026-10-27 10:48 기준)
 
-단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → **JU-1C** → JU-1c Desktop
+단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → **JU-1c Desktop**
 (JU-1A/1B/1C는 로컬 commit을 나누고, 1C까지 로컬 Build/Smoke 후 함께 push — ChatGPT 보정 R1)
 
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT | JU-1C 검토: [reviews/claude/2026-10-27_ju-1c_result.md](../reviews/claude/2026-10-27_ju-1c_result.md) → 1A~1C 묶음 push 판단 |
-| 사용자 | **JU-1 통합 검증**: ✅1 05 적용 ✅2 18081 UP ✅3 admin 로그인 ✅ Client `PCA_DESKTOP01` 키 재발급·client.json ✅ **Desktop 동기화 PASS** → 남은 것: (비밀번호 변경·메뉴 확인 결과 공유) → `run_ai_ju1_local_stop.cmd` → 1A~1C push 판단. 비밀번호 전달 파일 삭제. 운영 8081은 push·배포 전까지 사용 금지 |
-| 참고 | **admin 로그인 불가 원인 (10:00, 읽기 전용 확인)**: JU-1A~1C·통합 준비 과정에서 실제 DB의 admin 비밀번호·`PW_CHANGE_DT`는 **변경되지 않았다**. 해시 지문(SHA-256 앞 10자리) `6ca10ed083` = 04 백업 직후·05 백업(09:34)·현재 모두 동일 = 저장소 seed/`04` 해시 (JU-0A `5dcc603`, 출처는 10-25 작업 stash). `PW_CHANGE_DT` NULL, `LAST_LOGIN_DT` NULL(성공 로그인 이력 없음), `LOGIN_FAIL_CNT` 1(이번 시도), USE_YN·AUTH 1 정상, 잠금 로직 없음. JU-1A~1C smoke는 테스트 DB의 `smoke_*` 사용자만 사용. **원인: 실제 DB admin 비밀번호는 JU-0A `04`가 넣은 "초기 기본값"이고, 사용자가 알고 있는 기존 비밀번호와 다르다.** 이 기본값은 10-25 stash의 미추적 `database/README.md`에만 있었고, JU-0A 보정 8에서 평문을 저장소에서 지우면서 "설치 담당자에게 별도 전달"로만 남아 실제로 전달되지 않았다. (Claude 작업공간에서 그 기본값이 현재 해시와 일치함을 확인. 값은 기록하지 않음) |
+| ChatGPT | JU-1c Desktop 단계 지시 (후보: Client 화면에 동기화 상태 표시 — 현재 Form1은 Debug 출력만) |
+| 사용자 | 운영 Desktop 사용 시 `desktop\app\config\client.json`의 ServerUrl을 18081 → `http://localhost:8081/juprovider/`로 변경 (키는 그대로 유효) |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
@@ -17,9 +16,9 @@
 |---|---|---|
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 재사용 후보. PC-A 미적용 |
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
-| JU-1A | PC-A juprovider `feature/ju-1a` 로컬 commit `6fb591a` | PASS. push 보류 |
-| JU-1C | PC-A juprovider `feature/ju-1c` **로컬 commit `acac1fa`** (← be1a664) | 빌드 5종·`/me` 메뉴·SPA forward·브라우저 smoke 9건 PASS. push 보류 |
-| JU-1B | PC-A juprovider `feature/ju-1b` 로컬 commit `be1a664` (← 6fb591a, 재발급 보정 amend) | 빌드·테스트 8/8·05 테스트 DB·권한/Client/Desktop smoke + 재발급 보정 10건 PASS. push 보류. **실제 DB 05 적용됨 (10-27 09:34)** |
+| JU-1A | juprovider main `6fb591a` | **push 완료** (10-27 10:42) |
+| JU-1C | juprovider main `acac1fa` | **push 완료**, Jenkins `juprovider-ai` #14 SUCCESS |
+| JU-1B | juprovider main `be1a664` | **push 완료**. 실제 DB 05 적용됨 (10-27 09:34) |
 
 ## 최근 확인
 - 2026-10-26 10:31 PC-A `feature/env-0`: 환경검사 PASS 30 / WARN 4 / FAIL 0, 로컬 빌드 5종 PASS, `global.json` → SDK 10.0.402
@@ -42,3 +41,6 @@
 - 2026-10-27 10:22 `ai_ju1_client_register.ps1` 보정: 실행 폴더를 API 호출 전에 확인(`juprovider.client.exe` 없으면 중단, 기본값 `desktop\app` = Directory.Build.props OutputPath) / 사용 중 Client는 확인 후 `POST /api/admin/clients/{id}/key` 재발급, 사용 중지는 재등록 선택 / 키는 `{실행 폴더}\config\client.json`에만(콘솔·로그 미출력, `desktop/app/`은 .gitignore). DB 수정·product push 없음
 - 2026-10-27 10:28 PC-A 반영 누락 정정: 10:22 보정본이 PC-A에 덮어써지지 않아(이전 파일 유지) 사용자 재실행에서 같은 400 발생 → `ai_ju1_client_register_v2.ps1`로 새로 배치하고 `run_ai_ju1_client_register.cmd`가 v2를 실행하도록 변경 (PC-A 파일 크기로 반영 확인). DB 변경 없음
 - 2026-10-27 10:33 **Desktop 동기화 PASS** (읽기 전용 `run_ai_ju1_synccheck.cmd`): client.json 10:28:36 작성(18081, `PCA_DESKTOP01`, 키 길이 43) → Client 실행 후 `ju_client.LAST_SEEN_DT` 10:29:21 갱신(Client 키 인증 성공 시에만 갱신), 같은 시각 로컬 `data\juprovider.accdb` 갱신(서버 장치 목록 반영). USE_YN Y. 참고: Client 화면(Form1)은 동기화 결과를 표시하지 않음(Debug 출력만) → JU-1c Desktop 단계 후보
+- 2026-10-27 10:38 **JU-1 통합 검증 PASS** (사용자 확인): Web admin 로그인·최초 비밀번호 변경·권한 메뉴 29개·장치조회, `PCA_DESKTOP01` Client 인증·Desktop 동기화
+- 2026-10-27 10:42 **JU-1A~1C main push** `03f636c..acac1fa` (ff, `run_ai_ju1_push.cmd`): 18081 종료 확인, 초기 DB README(비밀번호 포함) 로컬 사본 삭제
+- 2026-10-27 10:45 **Jenkins `juprovider-ai` #14 SUCCESS** (rev `acac1fa`, 테스트 8/8, Health UP). 8081 확인: 로그인 화면·`/console/**` forward 200, 토큰 없는 `/api/auth/me` 401, Client 키 없는 `/api/core/sync/**` 401
