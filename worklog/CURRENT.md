@@ -1,4 +1,4 @@
-# 지금 할 일 (2026-10-27 10:22 기준)
+# 지금 할 일 (2026-10-27 10:36 기준)
 
 단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → **JU-1C** → JU-1c Desktop
 (JU-1A/1B/1C는 로컬 commit을 나누고, 1C까지 로컬 Build/Smoke 후 함께 push — ChatGPT 보정 R1)
@@ -7,7 +7,7 @@
 | 담당 | 내용 |
 |---|---|
 | ChatGPT | JU-1C 검토: [reviews/claude/2026-10-27_ju-1c_result.md](../reviews/claude/2026-10-27_ju-1c_result.md) → 1A~1C 묶음 push 판단 |
-| 사용자 | **JU-1 통합 검증 진행 중**: ✅1 05 적용 ✅2 18081 UP ✅3 admin 로그인 ✅ Client `PCA_DESKTOP01` 등록됨(키 미저장) → `run_ai_ju1_client_register.cmd` 재실행: 실행 폴더 Enter(`C:\MyData\MyDev\workspace\juprovider\desktop\app`) → 아이디/비밀번호 → `PCA_DESKTOP01` → **재발급 Y** → `desktop\app\juprovider.client.exe` 실행·동기화 확인 → `run_ai_ju1_local_stop.cmd` → push 판단. 비밀번호 전달 파일 삭제. 운영 8081은 push·배포 전까지 사용 금지 |
+| 사용자 | **JU-1 통합 검증**: ✅1 05 적용 ✅2 18081 UP ✅3 admin 로그인 ✅ Client `PCA_DESKTOP01` 키 재발급·client.json ✅ **Desktop 동기화 PASS** → 남은 것: (비밀번호 변경·메뉴 확인 결과 공유) → `run_ai_ju1_local_stop.cmd` → 1A~1C push 판단. 비밀번호 전달 파일 삭제. 운영 8081은 push·배포 전까지 사용 금지 |
 | 참고 | **admin 로그인 불가 원인 (10:00, 읽기 전용 확인)**: JU-1A~1C·통합 준비 과정에서 실제 DB의 admin 비밀번호·`PW_CHANGE_DT`는 **변경되지 않았다**. 해시 지문(SHA-256 앞 10자리) `6ca10ed083` = 04 백업 직후·05 백업(09:34)·현재 모두 동일 = 저장소 seed/`04` 해시 (JU-0A `5dcc603`, 출처는 10-25 작업 stash). `PW_CHANGE_DT` NULL, `LAST_LOGIN_DT` NULL(성공 로그인 이력 없음), `LOGIN_FAIL_CNT` 1(이번 시도), USE_YN·AUTH 1 정상, 잠금 로직 없음. JU-1A~1C smoke는 테스트 DB의 `smoke_*` 사용자만 사용. **원인: 실제 DB admin 비밀번호는 JU-0A `04`가 넣은 "초기 기본값"이고, 사용자가 알고 있는 기존 비밀번호와 다르다.** 이 기본값은 10-25 stash의 미추적 `database/README.md`에만 있었고, JU-0A 보정 8에서 평문을 저장소에서 지우면서 "설치 담당자에게 별도 전달"로만 남아 실제로 전달되지 않았다. (Claude 작업공간에서 그 기본값이 현재 해시와 일치함을 확인. 값은 기록하지 않음) |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
@@ -41,3 +41,4 @@
 - 2026-10-27 10:07 admin 로그인 해결: 원본 README(10-25 stash)를 `C:\MyData\MyDev\backup\`에만 저장해 전달 (값은 저장소·대화 미기록). DB 수정·push 없음
 - 2026-10-27 10:22 `ai_ju1_client_register.ps1` 보정: 실행 폴더를 API 호출 전에 확인(`juprovider.client.exe` 없으면 중단, 기본값 `desktop\app` = Directory.Build.props OutputPath) / 사용 중 Client는 확인 후 `POST /api/admin/clients/{id}/key` 재발급, 사용 중지는 재등록 선택 / 키는 `{실행 폴더}\config\client.json`에만(콘솔·로그 미출력, `desktop/app/`은 .gitignore). DB 수정·product push 없음
 - 2026-10-27 10:28 PC-A 반영 누락 정정: 10:22 보정본이 PC-A에 덮어써지지 않아(이전 파일 유지) 사용자 재실행에서 같은 400 발생 → `ai_ju1_client_register_v2.ps1`로 새로 배치하고 `run_ai_ju1_client_register.cmd`가 v2를 실행하도록 변경 (PC-A 파일 크기로 반영 확인). DB 변경 없음
+- 2026-10-27 10:33 **Desktop 동기화 PASS** (읽기 전용 `run_ai_ju1_synccheck.cmd`): client.json 10:28:36 작성(18081, `PCA_DESKTOP01`, 키 길이 43) → Client 실행 후 `ju_client.LAST_SEEN_DT` 10:29:21 갱신(Client 키 인증 성공 시에만 갱신), 같은 시각 로컬 `data\juprovider.accdb` 갱신(서버 장치 목록 반영). USE_YN Y. 참고: Client 화면(Form1)은 동기화 결과를 표시하지 않음(Debug 출력만) → JU-1c Desktop 단계 후보
