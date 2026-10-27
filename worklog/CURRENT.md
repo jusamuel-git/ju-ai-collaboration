@@ -1,11 +1,13 @@
-# 지금 할 일 (2026-10-27 17:10 기준)
+# 지금 할 일 (2026-10-27 17:10 기준 — PC-A 작업 종료, 제품 코드 수정 중단)
 
-단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → JU-1c Desktop ✅ → **Protocol Reference Implementation — PR-1 ✅ `02ab18c`, PR-2 로컬 `157635a` 검토 대기, PR-3 대기**
+단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → JU-1c Desktop ✅ → **Protocol Reference Implementation — PR-1 `02ab18c` + PR-2 `157635a` 원격 브랜치 `feature/protocol-ref` (PC-B 검증 대기), PR-3 보류**
 
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT·사용자 | **PR-2 Protocol Backend 검토**: [result](../reviews/claude/2026-10-27_pr2-protocol-backend_result.md) — PC-A `feature/protocol-ref` `157635a` (빌드 5종, 테스트 23/23, 06 검증, HTTP smoke 58/58: Input/Output/Error Contract·선검사·트리거 원자성). 검토 후 PR-3(Vue) |
+| 사용자·Claude | **PC-B 검증 대기**: 원격 `feature/protocol-ref` @ `157635a` (← `02ab18c` ← main `fce5048`) checkout → 로컬 빌드 5종 → 테스트 DB에 06 적용(1·2회·신규 설치 동일) → Action smoke (`tools/ai_pr2.ps1` 기준, PC-B 경로에 맞춰 조정). **main merge/push 금지**, 실제 DB 06 미적용 |
+| ChatGPT | PR-2 결과 검토: [result](../reviews/claude/2026-10-27_pr2-protocol-backend_result.md) (PC-A 빌드 5종, 테스트 23/23, HTTP smoke 58/58) |
+| 보류 | 제품 코드 수정 중단 (사용자 지시 10/27 17:04). PR-3 Protocol Vue는 PC-B 검증·지시 후 |
 | 참고 | JU-1c 범위 밖 보고 항목: template.accdb의 이전 LOCAL_USER, DPAPI(D3), Terminal/IPC 인증(D8), `SyncDevicesToTerminalAsync` TEMP TEST 코드, `InitializeIpcAsync` 미사용, Updater Form1 |
 | 사용자 | 운영 Desktop 사용 시 `desktop\app\config\client.json`의 ServerUrl을 18081 → `http://localhost:8081/juprovider/`로 변경 (키는 그대로 유효) |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
@@ -19,8 +21,7 @@
 
 | 미커밋 | 위치 | 상태 |
 |---|---|---|
-| PR-1 Action Contract Core | PC-A juprovider `feature/action-contract` 로컬 commit `02ab18c` | **검토 PASS·승인**. push 보류 (PR-3까지 함께) |
-| PR-2 Protocol Backend | PC-A juprovider `feature/protocol-ref` 로컬 commit `157635a` | PASS. push 보류 (PR-3까지 함께) |
+| PR-1 + PR-2 | **원격 브랜치 `feature/protocol-ref` @ `157635a`** (PC-B 검증용, main 미반영) | PR-1 검토 PASS, PR-2 PC-A PASS·검토 대기 |
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 서버·Vue 부분은 재사용 완료. Desktop 로그인 코드는 없음 |
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
 
@@ -40,3 +41,4 @@
 - 2026-10-27 16:39 PR-1 검토 PASS, `02ab18c` 승인
 - 2026-10-27 17:20 PR-2 구현 완료 (24 files: migration 06, seed, Protocol DAO/Service/Handler 10개 contractVersion 1, 출력 정규화). PC-A 연결이 끊겨 빌드·smoke 대기
 - 2026-10-27 17:05 **PR-2 Protocol Backend 로컬 commit `157635a`**: 빌드 5종, 테스트 23/23, 06(1·2회·신규 설치 동일), HTTP smoke 58/58 — 원자성(GRP_CREATE·GRP_DELETE·CREATE 트리거 주입 rollback), GRP_DELETE 장치+실험 전체 선검사 409 무변경
+- 2026-10-27 17:04 **PC-A 작업 종료**: `feature/protocol-ref`(`02ab18c`, `157635a`)를 원격에 브랜치로만 push. origin/main은 `fce5048` 그대로. 제품 코드 수정 중단, PC-B 검증 대기
