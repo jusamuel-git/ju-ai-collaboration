@@ -1,0 +1,10 @@
+fix(security): block client write path on device sync (SEC-S1)
+
+- Client chain allows only GET on /api/core/sync/** (other methods 403)
+- Remove PUT /api/core/sync/devices/{devCd} (client -> server device save)
+- Remove unused Desktop JuProviderApiClient.SaveDeviceAsync
+- Common device definitions are owned by the server and changed only via admin Action
+- Test: DeviceSyncController exposes GET mappings only
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

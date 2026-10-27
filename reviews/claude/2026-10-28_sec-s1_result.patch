@@ -1,0 +1,186 @@
+From 0b16abda6606b477eac99a93ecff6936504ddd87 Mon Sep 17 00:00:00 2001
+From: x <x>
+Date: Wed, 28 Oct 2026 08:26:08 +0900
+Subject: [PATCH] tmp
+
+---
+ .../Api/JuProviderApiClient.cs                | 53 -------------------
+ .../juprovider/config/SecurityConfig.java     |  5 ++
+ .../controller/DeviceSyncController.java      | 30 ++---------
+ .../controller/DeviceSyncControllerTest.java  | 30 +++++++++++
+ 4 files changed, 40 insertions(+), 78 deletions(-)
+ create mode 100644 juprovider.backend/src/test/java/com/asdp/juprovider/controller/DeviceSyncControllerTest.java
+
+diff --git a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+index a295a5b..9371700 100644
+--- a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
++++ b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+@@ -135,59 +135,6 @@ public sealed class JuProviderApiClient : IDisposable
+             );
+     }
+ 
+-    /*
+-     * Client -> Server
+-     * Device 저장
+-     */
+-    public async Task<DeviceSyncModel> SaveDeviceAsync(
+-        DeviceSyncModel device,
+-        CancellationToken cancellationToken = default
+-    )
+-    {
+-        ArgumentNullException.ThrowIfNull(device);
+-
+-        if (string.IsNullOrWhiteSpace(device.DevCd))
+-        {
+-            throw new ArgumentException(
+-                "DEV_CD is required.",
+-                nameof(device)
+-            );
+-        }
+-
+-        string deviceCode =
+-            Uri.EscapeDataString(
+-                device.DevCd
+-                    .Trim()
+-                    .ToUpperInvariant()
+-            );
+-
+-        using HttpResponseMessage response =
+-            await _httpClient.PutAsJsonAsync(
+-                $"api/core/sync/devices/{deviceCode}",
+-                device,
+-                _jsonOptions,
+-                cancellationToken
+-            );
+-
+-        response.EnsureSuccessStatusCode();
+-
+-        DeviceSyncModel? saved =
+-            await response.Content
+-                .ReadFromJsonAsync<DeviceSyncModel>(
+-                    _jsonOptions,
+-                    cancellationToken
+-                );
+-
+-        if (saved == null)
+-        {
+-            throw new InvalidOperationException(
+-                $"Device save response is empty: {device.DevCd}"
+-            );
+-        }
+-
+-        return saved;
+-    }
+-
+     /*
+      * User 로그인 (JU-1c)
+      * POST api/auth/login
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java b/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
+index 25beb9c..b57d4b2 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/config/SecurityConfig.java
+@@ -22,6 +22,7 @@ import com.asdp.juprovider.service.AuthService;
+  * 인증 구조 (JU-1A + JU-1B)
+  *
+  * 1) Client 체인 : /api/core/sync/**, /api/client/** → Desktop Client Key (X-JU-Client-Id / X-JU-Client-Key)
++ *    /api/core/sync/** 는 GET만 허용 (SEC-S1, 그 외 메서드 403)
+  * 2) API 체인  : /api/**            → 사용자 JWT
+  *      - 공개: POST /api/auth/login, /api/health
+  *      - 로그인만: /api/auth/me, /api/auth/password (최초 비밀번호 변경 전에도 허용)
+@@ -53,6 +54,10 @@ public class SecurityConfig {
+                     new ClientKeyAuthenticationFilter(clientService),
+                     UsernamePasswordAuthenticationFilter.class)
+             .authorizeHttpRequests(auth -> auth
++                    // SEC-S1: Client는 서버 공통 정의를 조회만 한다. 동기화 경로의 쓰기 메서드는 차단(403).
++                    .requestMatchers(HttpMethod.GET, "/api/core/sync/**")
++                        .hasAuthority(ClientKeyAuthenticationFilter.CLIENT_AUTHORITY)
++                    .requestMatchers("/api/core/sync/**").denyAll()
+                     .anyRequest().hasAuthority(ClientKeyAuthenticationFilter.CLIENT_AUTHORITY))
+             .exceptionHandling(ex -> ex
+                     .authenticationEntryPoint(errorHandler)
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DeviceSyncController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DeviceSyncController.java
+index 24da9ff..be621c9 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DeviceSyncController.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DeviceSyncController.java
+@@ -11,9 +11,6 @@ import org.springframework.web.bind.annotation.RestController;
+ import com.asdp.juprovider.core.device.dto.DeviceSyncDto;
+ import com.asdp.juprovider.core.device.service.DeviceSyncService;
+ 
+-import org.springframework.web.bind.annotation.PutMapping;
+-import org.springframework.web.bind.annotation.RequestBody;
+-
+ @RestController
+ @RequestMapping("/api/core/sync/devices")
+ public class DeviceSyncController {
+@@ -59,26 +56,9 @@ public class DeviceSyncController {
+         return ResponseEntity.ok(device);
+     }
+ 
+-    /**
+-     * Client -> Server Device 동기화 저장.
+-     *
+-     * 신규 Device이면 INSERT,
+-     * 기존 Device이면 UPDATE 처리한다.
+-     *
+-     * DEV_CD는 URL 값을 기준으로 한다.
++    /*
++     * SEC-S1: Client -> Server Device 저장(PUT) 경로는 제거했다.
++     * 공통 Device 정의는 서버가 소유하며 관리자 Action으로만 수정한다.
++     * Client 체인은 GET만 허용한다 (SecurityConfig).
+      */
+-    @PutMapping("/{devCd}")
+-    public ResponseEntity<DeviceSyncDto> saveDevice(
+-        @PathVariable String devCd,
+-        @RequestBody DeviceSyncDto device
+-    ) {
+-
+-        DeviceSyncDto saved =
+-            deviceSyncService.saveDevice(
+-                devCd,
+-                device
+-            );
+-
+-        return ResponseEntity.ok(saved);
+-    }    
+-}
+\ No newline at end of file
++}
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/controller/DeviceSyncControllerTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/controller/DeviceSyncControllerTest.java
+new file mode 100644
+index 0000000..904cb97
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/controller/DeviceSyncControllerTest.java
+@@ -0,0 +1,30 @@
++package com.asdp.juprovider.controller;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.lang.reflect.Method;
++import java.util.Arrays;
++import java.util.List;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.core.annotation.AnnotatedElementUtils;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.RequestMapping;
++
++/** SEC-S1: Client 동기화 컨트롤러는 조회(GET)만 제공한다. */
++class DeviceSyncControllerTest {
++
++    @Test
++    void exposesOnlyGetMappings() {
++        List<Method> mapped = Arrays.stream(DeviceSyncController.class.getDeclaredMethods())
++                .filter(m -> AnnotatedElementUtils.hasAnnotation(m, RequestMapping.class))
++                .toList();
++
++        assertEquals(2, mapped.size(), "GET 전체 / GET 단건만 존재해야 한다");
++        for (Method m : mapped) {
++            assertTrue(m.isAnnotationPresent(GetMapping.class),
++                    m.getName() + " 는 GET 이외 매핑을 가지면 안 된다");
++        }
++    }
++}
+-- 
+2.43.0
+

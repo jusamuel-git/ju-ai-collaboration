@@ -5,6 +5,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자·ChatGPT | **SEC-S1 결과 검토**: [reviews/claude/2026-10-28_sec-s1_result.md](../reviews/claude/2026-10-28_sec-s1_result.md) — `feature/sec-s1` 로컬 commit `4187280` (push 없음), 빌드 5종·테스트 9/9·smoke 25/25 |
 | ChatGPT·사용자 | **SYSINFO-01 조사·설계안 검토**: [reviews/claude/2026-10-28_sysinfo-01_precheck.md](../reviews/claude/2026-10-28_sysinfo-01_precheck.md) — 최소 계약 S1~S7, 결정 요청 SI-Q1~Q6, 후속 항목 분리 (코드 수정 없음) |
 | ChatGPT·사용자 | **PC-B 재현 검증 PASS 검토**: [reviews/claude/2026-10-27_pcb-protocol-ref_verify.md](../reviews/claude/2026-10-27_pcb-protocol-ref_verify.md) — 빌드 5종 PASS, 테스트 23/23, 06(1·2회·신규 설치 동일), HTTP smoke 64/64 + 보완 14/14 (PC-A와 차이 없음). 다음: PR-2 검토 결과에 따라 PR-3 또는 main 반영 판단. **main merge/push 금지 유지** |
 | ChatGPT | PR-2 결과 검토: [result](../reviews/claude/2026-10-27_pr2-protocol-backend_result.md) (PC-A 빌드 5종, 테스트 23/23, HTTP smoke 58/58) |
@@ -45,5 +46,7 @@
 - 2026-10-27 17:05 **PR-2 Protocol Backend 로컬 commit `157635a`**: 빌드 5종, 테스트 23/23, 06(1·2회·신규 설치 동일), HTTP smoke 58/58 — 원자성(GRP_CREATE·GRP_DELETE·CREATE 트리거 주입 rollback), GRP_DELETE 장치+실험 전체 선검사 409 무변경
 - 2026-10-27 17:04 **PC-A 작업 종료**: `feature/protocol-ref`(`02ab18c`, `157635a`)를 원격에 브랜치로만 push. origin/main은 `fce5048` 그대로. 제품 코드 수정 중단, PC-B 검증 대기
 - 2026-10-27 22:45 **PC-B 재현 검증 PASS** (`JUSAMUEL`, worktree `workspace_verify`): HEAD `157635a`·계보 확인, 환경 PASS 22/WARN 9/FAIL 1(vcpkg, 빌드 무관), 빌드 5종 PASS, 테스트 23/23, 06 재실행 무변경·신규 설치 동일, HTTP smoke 64/64 + Device GET·501 보완 14/14. 테스트 DB·프로세스 정리. 제품 코드 수정·push 없음
+- 2026-10-28 08:14 SYSINFO-01 결정: S1~S7 승인, SI-Q1~Q6 (로컬 override 우선, Client PUT 차단, template 저장소화, ju_schema_version, Sync 응답 변경은 PR-3 이후, 순서 SEC-S1 → PR-3 → SYSINFO-02 → SYSINFO-03 → SYNC-01)
+- 2026-10-28 08:25 **SEC-S1 로컬 commit `4187280`** (`feature/sec-s1` ← main): Client 체인 sync GET만 허용, Device PUT 제거, Desktop SaveDeviceAsync 제거. 빌드 5종, 테스트 9/9, smoke 25/25, 장치 정의 무변경. 남은 문제: Client 403 메시지 문구
 - 2026-10-28 08:30 SYSINFO-01 사전 조사 업로드: 버전 정보 노출·스키마 버전 테이블 없음, Device 전체 동기화만(비활성 장치 로컬 잔존), 장치 설정 전역 1벌(ClientId 구분 없음), Client→서버 장치 PUT 경로 존재(미호출), template.accdb 저장소 없음 (코드 수정 없음)
 - 2026-10-28 07:53 사용자: PC-B 서버 정상 확인, Client는 template.accdb 없음(환경 문제). 오늘은 PC-A 작업, PC-B는 저녁에 미커밋 삭제·환경 정렬
