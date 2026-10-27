@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.asdp.juprovider.dao.CoreQueryDao">
+
+    <select id="selectLanguages" resultType="map">
+        SELECT LANG_CD,
+               LANG_NM,
+               NATIVE_NM,
+               IMPLEMENTED_YN,
+               USE_YN,
+               SORT_ORD
+          FROM ju_language
+         WHERE USE_YN = 'YENO0001'
+         ORDER BY SORT_ORD, LANG_CD
+    </select>
+
+    <select id="selectCommonGroups" resultType="map">
+        SELECT g.GRP_CD,
+               COALESCE(ml.RES_VAL, d.GRP_NM, g.GRP_CD) AS GRP_NM,
+               COALESCE(md.RES_VAL, d.GRP_DESC) AS GRP_DESC,
+               g.SORT_ORD
+          FROM ju_com_group g
+          LEFT JOIN ju_com_group_detail d
+            ON d.GRP_CD = g.GRP_CD
+          LEFT JOIN ju_multi_lang ml
+            ON ml.LANG_CD = #{langCd}
+           AND ml.RES_KEY = d.GRP_NM_KEY
+          LEFT JOIN ju_multi_lang md
+            ON md.LANG_CD = #{langCd}
+           AND md.RES_KEY = d.GRP_DESC_KEY
+         WHERE g.USE_YN = 'YENO0001'
+         ORDER BY g.SORT_ORD, g.GRP_CD
+    </select>
+
+    <select id="selectCommonCodes" resultType="map">
+        SELECT c.GRP_CD,
+               c.COM_CD,
+               c.COM_VAL,
+               c.COM_ATTR,
+               COALESCE(ml.RES_VAL, d.COM_NM, c.COM_CD) AS COM_NM,
+               COALESCE(md.RES_VAL, d.COM_DESC) AS COM_DESC,
+               c.SORT_ORD
+          FROM ju_com_code c
+          LEFT JOIN ju_com_code_detail d
+            ON d.GRP_CD = c.GRP_CD
+           AND d.COM_CD = c.COM_CD
+          LEFT JOIN ju_multi_lang ml
+            ON ml.LANG_CD = #{langCd}
+           AND ml.RES_KEY = d.COM_NM_KEY
+          LEFT JOIN ju_multi_lang md
+            ON md.LANG_CD = #{langCd}
+           AND md.RES_KEY = d.COM_DESC_KEY
+         WHERE c.GRP_CD = #{grpCd}
+           AND c.USE_YN = 'YENO0001'
+         ORDER BY c.SORT_ORD, c.COM_CD
+    </select>
+
+    <select id="selectMenus" resultType="map">
+        SELECT m.MNU_ID,
+               m.MNU_CD,
+               m.UP_MNU_ID,
+               m.MNU_KIND,
+               m.MNU_LV,
+               m.MNU_URL,
+               m.SORT_ORD,
+               COALESCE(ml.RES_VAL, d.MNU_NM, m.MNU_CD) AS MNU_NM,
+               COALESCE(md.RES_VAL, d.MNU_DESC) AS MNU_DESC
+          FROM ju_menu m
+          LEFT JOIN ju_menu_detail d
+            ON d.MNU_ID = m.MNU_ID
+          LEFT JOIN ju_multi_lang ml
+            ON ml.LANG_CD = #{langCd}
+           AND ml.RES_KEY = d.MNU_NM_KEY
+          LEFT JOIN ju_multi_lang md
+            ON md.LANG_CD = #{langCd}
+           AND md.RES_KEY = d.MNU_DESC_KEY
+         WHERE m.USE_YN = 'YENO0001'
+           AND m.ENABLED_YN = 'YENO0001'
+         ORDER BY m.SORT_ORD, m.MNU_ID
+    </select>
+
+    <select id="selectDevices" resultType="map">
+        SELECT d.*,
+               x.DEV_NM,
+               x.DEV_DESC,
+               x.DEV_CONFIG,
+               x.DEV_EXTRA,
+               x.DEV_DATA
+          FROM ju_device d
+          LEFT JOIN ju_device_detail x
+            ON x.DEV_CD = d.DEV_CD
+         WHERE d.USE_YN = 'YENO0001'
+         ORDER BY d.DEV_CD
+    </select>
+
+    <select id="selectDataGroups" resultType="map">
+        SELECT g.*,
+               d.DAT_GR_NM,
+               d.DAT_GR_DESC
+          FROM ju_data_group g
+          LEFT JOIN ju_data_group_detail d
+            ON d.DAT_GR_CD = g.DAT_GR_CD
+         WHERE g.USE_YN = 'YENO0001'
+         ORDER BY g.SORT_ORD, g.DAT_GR_CD
+    </select>
+
+    <select id="selectDataTags" resultType="map">
+        SELECT t.*,
+               d.DAT_NM,
+               d.DAT_DESC,
+               d.TAG_KIND,
+               d.TAG_COLOR,
+               d.DAT_MIN,
+               d.DAT_MAX,
+               d.FORMULA_YN,
+               d.FORMULA_CNT,
+               d.FORMULA_ITEM,
+               d.DAT_FORMULA,
+               d.FORMULA_MIN,
+               d.FORMULA_MAX,
+               d.FORMULA_UNIT
+          FROM ju_data_tag t
+          LEFT JOIN ju_data_tag_detail d
+            ON d.DAT_GR_CD = t.DAT_GR_CD
+           AND d.DAT_CD = t.DAT_CD
+           AND d.DAT_IDX = t.DAT_IDX
+         WHERE t.DAT_GR_CD = #{datGrCd}
+           AND t.USE_YN = 'YENO0001'
+         ORDER BY t.SORT_ORD, t.DAT_IDX
+    </select>
+
+    <select id="selectExperiments" resultType="map">
+        SELECT e.*,
+               d.EXP_NM,
+               d.EXP_DESC,
+               d.EXP_TIME,
+               d.EXP_INTVAL,
+               d.EXP_CONFIG,
+               d.RUN_MODE,
+               d.START_DT,
+               d.END_DT,
+               d.EXP_EXTRA
+          FROM ju_experiment e
+          LEFT JOIN ju_experiment_detail d
+            ON d.EXP_ID = e.EXP_ID
+         WHERE e.USE_YN = 'YENO0001'
+         ORDER BY e.EXP_ID
+    </select>
+
+    <select id="selectExperimentRuns" resultType="map">
+        SELECT *
+          FROM ju_experiment_run
+        <where>
+            <if test="expId != null">
+                EXP_ID = #{expId}
+            </if>
+        </where>
+         ORDER BY CREATED_DT DESC
+    </select>
+
+    <select id="selectRuntimeData" resultType="map">
+        SELECT *
+          FROM ju_runtime_data
+        <where>
+            <if test="clientId != null and clientId != ''">
+                CLIENT_ID = #{clientId}
+            </if>
+        </where>
+         ORDER BY COLLECTED_DT DESC
+    </select>
+
+</mapper>

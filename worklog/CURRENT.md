@@ -9,7 +9,7 @@
 | ChatGPT·사용자 | **SYSINFO-01 조사·설계안 검토**: [reviews/claude/2026-10-28_sysinfo-01_precheck.md](../reviews/claude/2026-10-28_sysinfo-01_precheck.md) — 최소 계약 S1~S7, 결정 요청 SI-Q1~Q6, 후속 항목 분리 (코드 수정 없음) |
 | ChatGPT·사용자 | **PC-B 재현 검증 PASS 검토**: [reviews/claude/2026-10-27_pcb-protocol-ref_verify.md](../reviews/claude/2026-10-27_pcb-protocol-ref_verify.md) — 빌드 5종 PASS, 테스트 23/23, 06(1·2회·신규 설치 동일), HTTP smoke 64/64 + 보완 14/14 (PC-A와 차이 없음). 다음: PR-2 검토 결과에 따라 PR-3 또는 main 반영 판단. **main merge/push 금지 유지** |
 | ChatGPT | PR-2 결과 검토: [result](../reviews/claude/2026-10-27_pr2-protocol-backend_result.md) (PC-A 빌드 5종, 테스트 23/23, HTTP smoke 58/58) |
-| 대기 | PR-3 Protocol Vue: PC-A `feature/protocol-ref` @ `157635a`(origin 동일, main `fce5048`)에서 진행 예정. PR-2 ChatGPT 검토 문서 아직 없음. 착수 지시 대기 |
+| Claude | **PR-3 Protocol Vue 구현 완료, PC-A 실행 대기** (화면 잠금): `feature/protocol-ref` 위 8파일 — `ProtocolManagement.vue`(Group Grid·Protocol Grid·상세 Form·Packet Grid·Group Dialog, 모두 Action v1), `actionApi.executeByCode`, `session.canAction`, 라우트 `/console/device/protocol`, 레거시 `/api/core/protocol-groups`·`/protocols/{grp}` 제거. 스크립트 `tools/ai_pr3.ps1`(빌드·06 테스트 DB·API smoke, 서버 유지) → 브라우저 smoke → `ai_pr3_finish.ps1`(종료·DB 삭제·로컬 commit). PR-2 ChatGPT 검토 문서는 아직 없음 |
 | 참고 | JU-1c 범위 밖 보고 항목: template.accdb의 이전 LOCAL_USER, DPAPI(D3), Terminal/IPC 인증(D8), `SyncDevicesToTerminalAsync` TEMP TEST 코드, `InitializeIpcAsync` 미사용, Updater Form1 |
 | 사용자 | 운영 Desktop 사용 시 `desktop\app\config\client.json`의 ServerUrl을 18081 → `http://localhost:8081/juprovider/`로 변경 (키는 그대로 유효) |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |

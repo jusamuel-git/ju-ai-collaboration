@@ -1,0 +1,8 @@
+juprovider.backend/src/main/java/com/asdp/juprovider/controller/CoreController.java
+juprovider.backend/src/main/java/com/asdp/juprovider/dao/CoreQueryDao.java
+juprovider.backend/src/main/java/com/asdp/juprovider/service/CoreQueryService.java
+juprovider.backend/src/main/resources/mapper/CoreQueryDao.xml
+juprovider.frontvue/src/api/actionApi.js
+juprovider.frontvue/src/auth/session.js
+juprovider.frontvue/src/router/index.js
+juprovider.frontvue/src/views/device/ProtocolManagement.vue

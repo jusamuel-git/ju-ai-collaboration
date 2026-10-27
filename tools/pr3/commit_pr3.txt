@@ -1,0 +1,11 @@
+feat(protocol): add protocol management Vue screen on action contracts (PR-3)
+
+- ProtocolManagement.vue (M02010100): group grid, protocol grid, detail form,
+  packet grid, group dialog; all data via Action (MNU_CD + ACT_CD, contractVersion 1)
+- Buttons follow /auth/me permission bits (01/02/04/08); field errors shown per input
+- actionApi.executeByCode / actionError, session.menuPermission / canAction
+- Route /console/device/protocol (meta.menuCode M02010100)
+- Remove legacy /api/core/protocol-groups and /api/core/protocols/{grp} (AC10)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
