@@ -1,0 +1,1749 @@
+diff --git a/desktop/juprovider.client/LoginForm.cs b/desktop/juprovider.client/LoginForm.cs
+new file mode 100644
+index 0000000..452878f
+--- /dev/null
++++ b/desktop/juprovider.client/LoginForm.cs
+@@ -0,0 +1,131 @@
++using JuProvider.Client.Services;
++using JuProvider.Lib.Data.Auth;
++
++namespace juprovider.client;
++
++/*
++ * JU-1c 로그인 화면
++ * - 표시 직후 서버/Client 상태 확인 (ONLINE / OFFLINE / CLIENT_REJECTED)
++ * - 로그인: DesktopAuthService (온라인 우선, 서버 장애 시에만 offline)
++ */
++public sealed class LoginForm : Form
++{
++    private readonly DesktopAuthService _auth;
++
++    private readonly TextBox _loginId = new() { Width = 240 };
++
++    private readonly TextBox _password = new() { Width = 240, UseSystemPasswordChar = true };
++
++    private readonly Button _loginButton = new() { Text = "로그인", Width = 240, Height = 32 };
++
++    private readonly Label _status = new() { AutoSize = false, Width = 300, Height = 40 };
++
++    private readonly Label _message = new() { AutoSize = false, Width = 300, Height = 60, ForeColor = Color.Firebrick };
++
++    public DesktopSession? Session { get; private set; }
++
++    public LoginForm(
++        DesktopAuthService auth
++    )
++    {
++        _auth = auth;
++
++        Text = "JuProvider Client - 로그인";
++        FormBorderStyle = FormBorderStyle.FixedDialog;
++        MaximizeBox = false;
++        MinimizeBox = false;
++        StartPosition = FormStartPosition.CenterScreen;
++        ClientSize = new Size(340, 300);
++        AcceptButton = _loginButton;
++
++        FlowLayoutPanel panel =
++            new()
++            {
++                Dock = DockStyle.Fill,
++                FlowDirection = FlowDirection.TopDown,
++                Padding = new Padding(20),
++                WrapContents = false
++            };
++
++        panel.Controls.Add(_status);
++        panel.Controls.Add(new Label { Text = "아이디", AutoSize = true });
++        panel.Controls.Add(_loginId);
++        panel.Controls.Add(new Label { Text = "비밀번호", AutoSize = true });
++        panel.Controls.Add(_password);
++        panel.Controls.Add(_loginButton);
++        panel.Controls.Add(_message);
++
++        Controls.Add(panel);
++
++        _loginButton.Click += async (_, _) => await LoginAsync();
++        Shown += async (_, _) => await CheckServerAsync();
++    }
++
++    private async Task CheckServerAsync()
++    {
++        _status.Text = "서버 확인 중...";
++        _loginButton.Enabled = false;
++
++        SyncResult sync =
++            await _auth.SyncAsync();
++
++        ShowState(sync);
++        AppLog.Info($"[SYNC] {sync.State} devices={sync.DeviceCount}");
++
++        _loginButton.Enabled = true;
++        _loginId.Focus();
++    }
++
++    private async Task LoginAsync()
++    {
++        _loginButton.Enabled = false;
++        _message.Text = string.Empty;
++        _status.Text = "로그인 중...";
++
++        string loginId =
++            _loginId.Text.Trim();
++
++        DesktopLoginResult result =
++            await _auth.LoginAsync(
++                loginId,
++                _password.Text
++            );
++
++        _password.Clear();
++
++        if (_auth.LastSync != null)
++        {
++            ShowState(_auth.LastSync);
++        }
++
++        AppLog.Info($"[LOGIN] {loginId} {result.Code}");
++
++        if (result.Succeeded)
++        {
++            Session = result.Session;
++            DialogResult = DialogResult.OK;
++            Close();
++            return;
++        }
++
++        _message.Text = result.Message;
++        _loginButton.Enabled = true;
++        _password.Focus();
++    }
++
++    private void ShowState(
++        SyncResult sync
++    )
++    {
++        (string text, Color color) =
++            sync.State switch
++            {
++                ConnectionState.Online => ($"서버 연결됨 (ONLINE) · 장치 {sync.DeviceCount}개", Color.SeaGreen),
++                ConnectionState.Offline => ("서버 연결 안 됨 (OFFLINE) · 이전 로그인 사용자만 가능", Color.DarkOrange),
++                _ => ("Client 인증 실패 (CLIENT_REJECTED) · 로그인 불가", Color.Firebrick)
++            };
++
++        _status.Text = text;
++        _status.ForeColor = color;
++    }
++}
+diff --git a/desktop/juprovider.client/MainForm.cs b/desktop/juprovider.client/MainForm.cs
+index 6933be2..2bf50ce 100644
+--- a/desktop/juprovider.client/MainForm.cs
++++ b/desktop/juprovider.client/MainForm.cs
+@@ -1,10 +1,91 @@
++using JuProvider.Client.Services;
++using JuProvider.Lib.Data.Auth;
++
+ namespace juprovider.client
+ {
+     public partial class MainForm : Form
+     {
++        private readonly DesktopAuthService? _auth;
++
++        private readonly Label _sessionLabel = new() { AutoSize = true, Padding = new Padding(12, 8, 12, 4) };
++
++        private readonly Label _syncLabel = new() { AutoSize = true, Padding = new Padding(12, 4, 12, 4) };
++
++        /// <summary>로그아웃으로 닫혔는지 (true면 로그인 화면으로 돌아간다)</summary>
++        public bool LoggedOut { get; private set; }
++
+         public MainForm()
+         {
+             InitializeComponent();
+         }
++
++        public MainForm(
++            DesktopSession session,
++            DesktopAuthService auth
++        ) : this()
++        {
++            _auth = auth;
++
++            Text = "JuProvider Client";
++
++            MenuStrip menu = new();
++            ToolStripMenuItem syncItem = new("동기화");
++            ToolStripMenuItem logoutItem = new("로그아웃");
++            syncItem.Click += async (_, _) => await SyncAsync();
++            logoutItem.Click += (_, _) =>
++            {
++                LoggedOut = true;
++                AppLog.Info($"[LOGOUT] {session.LoginId}");
++                Close();
++            };
++            menu.Items.Add(syncItem);
++            menu.Items.Add(logoutItem);
++
++            FlowLayoutPanel status = new()
++            {
++                Dock = DockStyle.Top,
++                FlowDirection = FlowDirection.TopDown,
++                AutoSize = true
++            };
++
++            _sessionLabel.Text =
++                $"사용자: {session.UserName} ({session.LoginId})   " +
++                $"로그인: {(session.Mode == ConnectionState.Online ? "ONLINE" : "OFFLINE")}   " +
++                $"Client: {auth.ClientId ?? "-"}";
++
++            status.Controls.Add(_sessionLabel);
++            status.Controls.Add(_syncLabel);
++
++            Controls.Add(status);
++            Controls.Add(menu);
++            MainMenuStrip = menu;
++
++            ShowSync(auth.LastSync);
++        }
++
++        private async Task SyncAsync()
++        {
++            if (_auth == null)
++            {
++                return;
++            }
++
++            _syncLabel.Text = "동기화 중...";
++            SyncResult result = await _auth.SyncAsync();
++            AppLog.Info($"[SYNC] {result.State} devices={result.DeviceCount}");
++            ShowSync(result);
++        }
++
++        private void ShowSync(
++            SyncResult? sync
++        )
++        {
++            _syncLabel.Text =
++                sync == null
++                    ? "서버 상태: 확인 전"
++                    : $"서버 상태: {sync.State switch { ConnectionState.Online => "ONLINE", ConnectionState.Offline => "OFFLINE", _ => "CLIENT_REJECTED" }}   " +
++                      $"마지막 확인: {sync.CheckedAt:yyyy-MM-dd HH:mm:ss}   " +
++                      (sync.State == ConnectionState.Online ? $"장치 {sync.DeviceCount}개 동기화" : (sync.Message ?? string.Empty));
++        }
+     }
+ }
+diff --git a/desktop/juprovider.client/Program.cs b/desktop/juprovider.client/Program.cs
+index b77a90b..9b6ff95 100644
+--- a/desktop/juprovider.client/Program.cs
++++ b/desktop/juprovider.client/Program.cs
+@@ -1,5 +1,5 @@
+ using juprovider.client;
+-using JuProvider.Lib.Data.Api;
++using JuProvider.Lib.Data.Auth;
+ using JuProvider.Lib.Data.Local;
+ using JuProvider.Lib.Device.Models;
+ using System.Diagnostics;
+@@ -16,14 +16,26 @@ internal static class Program
+     private static LocalDeviceRepository? _localDeviceRepository;
+     private static TerminalConnectionService? _terminalConnectionService;
+ 
++    private static DesktopAuthService? _authService;
++
+     [STAThread]
+     static void Main()
+     {
+         ApplicationConfiguration.Initialize();
+ 
+-        InitializeClientAsync()
+-            .GetAwaiter()
+-            .GetResult();
++        /*
++         * 1. Local DB / 인증 서비스 준비 (서버 연결은 로그인 화면에서 비동기로 확인)
++         */
++        if (!InitializeClient())
++        {
++            MessageBox.Show(
++                "Local DB를 초기화하지 못했습니다. logs 폴더의 로그를 확인하세요.",
++                "JuProvider Client",
++                MessageBoxButtons.OK,
++                MessageBoxIcon.Error
++            );
++            return;
++        }
+ 
+         /*
+          * Terminal 연결 관리는 백그라운드에서 시작.
+@@ -31,98 +43,95 @@ internal static class Program
+          */
+         InitializeTerminalConnection();
+ 
+-        Application.ApplicationExit +=
+-            OnApplicationExit;
++        try
++        {
++            /*
++             * 2. 로그인 → 메인 화면. 로그아웃하면 로그인 화면으로 돌아간다 (결정 D7).
++             *    세션(토큰 포함)은 메모리에만 있고 폼이 닫히면 버린다.
++             */
++            while (true)
++            {
++                DesktopSession? session;
++
++                using (LoginForm login = new(_authService!))
++                {
++                    if (login.ShowDialog() != DialogResult.OK
++                        || login.Session == null)
++                    {
++                        break;
++                    }
+ 
+-        Application.Run(
+-            new MainForm()
+-        );
++                    session = login.Session;
++                }
++
++                AppLog.Info($"[SESSION] {session}");
++
++                bool loggedOut;
++
++                using (MainForm main = new(session, _authService!))
++                {
++                    main.ShowDialog();
++                    loggedOut = main.LoggedOut;
++                }
++
++                session = null;
++
++                if (!loggedOut)
++                {
++                    break;
++                }
++            }
++        }
++        finally
++        {
++            OnApplicationExit(null, EventArgs.Empty);
++        }
+     }
+ 
+-    private static async Task InitializeClientAsync()
++    private static bool InitializeClient()
+     {
+-        /*
+-         * 1. Local Database 초기화
+-         */
+         LocalDatabase localDatabase =
+             new();
+ 
+         try
+         {
+-            await localDatabase.InitializeAsync();
++            localDatabase.InitializeAsync()
++                .GetAwaiter()
++                .GetResult();
+ 
+-            Debug.WriteLine(
+-                $"[LOCAL DB] {localDatabase.DatabasePath}"
+-            );
++            AppLog.Info($"[LOCAL DB] {localDatabase.DatabasePath}");
+         }
+         catch (Exception ex)
+         {
+-            Debug.WriteLine(
+-                $"[LOCAL DB ERROR] {ex}"
+-            );
+-
+-            return;
++            AppLog.Info($"[LOCAL DB ERROR] {ex.Message}");
++            return false;
+         }
+ 
+-        /*
+-         * 2. Local Device Repository
+-         */
+         _localDeviceRepository =
+             new(
+                 localDatabase
+             );
+ 
+-        /*
+-         * 3. Server 연결 및 Device 동기화
+-         */
+-        bool online =
+-            await SyncDevicesFromServerAsync(
+-                _localDeviceRepository
+-            );
++        ClientSettings settings =
++            ClientSettings.Load();
+ 
+-        /*
+-         * 4. Server 연결 여부와 관계없이
+-         *    Local DB에서 Device를 읽는다.
+-         *
+-         * ONLINE:
+-         * Server -> Local DB -> Client
+-         *
+-         * OFFLINE:
+-         * Local DB -> Client
+-         */
+-        try
++        if (!settings.HasClientCredential)
+         {
+-            List<DeviceSyncModel> localDevices =
+-                await _localDeviceRepository.GetAllAsync();
++            AppLog.Info($"[CLIENT] Client 자격 없음: {ClientSettings.SettingsPath}");
++        }
+ 
+-            Debug.WriteLine(
+-                $"[CLIENT MODE] " +
+-                $"{(online ? "ONLINE" : "OFFLINE")}"
++        _authService =
++            new DesktopAuthService(
++                _localDeviceRepository,
++                new LocalUserRepository(localDatabase),
++                settings.ServerUrl,
++                settings.ClientId,
++                settings.ClientKey
+             );
+ 
+-            Debug.WriteLine(
+-                $"[LOCAL] Device Count = " +
+-                $"{localDevices.Count}"
+-            );
++        AppLog.Info($"[CLIENT] Server={settings.ServerUrl} ClientId={settings.ClientId ?? "-"}");
+ 
+-            foreach (DeviceSyncModel device
+-                     in localDevices)
+-            {
+-                Debug.WriteLine(
+-                    $"[LOCAL DEVICE] " +
+-                    $"{device.DevCd} / " +
+-                    $"{device.DevNm} / " +
+-                    $"{device.DevComm} / " +
+-                    $"{device.UseYn}"
+-                );
+-            }
+-        }
+-        catch (Exception ex)
+-        {
+-            Debug.WriteLine(
+-                $"[LOCAL DEVICE ERROR] {ex}"
+-            );
+-        }
++        return true;
+     }
+ 
+     private static void InitializeTerminalConnection()
+@@ -208,70 +217,6 @@ internal static class Program
+         return Task.CompletedTask;
+     }
+ 
+-    private static async Task<bool> SyncDevicesFromServerAsync(
+-        LocalDeviceRepository localDeviceRepository
+-    )
+-    {
+-        try
+-        {
+-            ClientSettings settings =
+-                ClientSettings.Load();
+-
+-            if (!settings.HasClientCredential)
+-            {
+-                Debug.WriteLine(
+-                    $"[SERVER] Client 자격이 없습니다. " +
+-                    $"{ClientSettings.SettingsPath}에 ClientId/ClientKey를 설정하세요."
+-                );
+-            }
+-
+-            using JuProviderApiClient apiClient =
+-                new(
+-                    settings.ServerUrl,
+-                    settings.ClientId,
+-                    settings.ClientKey
+-                );
+-
+-            /*
+-             * Server Device 조회
+-             */
+-            List<DeviceSyncModel> serverDevices =
+-                await apiClient.GetDevicesAsync();
+-
+-            Debug.WriteLine(
+-                $"[SERVER] Device Count = " +
+-                $"{serverDevices.Count}"
+-            );
+-
+-            /*
+-             * Server -> Local DB
+-             */
+-            await localDeviceRepository.UpsertAllAsync(
+-                serverDevices
+-            );
+-
+-            Debug.WriteLine(
+-                $"[SYNC] Device synchronization completed."
+-            );
+-
+-            return true;
+-        }
+-        catch (Exception ex)
+-        {
+-            /*
+-             * Server가 없거나 네트워크 오류가 발생해도
+-             * Client는 종료하지 않는다.
+-             *
+-             * 이후 Local DB 데이터를 사용한다.
+-             */
+-            Debug.WriteLine(
+-                $"[SERVER OFFLINE] {ex.Message}"
+-            );
+-
+-            return false;
+-        }
+-    }
+-
+     private static async Task InitializeIpcAsync()
+     {
+         _ipcClient =
+diff --git a/desktop/juprovider.client/Services/AppLog.cs b/desktop/juprovider.client/Services/AppLog.cs
+new file mode 100644
+index 0000000..75d3ba6
+--- /dev/null
++++ b/desktop/juprovider.client/Services/AppLog.cs
+@@ -0,0 +1,53 @@
++using System.Diagnostics;
++using System.Text;
++
++namespace JuProvider.Client.Services;
++
++/*
++ * Client 실행 로그: {app}\logs\client_yyyyMMdd.log
++ * 비밀번호·토큰·Client Key는 기록하지 않는다.
++ */
++internal static class AppLog
++{
++    private static readonly object Sync = new();
++
++    public static void Info(
++        string message
++    )
++    {
++        string line =
++            $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}";
++
++        Debug.WriteLine(line);
++
++        try
++        {
++            string directory =
++                Path.Combine(
++                    AppContext.BaseDirectory,
++                    "logs"
++                );
++
++            Directory.CreateDirectory(directory);
++
++            string path =
++                Path.Combine(
++                    directory,
++                    $"client_{DateTime.Now:yyyyMMdd}.log"
++                );
++
++            lock (Sync)
++            {
++                File.AppendAllText(
++                    path,
++                    line + Environment.NewLine,
++                    Encoding.UTF8
++                );
++            }
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"[LOG ERROR] {ex.Message}");
++        }
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.data/Api/AuthApiModels.cs b/desktop/lib/juprovider.lib.data/Api/AuthApiModels.cs
+new file mode 100644
+index 0000000..c601fd3
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.data/Api/AuthApiModels.cs
+@@ -0,0 +1,56 @@
++namespace JuProvider.Lib.Data.Api;
++
++/*
++ * 서버 사용자 API 응답 형식: { success, data, message }
++ */
++public sealed class ApiEnvelope<T>
++{
++    public bool Success { get; set; }
++
++    public T? Data { get; set; }
++
++    public string? Message { get; set; }
++}
++
++/*
++ * POST /api/auth/login 응답 data
++ */
++public sealed class UserLoginData
++{
++    public string? AccessToken { get; set; }
++
++    public DateTimeOffset? ExpiresAt { get; set; }
++
++    public UserLoginInfo? User { get; set; }
++
++    public bool PasswordChangeRequired { get; set; }
++}
++
++public sealed class UserLoginInfo
++{
++    public long? UserId { get; set; }
++
++    public string? LoginId { get; set; }
++
++    public string? UserName { get; set; }
++
++    public long? AuthId { get; set; }
++
++    public string? AuthType { get; set; }
++}
++
++/*
++ * 로그인 호출 결과.
++ * StatusCode 200 + AccessToken = 성공, 4xx = 서버가 거부 (offline fallback 금지).
++ * 연결 실패·타임아웃·5xx는 예외로 올라온다 (호출 측에서 OFFLINE 판정).
++ */
++public sealed class UserLoginResponse
++{
++    public int StatusCode { get; init; }
++
++    public UserLoginData? Data { get; init; }
++
++    public bool IsSuccess =>
++        StatusCode == 200
++        && !string.IsNullOrWhiteSpace(Data?.AccessToken);
++}
+diff --git a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+index 453337f..a295a5b 100644
+--- a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
++++ b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+@@ -188,6 +188,59 @@ public sealed class JuProviderApiClient : IDisposable
+         return saved;
+     }
+ 
++    /*
++     * User 로그인 (JU-1c)
++     * POST api/auth/login
++     *
++     * 4xx: 서버가 사용자 인증을 거부 → 응답으로 반환 (예외 아님)
++     * 5xx: HttpRequestException (호출 측에서 OFFLINE 판정)
++     * 연결 실패·타임아웃: HttpRequestException / TaskCanceledException
++     */
++    public async Task<UserLoginResponse> LoginAsync(
++        string loginId,
++        string password,
++        CancellationToken cancellationToken = default
++    )
++    {
++        using HttpResponseMessage response =
++            await _httpClient.PostAsJsonAsync(
++                "api/auth/login",
++                new
++                {
++                    loginId,
++                    password
++                },
++                _jsonOptions,
++                cancellationToken
++            );
++
++        int statusCode =
++            (int)response.StatusCode;
++
++        if (statusCode >= 400 && statusCode < 500)
++        {
++            return new UserLoginResponse
++            {
++                StatusCode = statusCode
++            };
++        }
++
++        response.EnsureSuccessStatusCode();
++
++        ApiEnvelope<UserLoginData>? body =
++            await response.Content
++                .ReadFromJsonAsync<ApiEnvelope<UserLoginData>>(
++                    _jsonOptions,
++                    cancellationToken
++                );
++
++        return new UserLoginResponse
++        {
++            StatusCode = statusCode,
++            Data = body?.Data
++        };
++    }
++
+     public void Dispose()
+     {
+         _httpClient.Dispose();
+diff --git a/desktop/lib/juprovider.lib.data/Auth/DesktopAuthService.cs b/desktop/lib/juprovider.lib.data/Auth/DesktopAuthService.cs
+new file mode 100644
+index 0000000..266b64b
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.data/Auth/DesktopAuthService.cs
+@@ -0,0 +1,435 @@
++using System.Net;
++
++using JuProvider.Lib.Data.Api;
++using JuProvider.Lib.Data.Local;
++using JuProvider.Lib.Device.Models;
++
++namespace JuProvider.Lib.Data.Auth;
++
++/*
++ * JU-1c Desktop: Client 인증 + User 인증 (결정 D1~D8)
++ *
++ * 연결 상태
++ *   ONLINE           Client 키로 동기화 성공
++ *   OFFLINE          연결 실패·타임아웃·5xx (서버 장애)
++ *   CLIENT_REJECTED  Client 키 거부(401/403) 또는 Client 자격 없음 → 로그인 차단
++ *
++ * 로그인
++ *   ONLINE  → 서버 로그인. 4xx(서버 거부)는 offline fallback 금지, 로컬 offline 허용도 끊는다.
++ *   OFFLINE → 같은 Client에서 이전에 온라인 로그인한 사용자만, 만료 전·잠금 아님·검증자 일치 시 허용.
++ *   CLIENT_REJECTED → 로그인 불가 (offline fallback 금지).
++ */
++public sealed class DesktopAuthService
++{
++    public const int OfflineValidDays = 7;
++
++    public const int OfflineMaxFailures = 5;
++
++    private readonly LocalDeviceRepository _deviceRepository;
++
++    private readonly LocalUserRepository _userRepository;
++
++    private readonly string _serverUrl;
++
++    private readonly string? _clientId;
++
++    private readonly string? _clientKey;
++
++    public DesktopAuthService(
++        LocalDeviceRepository deviceRepository,
++        LocalUserRepository userRepository,
++        string serverUrl,
++        string? clientId,
++        string? clientKey
++    )
++    {
++        _deviceRepository = deviceRepository;
++        _userRepository = userRepository;
++        _serverUrl = serverUrl;
++        _clientId = string.IsNullOrWhiteSpace(clientId) ? null : clientId.Trim();
++        _clientKey = string.IsNullOrWhiteSpace(clientKey) ? null : clientKey.Trim();
++    }
++
++    public string ServerUrl => _serverUrl;
++
++    public string? ClientId => _clientId;
++
++    public bool HasClientCredential =>
++        _clientId != null && _clientKey != null;
++
++    public SyncResult? LastSync { get; private set; }
++
++    /*
++     * Server -> Local DB 장치 동기화 (Client 인증 확인 겸용)
++     */
++    public async Task<SyncResult> SyncAsync(
++        CancellationToken cancellationToken = default
++    )
++    {
++        SyncResult result;
++
++        if (!HasClientCredential)
++        {
++            result = new SyncResult(
++                ConnectionState.ClientRejected,
++                0,
++                DateTime.Now,
++                "Client 자격(ClientId/ClientKey)이 설정되지 않았습니다."
++            );
++        }
++        else
++        {
++            try
++            {
++                using JuProviderApiClient apiClient =
++                    CreateApiClient();
++
++                List<DeviceSyncModel> serverDevices =
++                    await apiClient.GetDevicesAsync(
++                        cancellationToken
++                    );
++
++                await _deviceRepository.UpsertAllAsync(
++                    serverDevices,
++                    cancellationToken
++                );
++
++                result = new SyncResult(
++                    ConnectionState.Online,
++                    serverDevices.Count,
++                    DateTime.Now,
++                    null
++                );
++            }
++            catch (Exception ex) when (IsServerFailure(ex, out ConnectionState state))
++            {
++                result = new SyncResult(
++                    state,
++                    0,
++                    DateTime.Now,
++                    state == ConnectionState.ClientRejected
++                        ? "서버가 Client 키를 거부했습니다. 관리자에게 Client 등록/키 재발급을 요청하세요."
++                        : "서버에 연결할 수 없습니다."
++                );
++            }
++        }
++
++        LastSync = result;
++
++        return result;
++    }
++
++    public async Task<DesktopLoginResult> LoginAsync(
++        string loginId,
++        string password,
++        CancellationToken cancellationToken = default
++    )
++    {
++        string userId =
++            LocalUserRepository.Normalize(loginId);
++
++        if (userId.Length == 0 || string.IsNullOrEmpty(password))
++        {
++            return DesktopLoginResult.Fail(LoginResultCode.InvalidInput, "아이디와 비밀번호를 입력하세요.");
++        }
++
++        SyncResult sync =
++            await SyncAsync(
++                cancellationToken
++            );
++
++        if (sync.State == ConnectionState.ClientRejected)
++        {
++            return DesktopLoginResult.Fail(LoginResultCode.ClientRejected, sync.Message ?? "Client 인증 실패");
++        }
++
++        if (sync.State == ConnectionState.Online)
++        {
++            UserLoginResponse response;
++
++            try
++            {
++                using JuProviderApiClient apiClient =
++                    CreateApiClient();
++
++                response = await apiClient.LoginAsync(
++                    userId,
++                    password,
++                    cancellationToken
++                );
++            }
++            catch (Exception ex) when (IsServerFailure(ex, out ConnectionState state)
++                                       && state == ConnectionState.Offline)
++            {
++                return await OfflineLoginAsync(
++                    userId,
++                    password,
++                    cancellationToken
++                );
++            }
++
++            return await CompleteOnlineLoginAsync(
++                userId,
++                password,
++                response,
++                cancellationToken
++            );
++        }
++
++        return await OfflineLoginAsync(
++            userId,
++            password,
++            cancellationToken
++        );
++    }
++
++    private async Task<DesktopLoginResult> CompleteOnlineLoginAsync(
++        string userId,
++        string password,
++        UserLoginResponse response,
++        CancellationToken cancellationToken
++    )
++    {
++        if (!response.IsSuccess)
++        {
++            // 서버 거부(401 등): offline fallback 금지, 기존 offline 허용도 끊는다.
++            await _userRepository.RevokeAsync(userId, cancellationToken);
++
++            return DesktopLoginResult.Fail(
++                LoginResultCode.InvalidCredentials,
++                "아이디 또는 비밀번호가 올바르지 않습니다."
++            );
++        }
++
++        UserLoginData data =
++            response.Data!;
++
++        if (data.PasswordChangeRequired)
++        {
++            await _userRepository.RevokeAsync(userId, cancellationToken);
++
++            return DesktopLoginResult.Fail(
++                LoginResultCode.PasswordChangeRequired,
++                "비밀번호 변경이 필요합니다. 웹 콘솔에서 비밀번호를 변경한 뒤 다시 로그인하세요."
++            );
++        }
++
++        DateTime now = DateTime.Now;
++
++        await _userRepository.SaveOnlineLoginAsync(
++            userId,
++            data.User?.UserId?.ToString(System.Globalization.CultureInfo.InvariantCulture),
++            _clientId,
++            OfflineCredential.Create(password),
++            now,
++            now.AddDays(OfflineValidDays),
++            cancellationToken
++        );
++
++        return DesktopLoginResult.Ok(
++            LoginResultCode.OnlineSuccess,
++            new DesktopSession(
++                userId,
++                data.User?.UserName ?? userId,
++                data.User?.AuthType,
++                ConnectionState.Online,
++                data.AccessToken,
++                data.ExpiresAt
++            )
++        );
++    }
++
++    private async Task<DesktopLoginResult> OfflineLoginAsync(
++        string userId,
++        string password,
++        CancellationToken cancellationToken
++    )
++    {
++        LocalUserRecord? user =
++            await _userRepository.GetAsync(
++                userId,
++                cancellationToken
++            );
++
++        if (user == null
++            || string.IsNullOrWhiteSpace(user.OfflineToken)
++            || !string.Equals(user.DeviceId, _clientId, StringComparison.Ordinal))
++        {
++            return DesktopLoginResult.Fail(
++                LoginResultCode.OfflineNotAvailable,
++                "서버에 연결할 수 없고, 이 PC에서 온라인 로그인한 기록이 없어 오프라인 로그인을 할 수 없습니다."
++            );
++        }
++
++        if (user.EnabledYn != LocalUserRepository.Yes)
++        {
++            return DesktopLoginResult.Fail(
++                LoginResultCode.OfflineDisabled,
++                "오프라인 로그인이 해제된 사용자입니다. 서버 연결 후 다시 로그인하세요."
++            );
++        }
++
++        if (user.OfflineLockYn == LocalUserRepository.Yes)
++        {
++            return DesktopLoginResult.Fail(
++                LoginResultCode.OfflineLocked,
++                "오프라인 로그인이 잠겼습니다. 서버 연결 후 온라인으로 로그인하세요."
++            );
++        }
++
++        if (user.ExpireDt == null || user.ExpireDt.Value < DateTime.Now)
++        {
++            return DesktopLoginResult.Fail(
++                LoginResultCode.OfflineExpired,
++                "오프라인 로그인 기간이 지났습니다. 서버 연결 후 다시 로그인하세요."
++            );
++        }
++
++        if (!OfflineCredential.Verify(password, user.OfflineToken))
++        {
++            int failures =
++                await _userRepository.RecordOfflineFailureAsync(
++                    userId,
++                    OfflineMaxFailures,
++                    cancellationToken
++                );
++
++            return failures >= OfflineMaxFailures
++                ? DesktopLoginResult.Fail(
++                    LoginResultCode.OfflineLocked,
++                    "오프라인 로그인 실패가 계속되어 잠겼습니다. 서버 연결 후 온라인으로 로그인하세요.")
++                : DesktopLoginResult.Fail(
++                    LoginResultCode.InvalidCredentials,
++                    "아이디 또는 비밀번호가 올바르지 않습니다.");
++        }
++
++        await _userRepository.ResetOfflineFailuresAsync(
++            userId,
++            cancellationToken
++        );
++
++        return DesktopLoginResult.Ok(
++            LoginResultCode.OfflineSuccess,
++            new DesktopSession(
++                userId,
++                userId,
++                null,
++                ConnectionState.Offline,
++                null,
++                null
++            )
++        );
++    }
++
++    private JuProviderApiClient CreateApiClient()
++    {
++        return new JuProviderApiClient(
++            _serverUrl,
++            _clientId,
++            _clientKey
++        );
++    }
++
++    /*
++     * 서버 호출 예외 분류
++     *   401/403            → ClientRejected (Client 체인 거부)
++     *   그 외 HTTP 오류·연결 실패·타임아웃 → Offline
++     */
++    private static bool IsServerFailure(
++        Exception ex,
++        out ConnectionState state
++    )
++    {
++        switch (ex)
++        {
++            case HttpRequestException http
++                when http.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden:
++                state = ConnectionState.ClientRejected;
++                return true;
++
++            case HttpRequestException:
++            case TaskCanceledException:
++            case TimeoutException:
++                state = ConnectionState.Offline;
++                return true;
++
++            default:
++                state = ConnectionState.Offline;
++                return false;
++        }
++    }
++}
++
++public enum ConnectionState
++{
++    Online,
++    Offline,
++    ClientRejected
++}
++
++public enum LoginResultCode
++{
++    OnlineSuccess,
++    OfflineSuccess,
++    InvalidInput,
++    InvalidCredentials,
++    PasswordChangeRequired,
++    ClientRejected,
++    OfflineNotAvailable,
++    OfflineDisabled,
++    OfflineLocked,
++    OfflineExpired
++}
++
++public sealed record SyncResult(
++    ConnectionState State,
++    int DeviceCount,
++    DateTime CheckedAt,
++    string? Message
++);
++
++public sealed record DesktopSession(
++    string LoginId,
++    string UserName,
++    string? AuthType,
++    ConnectionState Mode,
++    string? AccessToken,
++    DateTimeOffset? ExpiresAt
++)
++{
++    // 토큰이 로그·화면에 찍히지 않도록 ToString에서 제외한다.
++    public override string ToString() =>
++        $"{LoginId} ({Mode})";
++}
++
++public sealed class DesktopLoginResult
++{
++    public LoginResultCode Code { get; private init; }
++
++    public string? Message { get; private init; }
++
++    public DesktopSession? Session { get; private init; }
++
++    public bool Succeeded =>
++        Session != null;
++
++    public static DesktopLoginResult Ok(
++        LoginResultCode code,
++        DesktopSession session
++    ) =>
++        new()
++        {
++            Code = code,
++            Session = session
++        };
++
++    public static DesktopLoginResult Fail(
++        LoginResultCode code,
++        string message
++    ) =>
++        new()
++        {
++            Code = code,
++            Message = message
++        };
++}
+diff --git a/desktop/lib/juprovider.lib.data/Auth/OfflineCredential.cs b/desktop/lib/juprovider.lib.data/Auth/OfflineCredential.cs
+new file mode 100644
+index 0000000..e31995c
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.data/Auth/OfflineCredential.cs
+@@ -0,0 +1,128 @@
++using System.Security.Cryptography;
++
++namespace JuProvider.Lib.Data.Auth;
++
++/*
++ * JU-1c offline 검증자 (결정 D1)
++ *
++ * 형식: pbkdf2-sha256${반복}${salt Base64}${hash Base64}
++ *
++ * - 서버 비밀번호 평문이나 서버 BCrypt 해시는 로컬에 저장하지 않는다.
++ * - 온라인 로그인에 성공했을 때만 새로 만든다 (사용자별 새 salt).
++ * - .NET 기본 라이브러리(Rfc2898DeriveBytes)만 사용한다.
++ */
++public static class OfflineCredential
++{
++    public const string Scheme = "pbkdf2-sha256";
++
++    public const int Iterations = 210_000;
++
++    private const int SaltSize = 16;
++
++    private const int HashSize = 32;
++
++    private const int MinIterations = 100_000;
++
++    private const int MaxIterations = 5_000_000;
++
++    public static string Create(
++        string password
++    )
++    {
++        ArgumentException.ThrowIfNullOrEmpty(password);
++
++        byte[] salt =
++            RandomNumberGenerator.GetBytes(
++                SaltSize
++            );
++
++        byte[] hash =
++            Derive(
++                password,
++                salt,
++                Iterations
++            );
++
++        return string.Join(
++            '$',
++            Scheme,
++            Iterations.ToString(System.Globalization.CultureInfo.InvariantCulture),
++            Convert.ToBase64String(salt),
++            Convert.ToBase64String(hash)
++        );
++    }
++
++    public static bool Verify(
++        string password,
++        string? stored
++    )
++    {
++        if (string.IsNullOrEmpty(password)
++            || string.IsNullOrWhiteSpace(stored))
++        {
++            return false;
++        }
++
++        string[] parts =
++            stored.Split('$');
++
++        if (parts.Length != 4
++            || parts[0] != Scheme
++            || !int.TryParse(
++                parts[1],
++                System.Globalization.NumberStyles.None,
++                System.Globalization.CultureInfo.InvariantCulture,
++                out int iterations)
++            || iterations < MinIterations
++            || iterations > MaxIterations)
++        {
++            return false;
++        }
++
++        try
++        {
++            byte[] salt =
++                Convert.FromBase64String(parts[2]);
++
++            byte[] expected =
++                Convert.FromBase64String(parts[3]);
++
++            if (salt.Length != SaltSize
++                || expected.Length != HashSize)
++            {
++                return false;
++            }
++
++            byte[] actual =
++                Derive(
++                    password,
++                    salt,
++                    iterations
++                );
++
++            return CryptographicOperations.FixedTimeEquals(
++                actual,
++                expected
++            );
++        }
++        catch (FormatException)
++        {
++            return false;
++        }
++    }
++
++    private static byte[] Derive(
++        string password,
++        byte[] salt,
++        int iterations
++    )
++    {
++        return Rfc2898DeriveBytes.Pbkdf2(
++            password,
++            salt,
++            iterations,
++            HashAlgorithmName.SHA256,
++            HashSize
++        );
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.data/Local/LocalDatabase.cs b/desktop/lib/juprovider.lib.data/Local/LocalDatabase.cs
+index 74302ce..76c78da 100644
+--- a/desktop/lib/juprovider.lib.data/Local/LocalDatabase.cs
++++ b/desktop/lib/juprovider.lib.data/Local/LocalDatabase.cs
+@@ -157,7 +157,42 @@ public sealed class LocalDatabase
+                 "LOCAL_USER"
+             ))
+         {
+-            return;
++            HashSet<string> existing =
++                GetTableColumns(
++                    connection,
++                    "LOCAL_USER"
++                );
++
++            string[] baseColumns =
++            [
++                "USER_ID",
++                "SERVER_USER_ID",
++                "DEVICE_ID",
++                "OFFLINE_TOKEN",
++                "LAST_AUTH_DT",
++                "EXPIRE_DT",
++                "ENABLED_YN"
++            ];
++
++            if (baseColumns.All(existing.Contains))
++            {
++                await AddLocalUserOfflineColumnsAsync(
++                    connection,
++                    cancellationToken
++                );
++
++                return;
++            }
++
++            /*
++             * 이전 template의 LOCAL_USER는 컬럼 구성이 다르고 JU-1c 전에는 사용하지 않았다.
++             * 개발 단계이므로 LOCAL_DEVICE와 같이 재생성한다.
++             */
++            await ExecuteNonQueryAsync(
++                connection,
++                "DROP TABLE LOCAL_USER",
++                cancellationToken
++            );
+         }
+ 
+         const string sql =
+@@ -171,6 +206,8 @@ public sealed class LocalDatabase
+                 LAST_AUTH_DT    DATETIME,
+                 EXPIRE_DT       DATETIME,
+                 ENABLED_YN      VARCHAR(8),
++                OFFLINE_FAIL_CNT INTEGER,
++                OFFLINE_LOCK_YN VARCHAR(8),
+ 
+                 CONSTRAINT PK_LOCAL_USER
+                     PRIMARY KEY (USER_ID)
+@@ -184,6 +221,39 @@ public sealed class LocalDatabase
+         );
+     }
+ 
++    /// <summary>
++    /// JU-1c: 기존 LOCAL_USER에 offline 실패횟수·잠금 컬럼이 없으면 추가한다 (기존 행 보존).
++    /// </summary>
++    private static async Task AddLocalUserOfflineColumnsAsync(
++        OleDbConnection connection,
++        CancellationToken cancellationToken
++    )
++    {
++        HashSet<string> columns =
++            GetTableColumns(
++                connection,
++                "LOCAL_USER"
++            );
++
++        if (!columns.Contains("OFFLINE_FAIL_CNT"))
++        {
++            await ExecuteNonQueryAsync(
++                connection,
++                "ALTER TABLE LOCAL_USER ADD COLUMN OFFLINE_FAIL_CNT INTEGER",
++                cancellationToken
++            );
++        }
++
++        if (!columns.Contains("OFFLINE_LOCK_YN"))
++        {
++            await ExecuteNonQueryAsync(
++                connection,
++                "ALTER TABLE LOCAL_USER ADD COLUMN OFFLINE_LOCK_YN VARCHAR(8)",
++                cancellationToken
++            );
++        }
++    }
++
+     private async Task CreateLocalDeviceTableAsync(
+        OleDbConnection connection,
+        CancellationToken cancellationToken
+diff --git a/desktop/lib/juprovider.lib.data/Local/LocalUserRepository.cs b/desktop/lib/juprovider.lib.data/Local/LocalUserRepository.cs
+new file mode 100644
+index 0000000..1b23b67
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.data/Local/LocalUserRepository.cs
+@@ -0,0 +1,379 @@
++using System.Data.Common;
++using System.Data.OleDb;
++
++namespace JuProvider.Lib.Data.Local;
++
++/*
++ * LOCAL_USER (JU-1c)
++ *
++ * USER_ID          로그인 아이디 (로컬 키)
++ * SERVER_USER_ID   서버 USER_ID
++ * DEVICE_ID        로그인했던 Client ID (다른 Client 자격이면 offline 불가)
++ * OFFLINE_TOKEN    OfflineCredential 검증자 (평문 비밀번호 아님)
++ * LAST_AUTH_DT     마지막 온라인 인증 시각
++ * EXPIRE_DT        offline 허용 만료 시각
++ * ENABLED_YN       Y: offline 허용 / N: 서버가 로그인을 거부해 무효화됨
++ * OFFLINE_FAIL_CNT offline 연속 실패 횟수 (결정 D5)
++ * OFFLINE_LOCK_YN  Y: offline 잠금 (다음 온라인 로그인 성공 시 해제)
++ */
++public sealed class LocalUserRepository
++{
++    public const string Yes = "Y";
++
++    public const string No = "N";
++
++    private readonly LocalDatabase _database;
++
++    public LocalUserRepository(
++        LocalDatabase database
++    )
++    {
++        _database = database;
++    }
++
++    public async Task<LocalUserRecord?> GetAsync(
++        string userId,
++        CancellationToken cancellationToken = default
++    )
++    {
++        await using OleDbConnection connection =
++            _database.CreateConnection();
++
++        await connection.OpenAsync(
++            cancellationToken
++        );
++
++        const string sql =
++            """
++            SELECT
++                USER_ID,
++                SERVER_USER_ID,
++                DEVICE_ID,
++                OFFLINE_TOKEN,
++                LAST_AUTH_DT,
++                EXPIRE_DT,
++                ENABLED_YN,
++                OFFLINE_FAIL_CNT,
++                OFFLINE_LOCK_YN
++            FROM LOCAL_USER
++            WHERE USER_ID = ?
++            """;
++
++        await using OleDbCommand command =
++            new(
++                sql,
++                connection
++            );
++
++        AddText(command, Normalize(userId));
++
++        await using DbDataReader reader =
++            await command.ExecuteReaderAsync(
++                cancellationToken
++            );
++
++        if (!await reader.ReadAsync(cancellationToken))
++        {
++            return null;
++        }
++
++        return new LocalUserRecord
++        {
++            UserId = ReadString(reader, 0) ?? string.Empty,
++            ServerUserId = ReadString(reader, 1),
++            DeviceId = ReadString(reader, 2),
++            OfflineToken = ReadString(reader, 3),
++            LastAuthDt = ReadDate(reader, 4),
++            ExpireDt = ReadDate(reader, 5),
++            EnabledYn = ReadString(reader, 6),
++            OfflineFailCount = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
++            OfflineLockYn = ReadString(reader, 8)
++        };
++    }
++
++    /*
++     * 온라인 로그인 성공: 검증자 교체, 만료 갱신, 실패횟수·잠금 해제
++     */
++    public async Task SaveOnlineLoginAsync(
++        string userId,
++        string? serverUserId,
++        string? deviceId,
++        string offlineToken,
++        DateTime authenticatedAt,
++        DateTime expireAt,
++        CancellationToken cancellationToken = default
++    )
++    {
++        string key =
++            Normalize(userId);
++
++        await using OleDbConnection connection =
++            _database.CreateConnection();
++
++        await connection.OpenAsync(
++            cancellationToken
++        );
++
++        const string updateSql =
++            """
++            UPDATE LOCAL_USER
++            SET
++                SERVER_USER_ID = ?,
++                DEVICE_ID = ?,
++                OFFLINE_TOKEN = ?,
++                LAST_AUTH_DT = ?,
++                EXPIRE_DT = ?,
++                ENABLED_YN = 'Y',
++                OFFLINE_FAIL_CNT = 0,
++                OFFLINE_LOCK_YN = 'N'
++            WHERE USER_ID = ?
++            """;
++
++        await using (OleDbCommand update = new(updateSql, connection))
++        {
++            AddText(update, serverUserId);
++            AddText(update, deviceId);
++            AddLongText(update, offlineToken);
++            AddDate(update, authenticatedAt);
++            AddDate(update, expireAt);
++            AddText(update, key);
++
++            if (await update.ExecuteNonQueryAsync(cancellationToken) > 0)
++            {
++                return;
++            }
++        }
++
++        const string insertSql =
++            """
++            INSERT INTO LOCAL_USER
++            (
++                USER_ID,
++                SERVER_USER_ID,
++                DEVICE_ID,
++                OFFLINE_TOKEN,
++                LAST_AUTH_DT,
++                EXPIRE_DT,
++                ENABLED_YN,
++                OFFLINE_FAIL_CNT,
++                OFFLINE_LOCK_YN
++            )
++            VALUES (?, ?, ?, ?, ?, ?, 'Y', 0, 'N')
++            """;
++
++        await using OleDbCommand insert =
++            new(
++                insertSql,
++                connection
++            );
++
++        AddText(insert, key);
++        AddText(insert, serverUserId);
++        AddText(insert, deviceId);
++        AddLongText(insert, offlineToken);
++        AddDate(insert, authenticatedAt);
++        AddDate(insert, expireAt);
++
++        await insert.ExecuteNonQueryAsync(
++            cancellationToken
++        );
++    }
++
++    /*
++     * 서버가 로그인을 거부(401 등)하거나 비밀번호 변경이 필요한 사용자:
++     * offline 허용을 끊는다. 다음 온라인 로그인 성공 시 다시 Y.
++     */
++    public async Task RevokeAsync(
++        string userId,
++        CancellationToken cancellationToken = default
++    )
++    {
++        await ExecuteAsync(
++            "UPDATE LOCAL_USER SET ENABLED_YN = 'N' WHERE USER_ID = ?",
++            Normalize(userId),
++            cancellationToken
++        );
++    }
++
++    /*
++     * offline 실패 1회 기록. maxFailures 이상이면 잠금. 새 실패횟수를 돌려준다.
++     */
++    public async Task<int> RecordOfflineFailureAsync(
++        string userId,
++        int maxFailures,
++        CancellationToken cancellationToken = default
++    )
++    {
++        LocalUserRecord? user =
++            await GetAsync(
++                userId,
++                cancellationToken
++            );
++
++        if (user == null)
++        {
++            return 0;
++        }
++
++        int count =
++            user.OfflineFailCount + 1;
++
++        await using OleDbConnection connection =
++            _database.CreateConnection();
++
++        await connection.OpenAsync(
++            cancellationToken
++        );
++
++        await using OleDbCommand command =
++            new(
++                "UPDATE LOCAL_USER SET OFFLINE_FAIL_CNT = ?, OFFLINE_LOCK_YN = ? WHERE USER_ID = ?",
++                connection
++            );
++
++        command.Parameters.Add(new OleDbParameter { OleDbType = OleDbType.Integer, Value = count });
++        AddText(command, count >= maxFailures ? Yes : No);
++        AddText(command, Normalize(userId));
++
++        await command.ExecuteNonQueryAsync(
++            cancellationToken
++        );
++
++        return count;
++    }
++
++    public async Task ResetOfflineFailuresAsync(
++        string userId,
++        CancellationToken cancellationToken = default
++    )
++    {
++        await ExecuteAsync(
++            "UPDATE LOCAL_USER SET OFFLINE_FAIL_CNT = 0, OFFLINE_LOCK_YN = 'N' WHERE USER_ID = ?",
++            Normalize(userId),
++            cancellationToken
++        );
++    }
++
++    private async Task ExecuteAsync(
++        string sql,
++        string key,
++        CancellationToken cancellationToken
++    )
++    {
++        await using OleDbConnection connection =
++            _database.CreateConnection();
++
++        await connection.OpenAsync(
++            cancellationToken
++        );
++
++        await using OleDbCommand command =
++            new(
++                sql,
++                connection
++            );
++
++        AddText(command, key);
++
++        await command.ExecuteNonQueryAsync(
++            cancellationToken
++        );
++    }
++
++    public static string Normalize(
++        string userId
++    )
++    {
++        return (userId ?? string.Empty).Trim();
++    }
++
++    private static void AddText(
++        OleDbCommand command,
++        string? value
++    )
++    {
++        command.Parameters.Add(
++            new OleDbParameter
++            {
++                OleDbType = OleDbType.VarWChar,
++                Value = (object?)value ?? DBNull.Value
++            }
++        );
++    }
++
++    private static void AddLongText(
++        OleDbCommand command,
++        string? value
++    )
++    {
++        command.Parameters.Add(
++            new OleDbParameter
++            {
++                OleDbType = OleDbType.LongVarWChar,
++                Value = (object?)value ?? DBNull.Value
++            }
++        );
++    }
++
++    private static void AddDate(
++        OleDbCommand command,
++        DateTime value
++    )
++    {
++        command.Parameters.Add(
++            new OleDbParameter
++            {
++                OleDbType = OleDbType.Date,
++                Value = new DateTime(
++                    value.Year,
++                    value.Month,
++                    value.Day,
++                    value.Hour,
++                    value.Minute,
++                    value.Second
++                )
++            }
++        );
++    }
++
++    private static string? ReadString(
++        DbDataReader reader,
++        int index
++    )
++    {
++        return reader.IsDBNull(index)
++            ? null
++            : Convert.ToString(reader.GetValue(index));
++    }
++
++    private static DateTime? ReadDate(
++        DbDataReader reader,
++        int index
++    )
++    {
++        return reader.IsDBNull(index)
++            ? null
++            : Convert.ToDateTime(reader.GetValue(index));
++    }
++}
++
++public sealed class LocalUserRecord
++{
++    public string UserId { get; init; } = string.Empty;
++
++    public string? ServerUserId { get; init; }
++
++    public string? DeviceId { get; init; }
++
++    public string? OfflineToken { get; init; }
++
++    public DateTime? LastAuthDt { get; init; }
++
++    public DateTime? ExpireDt { get; init; }
++
++    public string? EnabledYn { get; init; }
++
++    public int OfflineFailCount { get; init; }
++
++    public string? OfflineLockYn { get; init; }
++}
