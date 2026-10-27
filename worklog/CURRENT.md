@@ -40,3 +40,4 @@
 - 2026-10-27 10:00 admin 로그인 불가 조사 (읽기 전용, `run_ai_ju1_admincheck.cmd`): 비밀번호·PW_CHANGE_DT 변경 없음, 원인 = JU-0A 초기 기본 비밀번호 미전달. DB 수정·push 없음
 - 2026-10-27 10:07 admin 로그인 해결: 원본 README(10-25 stash)를 `C:\MyData\MyDev\backup\`에만 저장해 전달 (값은 저장소·대화 미기록). DB 수정·push 없음
 - 2026-10-27 10:22 `ai_ju1_client_register.ps1` 보정: 실행 폴더를 API 호출 전에 확인(`juprovider.client.exe` 없으면 중단, 기본값 `desktop\app` = Directory.Build.props OutputPath) / 사용 중 Client는 확인 후 `POST /api/admin/clients/{id}/key` 재발급, 사용 중지는 재등록 선택 / 키는 `{실행 폴더}\config\client.json`에만(콘솔·로그 미출력, `desktop/app/`은 .gitignore). DB 수정·product push 없음
+- 2026-10-27 10:28 PC-A 반영 누락 정정: 10:22 보정본이 PC-A에 덮어써지지 않아(이전 파일 유지) 사용자 재실행에서 같은 400 발생 → `ai_ju1_client_register_v2.ps1`로 새로 배치하고 `run_ai_ju1_client_register.cmd`가 v2를 실행하도록 변경 (PC-A 파일 크기로 반영 확인). DB 변경 없음

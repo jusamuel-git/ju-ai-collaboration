@@ -1,5 +1,5 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ai_ju1_client_register.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ai_ju1_client_register_v2.ps1"
 echo.
 echo Done.
 pause
