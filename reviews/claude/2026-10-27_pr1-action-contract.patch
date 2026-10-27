@@ -1,0 +1,1925 @@
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+index 502471b..38cd6c9 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+@@ -14,7 +14,8 @@ import org.springframework.boot.web.servlet.support.SpringBootServletInitializer
+     "com.asdp.juprovider.core.systemcode.dao",
+     "com.asdp.juprovider.core.language.dao",
+     "com.asdp.juprovider.core.security.dao",
+-    "com.asdp.juprovider.core.client.dao"
++    "com.asdp.juprovider.core.client.dao",
++    "com.asdp.juprovider.core.action.dao"
+ })
+ public class JuProviderApplication extends SpringBootServletInitializer {
+ 
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/config/ActionHandlerConsistencyCheck.java b/juprovider.backend/src/main/java/com/asdp/juprovider/config/ActionHandlerConsistencyCheck.java
+new file mode 100644
+index 0000000..9e1e1a4
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/config/ActionHandlerConsistencyCheck.java
+@@ -0,0 +1,49 @@
++package com.asdp.juprovider.config;
++
++import java.util.List;
++import java.util.stream.Collectors;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.boot.context.event.ApplicationReadyEvent;
++import org.springframework.context.event.EventListener;
++import org.springframework.stereotype.Component;
++
++import com.asdp.juprovider.core.action.service.DynamicActionService;
++import com.asdp.juprovider.core.menu.dto.MenuAction;
++
++/**
++ * 기동 시 DB 활성 Action의 HANDLER_ID ↔ 코드 Handler 정합성 검사 (결정 AC7)
++ * 불일치는 기동을 막지 않고 WARN으로 남긴다. 해당 Action 호출은 501.
++ */
++@Component
++public class ActionHandlerConsistencyCheck {
++
++    private static final Logger log = LoggerFactory.getLogger(ActionHandlerConsistencyCheck.class);
++
++    private final DynamicActionService dynamicActionService;
++
++    public ActionHandlerConsistencyCheck(DynamicActionService dynamicActionService) {
++        this.dynamicActionService = dynamicActionService;
++    }
++
++    @EventListener(ApplicationReadyEvent.class)
++    public void check() {
++        try {
++            List<MenuAction> missing = dynamicActionService.findActionsWithoutHandler();
++
++            if (missing.isEmpty()) {
++                log.info("[ACTION] 모든 활성 Menu Action에 Handler가 있습니다.");
++                return;
++            }
++
++            log.warn("[ACTION] Handler가 없는 활성 Menu Action {}건 (호출 시 501): {}",
++                    missing.size(),
++                    missing.stream()
++                            .map(a -> a.getMenuId() + "/" + a.getActionCode() + "=" + a.getHandlerId())
++                            .collect(Collectors.joining(", ")));
++        } catch (RuntimeException e) {
++            log.warn("[ACTION] Handler 정합성 검사 실패: {}", e.getMessage());
++        }
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java
+index f7e6ee7..cb2a498 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/DynamicActionController.java
+@@ -1,36 +1,44 @@
+ package com.asdp.juprovider.controller;
+ 
+-import com.asdp.juprovider.core.action.ActionResult;
+-import com.asdp.juprovider.core.action.service.DynamicActionService;
+-import com.asdp.juprovider.dto.ApiResponse;
+-import com.asdp.juprovider.dto.DynamicActionRequest;
+-import org.springframework.web.bind.annotation.PathVariable;
+-import org.springframework.security.core.Authentication;
++import java.util.Collections;
++import java.util.Map;
++import java.util.UUID;
+ 
+-import com.asdp.juprovider.core.security.ExecutionContext;
++import org.springframework.security.core.Authentication;
++import org.springframework.web.bind.annotation.PathVariable;
+ import org.springframework.web.bind.annotation.PostMapping;
+ import org.springframework.web.bind.annotation.RequestBody;
+ import org.springframework.web.bind.annotation.RequestParam;
+ import org.springframework.web.bind.annotation.RestController;
+ 
+-import java.util.Collections;
+-import java.util.Map;
++import com.asdp.juprovider.core.action.ActionExecution;
++import com.asdp.juprovider.core.action.ActionResult;
++import com.asdp.juprovider.core.action.service.DynamicActionService;
++import com.asdp.juprovider.core.security.ExecutionContext;
++import com.asdp.juprovider.dto.ApiResponse;
++import com.asdp.juprovider.dto.DynamicActionRequest;
++
++import jakarta.servlet.http.HttpServletResponse;
+ 
+ @RestController
+ public class DynamicActionController {
+ 
+     private static final String DEFAULT_LANG = "LANG0001";
+ 
++    public static final String REQUEST_ID_HEADER = "X-JU-Request-Id";
++
+     private final DynamicActionService dynamicActionService;
+ 
+     public DynamicActionController(
+             DynamicActionService dynamicActionService) {
+-
+         this.dynamicActionService =
+                 dynamicActionService;
+     }
+ 
+-    @PostMapping("/api/action/{menuId}/{actionCode}")
++    /**
++     * 기존 경로 (MNU_ID) — Device 화면 호환. Device 단계에서 정리한다.
++     */
++    @PostMapping("/api/action/{menuId:\\d+}/{actionCode}")
+     public ApiResponse<?> execute(
+             @PathVariable Long menuId,
+             @PathVariable String actionCode,
+@@ -41,18 +49,12 @@ public class DynamicActionController {
+             DynamicActionRequest request,
+             Authentication authentication) {
+ 
+-        Map<String, Object> parameters =
+-                request == null
+-                        || request.parameters() == null
+-                        ? Collections.emptyMap()
+-                        : request.parameters();
+-
+         ActionResult<?> result =
+                 dynamicActionService.execute(
+                         menuId,
+                         actionCode,
+                         langCd,
+-                        parameters,
++                        parameters(request),
+                         executionContext(authentication));
+ 
+         if (!result.isSuccess()) {
+@@ -66,6 +68,57 @@ public class DynamicActionController {
+                 result.getMessage());
+     }
+ 
++    /**
++     * MNU_CD + ACT_CD 경로 (결정 AC1). Designer Binding의 대상.
++     */
++    @PostMapping("/api/action/{menuCode:M\\d{8}}/{actionCode}")
++    public ApiResponse<?> executeByCode(
++            @PathVariable String menuCode,
++            @PathVariable String actionCode,
++            @RequestParam(
++                    defaultValue = DEFAULT_LANG)
++            String langCd,
++            @RequestBody(required = false)
++            DynamicActionRequest request,
++            Authentication authentication,
++            HttpServletResponse response) {
++
++        String requestId = UUID.randomUUID().toString();
++        response.setHeader(REQUEST_ID_HEADER, requestId);
++
++        ActionExecution execution =
++                dynamicActionService.executeByCode(
++                        menuCode,
++                        actionCode,
++                        langCd,
++                        request == null ? null : request.contractVersion(),
++                        parameters(request),
++                        executionContext(authentication),
++                        requestId);
++
++        ActionResult<?> result = execution.result();
++
++        if (!result.isSuccess()) {
++            throw new IllegalArgumentException(
++                    result.getMessage());
++        }
++
++        return new ApiResponse<>(
++                true,
++                result.getData(),
++                result.getMessage(),
++                null,
++                null,
++                execution.contractVersion());
++    }
++
++    private static Map<String, Object> parameters(DynamicActionRequest request) {
++        return request == null
++                || request.parameters() == null
++                ? Collections.emptyMap()
++                : request.parameters();
++    }
++
+     /** UserTokenAuthenticationConverter가 넣은 실행 주체 (사용자 ID + 현재 권한 ID) */
+     private static ExecutionContext executionContext(Authentication authentication) {
+         if (authentication != null
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ApiResponse.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ApiResponse.java
+index e5c26f3..ce83830 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ApiResponse.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/ApiResponse.java
+@@ -1,11 +1,35 @@
+ package com.asdp.juprovider.dto;
+ 
++import java.util.List;
++
++import com.asdp.juprovider.core.action.contract.ActionFieldError;
++import com.fasterxml.jackson.annotation.JsonInclude;
++
++/**
++ * 공통 응답 봉투.
++ *
++ * success / data / message : 기존 필드 (항상 출력)
++ * code            : 오류 코드 (VALIDATION, NOT_FOUND, ...) — 결정 AC5, 값이 있을 때만 출력
++ * errors          : 필드 오류 목록 — 값이 있을 때만 출력
++ * contractVersion : 실행한 Action의 계약 버전 — 결정 AC11, 값이 있을 때만 출력
++ */
+ public record ApiResponse<T>(
+         boolean success,
+         T data,
+-        String message) {
++        String message,
++        @JsonInclude(JsonInclude.Include.NON_NULL) String code,
++        @JsonInclude(JsonInclude.Include.NON_EMPTY) List<ActionFieldError> errors,
++        @JsonInclude(JsonInclude.Include.NON_NULL) Integer contractVersion) {
++
++    public ApiResponse(boolean success, T data, String message) {
++        this(success, data, message, null, null, null);
++    }
+ 
+     public static <T> ApiResponse<T> ok(T data) {
+         return new ApiResponse<>(true, data, null);
+     }
++
++    public static <T> ApiResponse<T> error(String code, String message, List<ActionFieldError> errors) {
++        return new ApiResponse<>(false, null, message, code, errors, null);
++    }
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/DynamicActionRequest.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/DynamicActionRequest.java
+index 1ea6349..0d44bc6 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/DynamicActionRequest.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/DynamicActionRequest.java
+@@ -2,6 +2,11 @@ package com.asdp.juprovider.dto;
+ 
+ import java.util.Map;
+ 
++/**
++ * Action 요청 본문: { "contractVersion"?: n, "parameters": { ... } }
++ * contractVersion은 선택 (결정 AC11). 보내면 서버 계약 버전과 같아야 한다.
++ */
+ public record DynamicActionRequest(
++        Integer contractVersion,
+         Map<String, Object> parameters) {
+-}
+\ No newline at end of file
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+index 7712dbf..b0a43f9 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+@@ -1,5 +1,6 @@
+ package com.asdp.juprovider.exception;
+ 
++import com.asdp.juprovider.core.action.exception.ActionException;
+ import com.asdp.juprovider.core.security.PermissionDeniedException;
+ import com.asdp.juprovider.dto.ApiResponse;
+ import org.springframework.http.HttpStatus;
+@@ -10,15 +11,35 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
+ import org.springframework.web.bind.annotation.ExceptionHandler;
+ import org.springframework.web.bind.annotation.ResponseStatus;
+ import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.servlet.resource.NoResourceFoundException;
+ 
+ @RestControllerAdvice
+ public class GlobalExceptionHandler {
+ 
++    /** Action 오류 계약 (결정 AC5): 400 VALIDATION / 404 NOT_FOUND / 409 CONFLICT / 501 NOT_IMPLEMENTED */
++    @ExceptionHandler(ActionException.class)
++    public ResponseEntity<ApiResponse<Void>> handleAction(
++            ActionException exception) {
++        return ResponseEntity.status(exception.getStatus())
++                .body(ApiResponse.error(
++                        exception.getCode(),
++                        exception.getMessage(),
++                        exception.getErrors()));
++    }
++
++    /** 매핑되지 않은 경로 → 404 (이전에는 500으로 응답됨) */
++    @ExceptionHandler(NoResourceFoundException.class)
++    public ResponseEntity<ApiResponse<Void>> handleNoResource(
++            NoResourceFoundException exception) {
++        return ResponseEntity.status(HttpStatus.NOT_FOUND)
++                .body(ApiResponse.error("NOT_FOUND", "요청한 경로가 없습니다.", null));
++    }
++
+     @ExceptionHandler(IllegalArgumentException.class)
+     public ResponseEntity<ApiResponse<Void>> handleBadRequest(
+             IllegalArgumentException exception) {
+         return ResponseEntity.badRequest()
+-                .body(new ApiResponse<>(false, null, exception.getMessage()));
++                .body(ApiResponse.error("BAD_REQUEST", exception.getMessage(), null));
+     }
+ 
+     /** 로그인 실패 등 인증 실패 */
+@@ -26,7 +47,7 @@ public class GlobalExceptionHandler {
+     public ResponseEntity<ApiResponse<Void>> handleAuthenticationFailed(
+             AuthenticationFailedException exception) {
+         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+-                .body(new ApiResponse<>(false, null, exception.getMessage()));
++                .body(ApiResponse.error("UNAUTHORIZED", exception.getMessage(), null));
+     }
+ 
+     /** Core 권한 검사 실패 (Menu Action 실행 권한 없음 등) */
+@@ -34,7 +55,7 @@ public class GlobalExceptionHandler {
+     public ResponseEntity<ApiResponse<Void>> handlePermissionDenied(
+             PermissionDeniedException exception) {
+         return ResponseEntity.status(HttpStatus.FORBIDDEN)
+-                .body(new ApiResponse<>(false, null, exception.getMessage()));
++                .body(ApiResponse.error("FORBIDDEN", exception.getMessage(), null));
+     }
+ 
+     /** 요청 DTO 검증(@Valid) 실패 */
+@@ -46,7 +67,7 @@ public class GlobalExceptionHandler {
+                 ? "요청 값이 올바르지 않습니다."
+                 : error.getField() + ": " + error.getDefaultMessage();
+         return ResponseEntity.badRequest()
+-                .body(new ApiResponse<>(false, null, message));
++                .body(ApiResponse.error("VALIDATION", message, null));
+     }
+ 
+     /** 요청 본문(JSON) 형식 오류 */
+@@ -54,16 +75,16 @@ public class GlobalExceptionHandler {
+     public ResponseEntity<ApiResponse<Void>> handleUnreadable(
+             HttpMessageNotReadableException exception) {
+         return ResponseEntity.badRequest()
+-                .body(new ApiResponse<>(false, null, "요청 형식이 올바르지 않습니다."));
++                .body(ApiResponse.error("BAD_REQUEST", "요청 형식이 올바르지 않습니다.", null));
+     }
+ 
+     @ExceptionHandler(Exception.class)
+     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+     public ApiResponse<Void> handleException(Exception e) {
+         e.printStackTrace();
+-        return new ApiResponse<>(
+-                false,
+-                null,
+-                "서버 처리 중 오류가 발생했습니다.");
++        return ApiResponse.error(
++                "INTERNAL_ERROR",
++                "서버 처리 중 오류가 발생했습니다.",
++                null);
+     }
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
+index cd7edc4..e60e2ee 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
+@@ -24,7 +24,7 @@ public class JsonSecurityErrorHandler implements AuthenticationEntryPoint, Acces
+             HttpServletRequest request,
+             HttpServletResponse response,
+             AuthenticationException authException) throws IOException {
+-        write(response, HttpServletResponse.SC_UNAUTHORIZED, "인증이 필요합니다.");
++        write(response, HttpServletResponse.SC_UNAUTHORIZED, "UNAUTHORIZED", "인증이 필요합니다.");
+     }
+ 
+     @Override
+@@ -37,16 +37,17 @@ public class JsonSecurityErrorHandler implements AuthenticationEntryPoint, Acces
+                 && authentication.getAuthorities().stream()
+                         .noneMatch(a -> UserTokenAuthenticationConverter.AUTHORITY_PASSWORD_OK
+                                 .equals(a.getAuthority()));
+-        write(response, HttpServletResponse.SC_FORBIDDEN,
++        write(response, HttpServletResponse.SC_FORBIDDEN, "FORBIDDEN",
+                 passwordChangeRequired ? "비밀번호를 먼저 변경해야 합니다." : "권한이 없습니다.");
+     }
+ 
+-    private static void write(HttpServletResponse response, int status, String message)
++    private static void write(HttpServletResponse response, int status, String code, String message)
+             throws IOException {
+         response.setStatus(status);
+         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+         response.getWriter().write(
+-                "{\"success\":false,\"data\":null,\"message\":\"" + message + "\"}");
++                "{\"success\":false,\"data\":null,\"message\":\"" + message
++                        + "\",\"code\":\"" + code + "\"}");
+     }
+ }
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/action/ActionInputValidatorTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/action/ActionInputValidatorTest.java
+new file mode 100644
+index 0000000..4fdf04d
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/action/ActionInputValidatorTest.java
+@@ -0,0 +1,121 @@
++package com.asdp.juprovider.action;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.math.BigDecimal;
++import java.time.LocalDateTime;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++import org.junit.jupiter.api.Test;
++
++import com.asdp.juprovider.core.action.contract.ActionContract;
++import com.asdp.juprovider.core.action.contract.ActionFieldError;
++import com.asdp.juprovider.core.action.contract.ActionInput;
++import com.asdp.juprovider.core.action.contract.ActionInputValidator;
++import com.asdp.juprovider.core.action.contract.FieldSpec;
++import com.asdp.juprovider.core.action.contract.OutputKind;
++import com.asdp.juprovider.core.action.exception.ActionValidationException;
++
++class ActionInputValidatorTest {
++
++    private final ActionInputValidator validator =
++            new ActionInputValidator(grp -> "PROT".equals(grp) ? Set.of("PROT0000", "PROT0001") : Set.of());
++
++    private final ActionContract contract = ActionContract.of(
++            1,
++            OutputKind.KEY,
++            List.of(
++                    FieldSpec.string("ptlGrpCd", true, 20),
++                    FieldSpec.string("ptlNm", false, 5),
++                    FieldSpec.code("ptlType", false, "PROT"),
++                    FieldSpec.integer("ptlLen", false),
++                    FieldSpec.decimal("ratio", false),
++                    FieldSpec.bool("flag", false),
++                    FieldSpec.datetime("at", false),
++                    FieldSpec.object("opt", false, List.of(FieldSpec.string("k", true, 10))),
++                    FieldSpec.listOf("packets", false, List.of(
++                            FieldSpec.integer("packetSeq", true),
++                            FieldSpec.string("direction", true, 10)))),
++            null);
++
++    private static Map<String, Object> map(Object... kv) {
++        Map<String, Object> m = new LinkedHashMap<>();
++        for (int i = 0; i < kv.length; i += 2) {
++            m.put((String) kv[i], kv[i + 1]);
++        }
++        return m;
++    }
++
++    private List<ActionFieldError> errors(Map<String, Object> params) {
++        return assertThrows(ActionValidationException.class, () -> validator.validate(contract, params)).getErrors();
++    }
++
++    private static boolean has(List<ActionFieldError> errors, String field, String code) {
++        return errors.stream().anyMatch(e -> e.field().equals(field) && e.code().equals(code));
++    }
++
++    @Test
++    void validInputIsConvertedToDeclaredTypes() {
++        ActionInput input = validator.validate(contract, map(
++                "ptlGrpCd", "GTEC",
++                "ptlType", "PROT0001",
++                "ptlLen", 12,
++                "ratio", 0.5,
++                "flag", true,
++                "at", "2026-10-27T16:00:00",
++                "opt", map("k", "v"),
++                "packets", List.of(map("packetSeq", 1, "direction", "TX"))));
++
++        assertEquals("GTEC", input.getString("ptlGrpCd"));
++        assertEquals(12L, input.getLong("ptlLen"));
++        assertEquals(new BigDecimal("0.5"), input.getDecimal("ratio"));
++        assertEquals(Boolean.TRUE, input.getBoolean("flag"));
++        assertEquals(LocalDateTime.of(2026, 10, 27, 16, 0), input.getDateTime("at"));
++        assertEquals("v", input.getObject("opt").getString("k"));
++        assertEquals(1L, input.getObjectList("packets").get(0).getLong("packetSeq"));
++        assertTrue(!input.has("ptlNm"));
++    }
++
++    @Test
++    void requiredMissingOrBlank() {
++        assertTrue(has(errors(map()), "ptlGrpCd", ActionFieldError.REQUIRED));
++        assertTrue(has(errors(map("ptlGrpCd", "  ")), "ptlGrpCd", ActionFieldError.REQUIRED));
++    }
++
++    @Test
++    void unknownFieldIsRejectedIncludingNested() {
++        List<ActionFieldError> e = errors(map(
++                "ptlGrpCd", "GTEC",
++                "extra", 1,
++                "opt", map("k", "v", "x", 1),
++                "packets", List.of(map("packetSeq", 1, "direction", "TX", "y", 2))));
++        assertTrue(has(e, "extra", ActionFieldError.UNKNOWN_FIELD));
++        assertTrue(has(e, "opt.x", ActionFieldError.UNKNOWN_FIELD));
++        assertTrue(has(e, "packets[0].y", ActionFieldError.UNKNOWN_FIELD));
++    }
++
++    @Test
++    void typeMismatchLengthAndCode() {
++        List<ActionFieldError> e = errors(map(
++                "ptlGrpCd", 10,
++                "ptlNm", "123456",
++                "ptlType", "PROT9999",
++                "ptlLen", "12",
++                "flag", "true",
++                "at", "not-a-date",
++                "packets", List.of(map("packetSeq", 1.5))));
++        assertTrue(has(e, "ptlGrpCd", ActionFieldError.TYPE_MISMATCH));
++        assertTrue(has(e, "ptlNm", ActionFieldError.MAX_LENGTH));
++        assertTrue(has(e, "ptlType", ActionFieldError.INVALID_CODE));
++        assertTrue(has(e, "ptlLen", ActionFieldError.TYPE_MISMATCH));
++        assertTrue(has(e, "flag", ActionFieldError.TYPE_MISMATCH));
++        assertTrue(has(e, "at", ActionFieldError.TYPE_MISMATCH));
++        assertTrue(has(e, "packets[0].packetSeq", ActionFieldError.TYPE_MISMATCH));
++        assertTrue(has(e, "packets[0].direction", ActionFieldError.REQUIRED));
++    }
++}
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/action/DynamicActionServiceTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/action/DynamicActionServiceTest.java
+new file mode 100644
+index 0000000..aad25ab
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/action/DynamicActionServiceTest.java
+@@ -0,0 +1,165 @@
++package com.asdp.juprovider.action;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.util.List;
++import java.util.Map;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.TransactionStatus;
++import org.springframework.transaction.support.SimpleTransactionStatus;
++
++import com.asdp.juprovider.core.action.ActionExecution;
++import com.asdp.juprovider.core.action.ActionHandler;
++import com.asdp.juprovider.core.action.ActionRegistry;
++import com.asdp.juprovider.core.action.ActionRequest;
++import com.asdp.juprovider.core.action.ActionResult;
++import com.asdp.juprovider.core.action.contract.ActionContract;
++import com.asdp.juprovider.core.action.contract.FieldSpec;
++import com.asdp.juprovider.core.action.contract.ListOutput;
++import com.asdp.juprovider.core.action.contract.OutputKind;
++import com.asdp.juprovider.core.action.dao.ActionCodeDao;
++import com.asdp.juprovider.core.action.exception.ActionNotFoundException;
++import com.asdp.juprovider.core.action.exception.ActionNotImplementedException;
++import com.asdp.juprovider.core.action.exception.ActionValidationException;
++import com.asdp.juprovider.core.action.service.DynamicActionService;
++import com.asdp.juprovider.core.menu.dao.MenuDao;
++import com.asdp.juprovider.core.menu.dto.Menu;
++import com.asdp.juprovider.core.menu.dto.MenuAction;
++import com.asdp.juprovider.core.menu.service.MenuService;
++import com.asdp.juprovider.core.security.ExecutionContext;
++import com.asdp.juprovider.core.security.PermissionDeniedException;
++import com.asdp.juprovider.core.security.PermissionService;
++
++class DynamicActionServiceTest {
++
++    private static final String MENU = "M02010100";
++
++    private final MenuDao menuDao = mock(MenuDao.class);
++    private final PermissionService permissionService = mock(PermissionService.class);
++    private final PlatformTransactionManager txManager = mock(PlatformTransactionManager.class);
++    private final ExecutionContext admin = ExecutionContext.ofUser(1L, 1L);
++
++    private ActionRequest lastRequest;
++    private DynamicActionService service;
++
++    private final ActionHandler listHandler = new ActionHandler() {
++        public String getHandlerId() { return "TEST.SEARCH"; }
++        public ActionResult<?> execute(ActionRequest request) { lastRequest = request; return ActionResult.ok(ListOutput.of(List.of(Map.of("a", 1)))); }
++        public ActionContract contract() {
++            return ActionContract.of(2, OutputKind.LIST, List.of(FieldSpec.string("keyword", false, 10)), null);
++        }
++    };
++
++    private final ActionHandler failingWrite = new ActionHandler() {
++        public String getHandlerId() { return "TEST.CREATE"; }
++        public ActionResult<?> execute(ActionRequest request) { return ActionResult.fail("실패"); }
++        public ActionContract contract() { return ActionContract.of(1, OutputKind.KEY, List.of(), null); }
++    };
++
++    private final ActionHandler wrongKind = new ActionHandler() {
++        public String getHandlerId() { return "TEST.GET"; }
++        public ActionResult<?> execute(ActionRequest request) { return ActionResult.ok(List.of()); }
++        public ActionContract contract() { return ActionContract.of(1, OutputKind.RECORD, List.of(), null); }
++    };
++
++    private static Menu menu() {
++        Menu m = new Menu();
++        m.setMenuId(16L);
++        m.setMenuCode(MENU);
++        return m;
++    }
++
++    private static MenuAction action(String actCd, String kind, String handlerId) {
++        MenuAction a = new MenuAction();
++        a.setMenuId(16L);
++        a.setActionCode(actCd);
++        a.setActionKind(kind);
++        a.setHandlerId(handlerId);
++        return a;
++    }
++
++    @BeforeEach
++    void setUp() {
++        ActionCodeDao codeDao = mock(ActionCodeDao.class);
++        when(txManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
++        when(menuDao.selectMenuByCode(eq(MENU), anyString())).thenReturn(menu());
++        when(menuDao.selectAction(eq(16L), eq("SEARCH"), anyString())).thenReturn(action("SEARCH", "MACT0001", "TEST.SEARCH"));
++        when(menuDao.selectAction(eq(16L), eq("CREATE"), anyString())).thenReturn(action("CREATE", "MACT0003", "TEST.CREATE"));
++        when(menuDao.selectAction(eq(16L), eq("GET"), anyString())).thenReturn(action("GET", "MACT0001", "TEST.GET"));
++        when(menuDao.selectAction(eq(16L), eq("STOP"), anyString())).thenReturn(action("STOP", "MACT0002", "TEST.STOP"));
++        service = new DynamicActionService(
++                mock(MenuService.class),
++                menuDao,
++                new ActionRegistry(List.of(listHandler, failingWrite, wrongKind)),
++                permissionService,
++                codeDao,
++                txManager);
++    }
++
++    private ActionExecution run(String actCd, Integer version, Map<String, Object> params) {
++        return service.executeByCode(MENU, actCd, "LANG0001", version, params, admin, "req-1");
++    }
++
++    @Test
++    void executesWithContractAndPassesContext() {
++        ActionExecution ex = run("SEARCH", 2, Map.of("keyword", "x"));
++        assertEquals(2, ex.contractVersion());
++        assertEquals(1L, ((ListOutput<?>) ex.result().getData()).total());
++        assertEquals(admin, lastRequest.getContext());
++        assertEquals("LANG0001", lastRequest.getLangCd());
++        assertEquals("req-1", lastRequest.getRequestId());
++        assertEquals("x", lastRequest.getInput().getString("keyword"));
++        verify(txManager, never()).getTransaction(any());
++    }
++
++    @Test
++    void undefinedMenuOrActionIs404() {
++        assertThrows(ActionNotFoundException.class, () -> service.executeByCode("M99999999", "SEARCH", null, null, Map.of(), admin, "r"));
++        assertThrows(ActionNotFoundException.class, () -> service.executeByCode("X1", "SEARCH", null, null, Map.of(), admin, "r"));
++        assertThrows(ActionNotFoundException.class, () -> run("NOPE", null, Map.of()));
++    }
++
++    @Test
++    void definedActionWithoutHandlerIs501() {
++        assertThrows(ActionNotImplementedException.class, () -> run("STOP", null, Map.of()));
++    }
++
++    @Test
++    void permissionIsCheckedBefore501() {
++        doThrow(new PermissionDeniedException("no")).when(permissionService).checkAction(any(), anyLong(), eq("STOP"));
++        assertThrows(PermissionDeniedException.class, () -> run("STOP", null, Map.of()));
++    }
++
++    @Test
++    void contractVersionMismatchAndUnknownFieldAre400() {
++        assertThrows(ActionValidationException.class, () -> run("SEARCH", 1, Map.of()));
++        assertThrows(ActionValidationException.class, () -> run("SEARCH", null, Map.of("other", 1)));
++    }
++
++    @Test
++    void writeActionRunsInTransactionAndRollsBackOnFailure() {
++        ActionExecution ex = run("CREATE", null, Map.of());
++        assertEquals(false, ex.result().isSuccess());
++        verify(txManager).getTransaction(any());
++        verify(txManager).commit(any(TransactionStatus.class));
++        // 실패 결과는 setRollbackOnly → commit 호출 시 rollback-only 상태
++    }
++
++    @Test
++    void outputKindMismatchIsServerError() {
++        assertThrows(IllegalStateException.class, () -> run("GET", null, Map.of()));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionExecution.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionExecution.java
+new file mode 100644
+index 0000000..531e25b
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionExecution.java
+@@ -0,0 +1,9 @@
++package com.asdp.juprovider.core.action;
++
++/**
++ * Action 실행 결과 + 적용된 계약 버전 (계약이 없는 Handler면 contractVersion = null)
++ */
++public record ActionExecution(
++        ActionResult<?> result,
++        Integer contractVersion) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionHandler.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionHandler.java
+index 9c5e051..eba6639 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionHandler.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionHandler.java
+@@ -1,8 +1,19 @@
+ package com.asdp.juprovider.core.action;
+ 
++import com.asdp.juprovider.core.action.contract.ActionContract;
++
+ public interface ActionHandler {
+ 
+     String getHandlerId();
+ 
+     ActionResult<?> execute(ActionRequest request);
+-}
+\ No newline at end of file
++
++    /**
++     * Action 계약 (결정 AC3·AC4·AC11).
++     * null이면 계약 이전 방식(입력 검증·출력 모양 확인 없음) — 기존 Device Handler 호환용.
++     * 새 Handler는 계약을 선언한다.
++     */
++    default ActionContract contract() {
++        return null;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionRequest.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionRequest.java
+index c854bb3..f5754b0 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionRequest.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/ActionRequest.java
+@@ -4,24 +4,52 @@ import java.util.Collections;
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+ 
++import com.asdp.juprovider.core.action.contract.ActionInput;
++import com.asdp.juprovider.core.security.ExecutionContext;
++
+ public class ActionRequest {
+ 
+     private final String menuCode;
++
+     private final String actionCode;
++
+     private final Map<String, Object> parameters;
+ 
++    /** 실행 주체 (사용자 ID + 현재 권한 ID). 결정 AC6 */
++    private final ExecutionContext context;
++
++    private final String langCd;
++
++    private final String requestId;
++
++    /** 계약 검증을 통과한 입력 (계약이 없는 Handler는 빈 값) */
++    private final ActionInput input;
++
+     public ActionRequest(
+             String menuCode,
+             String actionCode,
+             Map<String, Object> parameters) {
++        this(menuCode, actionCode, parameters, null, null, null, null);
++    }
+ 
++    public ActionRequest(
++            String menuCode,
++            String actionCode,
++            Map<String, Object> parameters,
++            ExecutionContext context,
++            String langCd,
++            String requestId,
++            ActionInput input) {
+         this.menuCode = menuCode;
+         this.actionCode = actionCode;
+-
+         this.parameters = parameters == null
+                 ? Collections.emptyMap()
+                 : Collections.unmodifiableMap(
+                         new LinkedHashMap<>(parameters));
++        this.context = context;
++        this.langCd = langCd;
++        this.requestId = requestId;
++        this.input = input == null ? ActionInput.empty() : input;
+     }
+ 
+     public String getMenuCode() {
+@@ -58,4 +86,20 @@ public class ActionRequest {
+ 
+         return Long.valueOf(value.toString());
+     }
+-}
+\ No newline at end of file
++
++    public ExecutionContext getContext() {
++        return context;
++    }
++
++    public String getLangCd() {
++        return langCd;
++    }
++
++    public String getRequestId() {
++        return requestId;
++    }
++
++    public ActionInput getInput() {
++        return input;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionContract.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionContract.java
+new file mode 100644
+index 0000000..1f089f5
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionContract.java
+@@ -0,0 +1,40 @@
++package com.asdp.juprovider.core.action.contract;
++
++import java.util.List;
++
++/**
++ * Action 계약 (결정 AC3·AC4·AC11)
++ *
++ * contractVersion : 같은 업무 계약의 버전. 파괴적 변경(이름·형·필수·kind)은 version 증가,
++ *                   업무 의미가 바뀔 때만 새 ACT_CD. 비파괴 변경(선택 입력·출력 필드 추가)은 유지.
++ * outputKind      : LIST / RECORD / KEY / NONE
++ * input           : 입력 필드 선언 (선언되지 않은 필드는 400 UNKNOWN_FIELD, 결정 AC12)
++ * output          : 출력 필드 선언 (Designer 계약 조회용. 실행 시에는 kind 모양만 확인)
++ *
++ * 실제 Publish·version 관리는 Designer 단계 (결정 AC13).
++ */
++public record ActionContract(
++        int contractVersion,
++        OutputKind outputKind,
++        List<FieldSpec> input,
++        List<FieldSpec> output) {
++
++    public ActionContract {
++        if (contractVersion < 1) {
++            throw new IllegalArgumentException("contractVersion은 1 이상이어야 합니다.");
++        }
++        if (outputKind == null) {
++            throw new IllegalArgumentException("outputKind가 필요합니다.");
++        }
++        input = input == null ? List.of() : List.copyOf(input);
++        output = output == null ? List.of() : List.copyOf(output);
++    }
++
++    public static ActionContract of(
++            int contractVersion,
++            OutputKind outputKind,
++            List<FieldSpec> input,
++            List<FieldSpec> output) {
++        return new ActionContract(contractVersion, outputKind, input, output);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionFieldError.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionFieldError.java
+new file mode 100644
+index 0000000..9c7c05e
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionFieldError.java
+@@ -0,0 +1,20 @@
++package com.asdp.juprovider.core.action.contract;
++
++/**
++ * 필드 오류 1건 (응답 errors[] 원소)
++ *
++ * field : 경로 (예: packets[2].direction)
++ * code  : REQUIRED / TYPE_MISMATCH / MAX_LENGTH / INVALID_CODE / UNKNOWN_FIELD / CONTRACT_VERSION_MISMATCH ...
++ */
++public record ActionFieldError(
++        String field,
++        String code,
++        String message) {
++
++    public static final String REQUIRED = "REQUIRED";
++    public static final String TYPE_MISMATCH = "TYPE_MISMATCH";
++    public static final String MAX_LENGTH = "MAX_LENGTH";
++    public static final String INVALID_CODE = "INVALID_CODE";
++    public static final String UNKNOWN_FIELD = "UNKNOWN_FIELD";
++    public static final String CONTRACT_VERSION_MISMATCH = "CONTRACT_VERSION_MISMATCH";
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionInput.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionInput.java
+new file mode 100644
+index 0000000..4e3e085
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionInput.java
+@@ -0,0 +1,80 @@
++package com.asdp.juprovider.core.action.contract;
++
++import java.math.BigDecimal;
++import java.time.LocalDateTime;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * 계약 검증을 통과한 입력. 값은 선언된 형으로 변환되어 있다.
++ *
++ * STRING/CODE → String, INTEGER → Long, DECIMAL → BigDecimal, BOOLEAN → Boolean,
++ * DATETIME → LocalDateTime, OBJECT → ActionInput, LIST → List (원소도 같은 규칙)
++ * 입력하지 않은(또는 null) 선택 필드는 포함되지 않는다.
++ */
++public final class ActionInput {
++
++    private final Map<String, Object> values;
++
++    public ActionInput(Map<String, Object> values) {
++        this.values = values == null
++                ? Collections.emptyMap()
++                : Collections.unmodifiableMap(new LinkedHashMap<>(values));
++    }
++
++    public static ActionInput empty() {
++        return new ActionInput(null);
++    }
++
++    public boolean has(String name) {
++        return values.containsKey(name);
++    }
++
++    public Map<String, Object> asMap() {
++        return values;
++    }
++
++    public String getString(String name) {
++        Object value = values.get(name);
++        return value == null ? null : value.toString();
++    }
++
++    public Long getLong(String name) {
++        return (Long) values.get(name);
++    }
++
++    public Integer getInteger(String name) {
++        Long value = getLong(name);
++        return value == null ? null : Math.toIntExact(value);
++    }
++
++    public BigDecimal getDecimal(String name) {
++        return (BigDecimal) values.get(name);
++    }
++
++    public Boolean getBoolean(String name) {
++        return (Boolean) values.get(name);
++    }
++
++    public LocalDateTime getDateTime(String name) {
++        return (LocalDateTime) values.get(name);
++    }
++
++    public ActionInput getObject(String name) {
++        return (ActionInput) values.get(name);
++    }
++
++    @SuppressWarnings("unchecked")
++    public List<ActionInput> getObjectList(String name) {
++        Object value = values.get(name);
++        return value == null ? null : (List<ActionInput>) value;
++    }
++
++    @SuppressWarnings("unchecked")
++    public <T> List<T> getList(String name) {
++        Object value = values.get(name);
++        return value == null ? null : (List<T>) value;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionInputValidator.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionInputValidator.java
+new file mode 100644
+index 0000000..d03f5ff
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ActionInputValidator.java
+@@ -0,0 +1,259 @@
++package com.asdp.juprovider.core.action.contract;
++
++import java.math.BigDecimal;
++import java.math.BigInteger;
++import java.time.LocalDateTime;
++import java.time.OffsetDateTime;
++import java.time.format.DateTimeParseException;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.function.Function;
++
++import com.asdp.juprovider.core.action.exception.ActionValidationException;
++
++/**
++ * Action Input 계약 검증 (결정 AC3·AC12)
++ *
++ * - 필수 누락            REQUIRED
++ * - 형 불일치            TYPE_MISMATCH (문자열 숫자 "10"은 INTEGER로 받지 않는다)
++ * - 길이 초과            MAX_LENGTH
++ * - 공통코드 외 값       INVALID_CODE
++ * - 선언되지 않은 필드   UNKNOWN_FIELD (중첩 object·list 원소 포함)
++ *
++ * 오류는 모두 모아서 한 번에 400 VALIDATION으로 던진다.
++ */
++public class ActionInputValidator {
++
++    /** 공통코드 그룹 → 사용 중인 코드 목록 */
++    private final Function<String, Set<String>> activeCodes;
++
++    public ActionInputValidator(Function<String, Set<String>> activeCodes) {
++        this.activeCodes = activeCodes;
++    }
++
++    public ActionInput validate(
++            ActionContract contract,
++            Map<String, Object> parameters) {
++        List<ActionFieldError> errors = new ArrayList<>();
++        Map<String, Set<String>> codeCache = new HashMap<>();
++
++        ActionInput input = validateObject(
++                contract.input(),
++                parameters == null ? Map.of() : parameters,
++                "",
++                errors,
++                codeCache);
++
++        if (!errors.isEmpty()) {
++            throw new ActionValidationException(errors);
++        }
++
++        return input;
++    }
++
++    private ActionInput validateObject(
++            List<FieldSpec> specs,
++            Map<?, ?> values,
++            String prefix,
++            List<ActionFieldError> errors,
++            Map<String, Set<String>> codeCache) {
++        Map<String, FieldSpec> declared = new LinkedHashMap<>();
++        for (FieldSpec spec : specs) {
++            declared.put(spec.name(), spec);
++        }
++
++        for (Object key : values.keySet()) {
++            String name = String.valueOf(key);
++            if (!declared.containsKey(name)) {
++                errors.add(new ActionFieldError(
++                        path(prefix, name),
++                        ActionFieldError.UNKNOWN_FIELD,
++                        "정의되지 않은 입력 항목입니다."));
++            }
++        }
++
++        Map<String, Object> result = new LinkedHashMap<>();
++        for (FieldSpec spec : specs) {
++            String field = path(prefix, spec.name());
++            Object raw = values.get(spec.name());
++
++            if (isMissing(raw)) {
++                if (spec.required()) {
++                    errors.add(new ActionFieldError(
++                            field,
++                            ActionFieldError.REQUIRED,
++                            "필수 입력 항목입니다."));
++                }
++                continue;
++            }
++
++            Object converted = convert(spec, raw, field, errors, codeCache);
++            if (converted != null) {
++                result.put(spec.name(), converted);
++            }
++        }
++
++        return new ActionInput(result);
++    }
++
++    private Object convert(
++            FieldSpec spec,
++            Object raw,
++            String field,
++            List<ActionFieldError> errors,
++            Map<String, Set<String>> codeCache) {
++        switch (spec.type()) {
++            case STRING -> {
++                if (!(raw instanceof String text)) {
++                    return mismatch(field, "문자열", errors);
++                }
++                return checkLength(spec, text, field, errors);
++            }
++            case CODE -> {
++                if (!(raw instanceof String text)) {
++                    return mismatch(field, "코드 문자열", errors);
++                }
++                if (checkLength(spec, text, field, errors) == null) {
++                    return null;
++                }
++                Set<String> codes = codeCache.computeIfAbsent(spec.codeGroup(), activeCodes);
++                if (codes == null || !codes.contains(text)) {
++                    errors.add(new ActionFieldError(
++                            field,
++                            ActionFieldError.INVALID_CODE,
++                            "사용할 수 없는 코드입니다. (" + spec.codeGroup() + ")"));
++                    return null;
++                }
++                return text;
++            }
++            case INTEGER -> {
++                Long value = toLong(raw);
++                return value == null ? mismatch(field, "정수", errors) : value;
++            }
++            case DECIMAL -> {
++                if (!(raw instanceof Number number)) {
++                    return mismatch(field, "숫자", errors);
++                }
++                return new BigDecimal(number.toString());
++            }
++            case BOOLEAN -> {
++                if (!(raw instanceof Boolean value)) {
++                    return mismatch(field, "true/false", errors);
++                }
++                return value;
++            }
++            case DATETIME -> {
++                if (!(raw instanceof String text)) {
++                    return mismatch(field, "일시 문자열(ISO-8601)", errors);
++                }
++                LocalDateTime value = toDateTime(text);
++                return value == null ? mismatch(field, "일시 문자열(ISO-8601)", errors) : value;
++            }
++            case OBJECT -> {
++                if (!(raw instanceof Map<?, ?> map)) {
++                    return mismatch(field, "객체", errors);
++                }
++                return validateObject(spec.fields(), map, field, errors, codeCache);
++            }
++            case LIST -> {
++                if (!(raw instanceof List<?> list)) {
++                    return mismatch(field, "목록", errors);
++                }
++                List<Object> items = new ArrayList<>();
++                for (int i = 0; i < list.size(); i++) {
++                    String itemField = field + "[" + i + "]";
++                    Object item = list.get(i);
++                    if (isMissing(item)) {
++                        errors.add(new ActionFieldError(
++                                itemField,
++                                ActionFieldError.REQUIRED,
++                                "목록 항목이 비어 있습니다."));
++                        continue;
++                    }
++                    Object converted = convert(spec.element(), item, itemField, errors, codeCache);
++                    if (converted != null) {
++                        items.add(converted);
++                    }
++                }
++                return items;
++            }
++            default -> {
++                return mismatch(field, spec.type().name(), errors);
++            }
++        }
++    }
++
++    private static String checkLength(
++            FieldSpec spec,
++            String text,
++            String field,
++            List<ActionFieldError> errors) {
++        if (spec.maxLength() != null && text.length() > spec.maxLength()) {
++            errors.add(new ActionFieldError(
++                    field,
++                    ActionFieldError.MAX_LENGTH,
++                    "최대 " + spec.maxLength() + "자까지 입력할 수 있습니다."));
++            return null;
++        }
++        return text;
++    }
++
++    private static Object mismatch(
++            String field,
++            String expected,
++            List<ActionFieldError> errors) {
++        errors.add(new ActionFieldError(
++                field,
++                ActionFieldError.TYPE_MISMATCH,
++                expected + " 형식이어야 합니다."));
++        return null;
++    }
++
++    private static boolean isMissing(Object raw) {
++        return raw == null
++                || (raw instanceof String text && text.isBlank());
++    }
++
++    private static Long toLong(Object raw) {
++        if (raw instanceof Integer || raw instanceof Long || raw instanceof Short || raw instanceof Byte) {
++            return ((Number) raw).longValue();
++        }
++        if (raw instanceof BigInteger big) {
++            return big.bitLength() < 64 ? big.longValue() : null;
++        }
++        if (raw instanceof BigDecimal decimal) {
++            try {
++                return decimal.longValueExact();
++            } catch (ArithmeticException e) {
++                return null;
++            }
++        }
++        if (raw instanceof Double || raw instanceof Float) {
++            double value = ((Number) raw).doubleValue();
++            if (value == Math.rint(value) && !Double.isInfinite(value) && Math.abs(value) < 9.0E15) {
++                return (long) value;
++            }
++        }
++        return null;
++    }
++
++    private static LocalDateTime toDateTime(String text) {
++        try {
++            return LocalDateTime.parse(text);
++        } catch (DateTimeParseException e) {
++            try {
++                return OffsetDateTime.parse(text).toLocalDateTime();
++            } catch (DateTimeParseException ignored) {
++                return null;
++            }
++        }
++    }
++
++    private static String path(String prefix, String name) {
++        return prefix.isEmpty() ? name : prefix + "." + name;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/FieldSpec.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/FieldSpec.java
+new file mode 100644
+index 0000000..0e6ad2a
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/FieldSpec.java
+@@ -0,0 +1,85 @@
++package com.asdp.juprovider.core.action.contract;
++
++import java.util.List;
++
++/**
++ * Action 계약의 필드 선언 (결정 AC3)
++ *
++ * name      : camelCase (컬럼 약어 기준, 예: ptlGrpCd)
++ * type      : FieldType 8종
++ * required  : 필수 여부 (null·빈 문자열은 누락으로 본다)
++ * maxLength : STRING/CODE 최대 길이
++ * codeGroup : CODE 형의 공통코드 그룹 (ju_com_code 사용 중 값만 허용)
++ * fields    : OBJECT 형의 하위 필드 / LIST 원소가 OBJECT일 때 원소의 필드
++ * element   : LIST 원소의 형 선언
++ */
++public record FieldSpec(
++        String name,
++        FieldType type,
++        boolean required,
++        Integer maxLength,
++        String codeGroup,
++        List<FieldSpec> fields,
++        FieldSpec element) {
++
++    public FieldSpec {
++        if (name == null || name.isBlank()) {
++            throw new IllegalArgumentException("FieldSpec name이 필요합니다.");
++        }
++        if (type == null) {
++            throw new IllegalArgumentException("FieldSpec type이 필요합니다: " + name);
++        }
++        if (type == FieldType.CODE && (codeGroup == null || codeGroup.isBlank())) {
++            throw new IllegalArgumentException("CODE 형에는 codeGroup이 필요합니다: " + name);
++        }
++        if (type == FieldType.LIST && element == null) {
++            throw new IllegalArgumentException("LIST 형에는 element가 필요합니다: " + name);
++        }
++        fields = fields == null ? List.of() : List.copyOf(fields);
++    }
++
++    public static FieldSpec string(String name, boolean required, int maxLength) {
++        return new FieldSpec(name, FieldType.STRING, required, maxLength, null, null, null);
++    }
++
++    public static FieldSpec integer(String name, boolean required) {
++        return new FieldSpec(name, FieldType.INTEGER, required, null, null, null, null);
++    }
++
++    public static FieldSpec decimal(String name, boolean required) {
++        return new FieldSpec(name, FieldType.DECIMAL, required, null, null, null, null);
++    }
++
++    public static FieldSpec bool(String name, boolean required) {
++        return new FieldSpec(name, FieldType.BOOLEAN, required, null, null, null, null);
++    }
++
++    public static FieldSpec datetime(String name, boolean required) {
++        return new FieldSpec(name, FieldType.DATETIME, required, null, null, null, null);
++    }
++
++    public static FieldSpec code(String name, boolean required, String codeGroup) {
++        return new FieldSpec(name, FieldType.CODE, required, 8, codeGroup, null, null);
++    }
++
++    public static FieldSpec object(String name, boolean required, List<FieldSpec> fields) {
++        return new FieldSpec(name, FieldType.OBJECT, required, null, null, fields, null);
++    }
++
++    /** 원소가 객체인 목록 */
++    public static FieldSpec listOf(String name, boolean required, List<FieldSpec> elementFields) {
++        return new FieldSpec(
++                name,
++                FieldType.LIST,
++                required,
++                null,
++                null,
++                null,
++                new FieldSpec("item", FieldType.OBJECT, true, null, null, elementFields, null));
++    }
++
++    /** 원소가 단일 값인 목록 */
++    public static FieldSpec listOf(String name, boolean required, FieldSpec element) {
++        return new FieldSpec(name, FieldType.LIST, required, null, null, null, element);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/FieldType.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/FieldType.java
+new file mode 100644
+index 0000000..7e91227
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/FieldType.java
+@@ -0,0 +1,15 @@
++package com.asdp.juprovider.core.action.contract;
++
++/**
++ * Action Input/Output 필드 형 (결정 AC3: 8종)
++ */
++public enum FieldType {
++    STRING,
++    INTEGER,
++    DECIMAL,
++    BOOLEAN,
++    DATETIME,
++    CODE,
++    OBJECT,
++    LIST
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ListOutput.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ListOutput.java
+new file mode 100644
+index 0000000..f8ddb55
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/ListOutput.java
+@@ -0,0 +1,21 @@
++package com.asdp.juprovider.core.action.contract;
++
++import java.util.List;
++
++/**
++ * OutputKind.LIST 의 고정 모양: { "items": [...], "total": n }
++ * 페이징 입력이 나중에 추가되어도 모양은 바뀌지 않는다.
++ */
++public record ListOutput<T>(
++        List<T> items,
++        long total) {
++
++    public ListOutput {
++        items = items == null ? List.of() : List.copyOf(items);
++    }
++
++    public static <T> ListOutput<T> of(List<T> items) {
++        List<T> list = items == null ? List.of() : items;
++        return new ListOutput<>(list, list.size());
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/OutputKind.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/OutputKind.java
+new file mode 100644
+index 0000000..82c664b
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/contract/OutputKind.java
+@@ -0,0 +1,16 @@
++package com.asdp.juprovider.core.action.contract;
++
++/**
++ * Action Output 종류 (결정 AC4)
++ *
++ * LIST   : data = { "items": [...], "total": n }  → {@link ListOutput}
++ * RECORD : data = 객체 1건
++ * KEY    : data = 대상의 자연키 { "ptlGrpCd": ..., ... }
++ * NONE   : data = null
++ */
++public enum OutputKind {
++    LIST,
++    RECORD,
++    KEY,
++    NONE
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/dao/ActionCodeDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/dao/ActionCodeDao.java
+new file mode 100644
+index 0000000..dbb4d04
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/dao/ActionCodeDao.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.action.dao;
++
++import java.util.List;
++
++import org.apache.ibatis.annotations.Param;
++
++/**
++ * Action 계약 검증용 공통코드 조회 (CODE 형)
++ */
++public interface ActionCodeDao {
++
++    List<String> selectActiveCodes(
++            @Param("grpCd") String grpCd);
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionConflictException.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionConflictException.java
+new file mode 100644
+index 0000000..0ba5ef2
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionConflictException.java
+@@ -0,0 +1,11 @@
++package com.asdp.juprovider.core.action.exception;
++
++/** 409 CONFLICT: 중복 키, 사용 중인 데이터 삭제 등 */
++public class ActionConflictException extends ActionException {
++
++    public static final String CODE = "CONFLICT";
++
++    public ActionConflictException(String message) {
++        super(409, CODE, message, null);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionException.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionException.java
+new file mode 100644
+index 0000000..c5897a3
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionException.java
+@@ -0,0 +1,41 @@
++package com.asdp.juprovider.core.action.exception;
++
++import java.util.List;
++
++import com.asdp.juprovider.core.action.contract.ActionFieldError;
++
++/**
++ * Action 오류 계약 (결정 AC5)
++ * status : HTTP 상태, code : 응답 code, errors : 필드 오류 목록
++ */
++public abstract class ActionException extends RuntimeException {
++
++    private final int status;
++
++    private final String code;
++
++    private final List<ActionFieldError> errors;
++
++    protected ActionException(
++            int status,
++            String code,
++            String message,
++            List<ActionFieldError> errors) {
++        super(message);
++        this.status = status;
++        this.code = code;
++        this.errors = errors == null ? List.of() : List.copyOf(errors);
++    }
++
++    public int getStatus() {
++        return status;
++    }
++
++    public String getCode() {
++        return code;
++    }
++
++    public List<ActionFieldError> getErrors() {
++        return errors;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionNotFoundException.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionNotFoundException.java
+new file mode 100644
+index 0000000..5457e02
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionNotFoundException.java
+@@ -0,0 +1,11 @@
++package com.asdp.juprovider.core.action.exception;
++
++/** 404 NOT_FOUND: 정의되지 않은 메뉴·Action, 또는 대상 데이터 없음 */
++public class ActionNotFoundException extends ActionException {
++
++    public static final String CODE = "NOT_FOUND";
++
++    public ActionNotFoundException(String message) {
++        super(404, CODE, message, null);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionNotImplementedException.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionNotImplementedException.java
+new file mode 100644
+index 0000000..8fe1bd8
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionNotImplementedException.java
+@@ -0,0 +1,11 @@
++package com.asdp.juprovider.core.action.exception;
++
++/** 501 NOT_IMPLEMENTED: DB에 Action이 정의되어 있으나 Handler가 없음 */
++public class ActionNotImplementedException extends ActionException {
++
++    public static final String CODE = "NOT_IMPLEMENTED";
++
++    public ActionNotImplementedException(String message) {
++        super(501, CODE, message, null);
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionValidationException.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionValidationException.java
+new file mode 100644
+index 0000000..88ff5af
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/exception/ActionValidationException.java
+@@ -0,0 +1,25 @@
++package com.asdp.juprovider.core.action.exception;
++
++import java.util.List;
++
++import com.asdp.juprovider.core.action.contract.ActionFieldError;
++
++/** 400 VALIDATION: 입력 계약 위반 */
++public class ActionValidationException extends ActionException {
++
++    public static final String CODE = "VALIDATION";
++
++    public ActionValidationException(List<ActionFieldError> errors) {
++        super(400, CODE, "입력 값이 올바르지 않습니다.", errors);
++    }
++
++    public ActionValidationException(String message, List<ActionFieldError> errors) {
++        super(400, CODE, message, errors);
++    }
++
++    public static ActionValidationException of(String field, String errorCode, String message) {
++        return new ActionValidationException(
++                message,
++                List.of(new ActionFieldError(field, errorCode, message)));
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
+index 8e3c27d..4ea69f4 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/action/service/DynamicActionService.java
+@@ -1,78 +1,241 @@
+ package com.asdp.juprovider.core.action.service;
+ 
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.regex.Pattern;
++
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.support.TransactionTemplate;
++
++import com.asdp.juprovider.core.action.ActionExecution;
++import com.asdp.juprovider.core.action.ActionHandler;
+ import com.asdp.juprovider.core.action.ActionRegistry;
+ import com.asdp.juprovider.core.action.ActionRequest;
+ import com.asdp.juprovider.core.action.ActionResult;
++import com.asdp.juprovider.core.action.contract.ActionContract;
++import com.asdp.juprovider.core.action.contract.ActionFieldError;
++import com.asdp.juprovider.core.action.contract.ActionInput;
++import com.asdp.juprovider.core.action.contract.ActionInputValidator;
++import com.asdp.juprovider.core.action.contract.ListOutput;
++import com.asdp.juprovider.core.action.dao.ActionCodeDao;
++import com.asdp.juprovider.core.action.exception.ActionNotFoundException;
++import com.asdp.juprovider.core.action.exception.ActionNotImplementedException;
++import com.asdp.juprovider.core.action.exception.ActionValidationException;
++import com.asdp.juprovider.core.menu.dao.MenuDao;
+ import com.asdp.juprovider.core.menu.dto.Menu;
+ import com.asdp.juprovider.core.menu.dto.MenuAction;
+ import com.asdp.juprovider.core.menu.service.MenuService;
+ import com.asdp.juprovider.core.security.ExecutionContext;
+ import com.asdp.juprovider.core.security.PermissionService;
+-import org.springframework.stereotype.Service;
+-
+-import java.util.Map;
+ 
++/**
++ * Menu Action 실행 (결정 AC1~AC7, PR-E1)
++ *
++ * 1) 메뉴·Action 조회 (MNU_CD 또는 MNU_ID) → 없으면 404
++ * 2) 권한: 호출 대상 메뉴의 AUTH_ATTR 비트 → 없으면 403
++ * 3) Handler 조회 → DB에는 있는데 Handler가 없으면 501
++ * 4) 계약이 있으면: contractVersion 확인, 입력 검증(400 VALIDATION)
++ * 5) 실행: 쓰기 Action(실행·등록·수정·삭제)은 Action 1건 = 트랜잭션 1건, 실패 결과는 rollback
++ * 6) 계약이 있으면 출력 kind 모양 확인
++ */
+ @Service
+ public class DynamicActionService {
+ 
++    public static final Pattern MENU_CODE_PATTERN = Pattern.compile("^M\\d{8}$");
++
++    /** 쓰기 Action 종류 (MACT): 실행 10, 등록 02, 수정 04, 삭제 08 */
++    private static final Set<String> WRITE_KINDS =
++            Set.of("MACT0002", "MACT0003", "MACT0004", "MACT0005");
++
+     private final MenuService menuService;
++
++    private final MenuDao menuDao;
++
+     private final ActionRegistry actionRegistry;
++
+     private final PermissionService permissionService;
+ 
++    private final ActionInputValidator inputValidator;
++
++    private final TransactionTemplate transactionTemplate;
++
+     public DynamicActionService(
+             MenuService menuService,
++            MenuDao menuDao,
+             ActionRegistry actionRegistry,
+-            PermissionService permissionService) {
+-
++            PermissionService permissionService,
++            ActionCodeDao actionCodeDao,
++            PlatformTransactionManager transactionManager) {
+         this.menuService = menuService;
++        this.menuDao = menuDao;
+         this.actionRegistry = actionRegistry;
+         this.permissionService = permissionService;
++        this.inputValidator = new ActionInputValidator(
++                grpCd -> new HashSet<>(actionCodeDao.selectActiveCodes(grpCd)));
++        this.transactionTemplate = new TransactionTemplate(transactionManager);
+     }
+ 
++    /**
++     * 기존 경로 (POST /api/action/{menuId}/{actionCode}) — Device 화면 호환
++     */
+     public ActionResult<?> execute(
+             Long menuId,
+             String actionCode,
+             String langCd,
+             Map<String, Object> parameters,
+             ExecutionContext context) {
++        Menu menu = findMenu(menuId, langCd);
++        return run(menu, actionCode, langCd, null, parameters, context, null).result();
++    }
++
++    /**
++     * MNU_CD 경로 (POST /api/action/{mnuCd}/{actCd}) — 결정 AC1
++     */
++    public ActionExecution executeByCode(
++            String menuCode,
++            String actionCode,
++            String langCd,
++            Integer contractVersion,
++            Map<String, Object> parameters,
++            ExecutionContext context,
++            String requestId) {
++        if (menuCode == null || !MENU_CODE_PATTERN.matcher(menuCode).matches()) {
++            throw new ActionNotFoundException("정의되지 않은 메뉴입니다. menu=" + menuCode);
++        }
++
++        Menu menu = menuDao.selectMenuByCode(menuCode, normalizeLang(langCd));
++        if (menu == null) {
++            throw new ActionNotFoundException("정의되지 않은 메뉴입니다. menu=" + menuCode);
++        }
++
++        return run(menu, actionCode, langCd, contractVersion, parameters, context, requestId);
++    }
++
++    /** 기동 시 정합성 검사용: 사용·활성 Action 중 Handler가 없는 것 (결정 AC7) */
++    public List<MenuAction> findActionsWithoutHandler() {
++        return menuDao.selectActiveActionHandlers()
++                .stream()
++                .filter(action -> action.getHandlerId() == null
++                        || action.getHandlerId().isBlank()
++                        || !actionRegistry.contains(action.getHandlerId()))
++                .toList();
++    }
++
++    private ActionExecution run(
++            Menu menu,
++            String actionCode,
++            String langCd,
++            Integer contractVersion,
++            Map<String, Object> parameters,
++            ExecutionContext context,
++            String requestId) {
++        String lang = normalizeLang(langCd);
++
++        MenuAction menuAction =
++                actionCode == null || actionCode.isBlank()
++                        ? null
++                        : menuDao.selectAction(menu.getMenuId(), actionCode, lang);
++
++        if (menuAction == null) {
++            throw new ActionNotFoundException(
++                    "정의되지 않은 Action입니다. menu=" + menu.getMenuCode()
++                            + ", action=" + actionCode);
++        }
+ 
+         /*
+-         * 실행 권한 검사 (AUTH_ATTR 메뉴 비트 & ACT_KIND 비트). 없으면 PermissionDeniedException(403)
++         * 권한 (호출 대상 메뉴 기준, 결정 AC2). 없으면 PermissionDeniedException(403)
+          */
+         permissionService.checkAction(
+                 context,
+-                menuId,
+-                actionCode);
++                menu.getMenuId(),
++                menuAction.getActionCode());
++
++        String handlerId = menuAction.getHandlerId();
++        if (handlerId == null
++                || handlerId.isBlank()
++                || !actionRegistry.contains(handlerId)) {
++            throw new ActionNotImplementedException(
++                    "Action Handler가 구현되지 않았습니다. menu=" + menu.getMenuCode()
++                            + ", action=" + menuAction.getActionCode()
++                            + ", handler=" + handlerId);
++        }
+ 
+-        Menu menu =
+-                menuService.getMenu(
+-                        menuId,
+-                        langCd);
++        ActionHandler handler = actionRegistry.get(handlerId);
++        ActionContract contract = handler.contract();
+ 
+-        MenuAction menuAction =
+-                menuService.getAction(
+-                        menuId,
+-                        actionCode,
+-                        langCd);
+-
+-        String handlerId =
+-                menuAction.getHandlerId();
+-
+-        if (handlerId == null || handlerId.isBlank()) {
+-            throw new IllegalArgumentException(
+-                    "Action Handler가 지정되지 않았습니다. "
+-                            + "menuId=" + menuId
+-                            + ", actionCode=" + actionCode);
++        ActionInput input = null;
++        if (contract != null) {
++            if (contractVersion != null && contractVersion != contract.contractVersion()) {
++                throw ActionValidationException.of(
++                        "contractVersion",
++                        ActionFieldError.CONTRACT_VERSION_MISMATCH,
++                        "지원하지 않는 계약 버전입니다. 서버 버전=" + contract.contractVersion());
++            }
++            input = inputValidator.validate(contract, parameters);
+         }
+ 
+         ActionRequest request =
+                 new ActionRequest(
+                         menu.getMenuCode(),
+                         menuAction.getActionCode(),
+-                        parameters);
++                        parameters,
++                        context,
++                        lang,
++                        requestId,
++                        input);
++
++        ActionResult<?> result =
++                WRITE_KINDS.contains(menuAction.getActionKind())
++                        ? transactionTemplate.execute(status -> {
++                            ActionResult<?> r = handler.execute(request);
++                            if (r == null || !r.isSuccess()) {
++                                status.setRollbackOnly();
++                            }
++                            return r;
++                        })
++                        : handler.execute(request);
++
++        if (result == null) {
++            throw new IllegalStateException("Action Handler 결과가 없습니다. handler=" + handlerId);
++        }
++
++        if (contract != null && result.isSuccess()) {
++            checkOutputKind(contract, result.getData(), handlerId);
++        }
++
++        return new ActionExecution(
++                result,
++                contract == null ? null : contract.contractVersion());
++    }
++
++    private static void checkOutputKind(
++            ActionContract contract,
++            Object data,
++            String handlerId) {
++        boolean ok = switch (contract.outputKind()) {
++            case LIST -> data instanceof ListOutput<?>;
++            case RECORD, KEY -> data != null && !(data instanceof ListOutput<?>) && !(data instanceof List<?>);
++            case NONE -> data == null;
++        };
++
++        if (!ok) {
++            throw new IllegalStateException(
++                    "Action 출력이 계약(" + contract.outputKind() + ")과 다릅니다. handler=" + handlerId);
++        }
++    }
++
++    private Menu findMenu(Long menuId, String langCd) {
++        try {
++            return menuService.getMenu(menuId, langCd);
++        } catch (IllegalArgumentException e) {
++            throw new ActionNotFoundException(e.getMessage());
++        }
++    }
+ 
+-        return actionRegistry.execute(
+-                handlerId,
+-                request);
++    private static String normalizeLang(String langCd) {
++        return langCd == null || langCd.isBlank() ? MenuService.DEFAULT_LANG : langCd;
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/menu/dao/MenuDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/menu/dao/MenuDao.java
+index 8eda43e..19d713e 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/menu/dao/MenuDao.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/menu/dao/MenuDao.java
+@@ -23,4 +23,12 @@ public interface MenuDao {
+             @Param("menuId") Long menuId,
+             @Param("actionCode") String actionCode,
+             @Param("langCd") String langCd);
+-}
+\ No newline at end of file
++
++    /** MNU_CD로 사용 중 메뉴 조회 (결정 AC1) */
++    Menu selectMenuByCode(
++            @Param("menuCode") String menuCode,
++            @Param("langCd") String langCd);
++
++    /** 사용·활성 Action의 HANDLER_ID 전체 (기동 시 정합성 검사, 결정 AC7) */
++    List<MenuAction> selectActiveActionHandlers();
++}
+diff --git a/juprovider.core/src/main/resources/mapper/ActionCodeMapper.xml b/juprovider.core/src/main/resources/mapper/ActionCodeMapper.xml
+new file mode 100644
+index 0000000..ad3ada8
+--- /dev/null
++++ b/juprovider.core/src/main/resources/mapper/ActionCodeMapper.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
++        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
++
++<mapper namespace="com.asdp.juprovider.core.action.dao.ActionCodeDao">
++
++    <select id="selectActiveCodes" resultType="string">
++        SELECT c.COM_CD
++          FROM ju_com_code c
++         WHERE c.GRP_CD = #{grpCd}
++           AND c.USE_YN = 'YENO0001'
++    </select>
++
++</mapper>
+diff --git a/juprovider.core/src/main/resources/mapper/MenuMapper.xml b/juprovider.core/src/main/resources/mapper/MenuMapper.xml
+index 2d43d30..48676ab 100644
+--- a/juprovider.core/src/main/resources/mapper/MenuMapper.xml
++++ b/juprovider.core/src/main/resources/mapper/MenuMapper.xml
+@@ -213,4 +213,52 @@
+ 
+     </select>
+ 
++    <!-- JU Action 계약 (결정 AC1·AC7): 소문자 테이블명 -->
++    <select id="selectMenuByCode" resultMap="menuResultMap">
++        SELECT m.MNU_ID,
++               m.MNU_CD,
++               m.UP_MNU_ID,
++               m.MNU_KIND,
++               m.MNU_LV,
++               m.MNU_URL,
++               m.USE_YN,
++               m.ENABLED_YN,
++               m.SORT_ORD,
++               COALESCE(ml.RES_VAL, d.MNU_NM, m.MNU_CD) AS MNU_NM,
++               COALESCE(md.RES_VAL, d.MNU_DESC) AS MNU_DESC
++          FROM ju_menu m
++          LEFT JOIN ju_menu_detail d
++            ON d.MNU_ID = m.MNU_ID
++          LEFT JOIN ju_multi_lang ml
++            ON ml.LANG_CD = #{langCd}
++           AND ml.RES_KEY = d.MNU_NM_KEY
++          LEFT JOIN ju_multi_lang md
++            ON md.LANG_CD = #{langCd}
++           AND md.RES_KEY = d.MNU_DESC_KEY
++         WHERE m.MNU_CD = #{menuCode}
++           AND m.USE_YN = 'YENO0001'
++           AND m.ENABLED_YN = 'YENO0001'
++    </select>
++
++    <select id="selectActiveActionHandlers" resultMap="menuActionResultMap">
++        SELECT a.ACT_ID,
++               a.MNU_ID,
++               a.ACT_CD,
++               a.ACT_KIND,
++               a.HANDLER_ID,
++               a.USE_YN,
++               a.ENABLED_YN,
++               a.SORT_ORD,
++               a.ACT_CD AS ACT_NM,
++               NULL AS ACT_DESC
++          FROM ju_menu_action a
++          JOIN ju_menu m
++            ON m.MNU_ID = a.MNU_ID
++           AND m.USE_YN = 'YENO0001'
++           AND m.ENABLED_YN = 'YENO0001'
++         WHERE a.USE_YN = 'YENO0001'
++           AND a.ENABLED_YN = 'YENO0001'
++         ORDER BY a.MNU_ID, a.SORT_ORD, a.ACT_ID
++    </select>
++
+ </mapper>
+\ No newline at end of file

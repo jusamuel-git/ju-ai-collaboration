@@ -1,11 +1,11 @@
-# 지금 할 일 (2026-10-27 16:10 기준)
+# 지금 할 일 (2026-10-27 16:40 기준)
 
-단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → JU-1c Desktop ✅ → **Protocol Reference Implementation (계획 검토 중)**
+단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → JU-1c Desktop ✅ → **Protocol Reference Implementation — PR-1 완료(로컬), PR-2 대기**
 
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT·사용자 | **Protocol Reference 구현 계획 검토 + Q1~Q5 확인**: [reviews/claude/2026-10-27_protocol-ref_plan.md](../reviews/claude/2026-10-27_protocol-ref_plan.md). 결정 AC1~AC13 기록 완료 ([decisions/CURRENT.md](../decisions/CURRENT.md)). 승인 후 PR-1부터 구현 |
+| ChatGPT·사용자 | **PR-1 Action Contract Core 검토**: [result](../reviews/claude/2026-10-27_pr1-action-contract_result.md) — PC-A `feature/action-contract` `02ab18c` (빌드 5종, 테스트 19/19, smoke 18/18). 검토 후 PR-2(Protocol Backend) 진행. 계획: [protocol-ref_plan](../reviews/claude/2026-10-27_protocol-ref_plan.md), 결정 AC1~AC13·PR-Q1~Q5 |
 | 참고 | JU-1c 범위 밖 보고 항목: template.accdb의 이전 LOCAL_USER, DPAPI(D3), Terminal/IPC 인증(D8), `SyncDevicesToTerminalAsync` TEMP TEST 코드, `InitializeIpcAsync` 미사용, Updater Form1 |
 | 사용자 | 운영 Desktop 사용 시 `desktop\app\config\client.json`의 ServerUrl을 18081 → `http://localhost:8081/juprovider/`로 변경 (키는 그대로 유효) |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
@@ -19,6 +19,7 @@
 
 | 미커밋 | 위치 | 상태 |
 |---|---|---|
+| PR-1 Action Contract Core | PC-A juprovider `feature/action-contract` 로컬 commit `02ab18c` | PASS. push 보류 (PR-3까지 함께) |
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 서버·Vue 부분은 재사용 완료. Desktop 로그인 코드는 없음 |
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
 
@@ -34,3 +35,4 @@
 - 2026-10-27 15:05 Action 호출 구조 조사 업로드: 골격(MNU_ID+ACT_CD → HANDLER_ID → Registry) 구현됨, Handler 2/10, Protocol 메뉴(M02010100) Action 없음, MENU_CD 호출·실행 주체 전달·정합성 검사 미구현 (코드 수정 없음)
 - 2026-10-27 15:40 Action 계약 설계안 업로드: 지금 확정할 최소 계약 C1~C7(MNU_CD+ACT_CD 키, Input/Output/Error 계약, 실행 맥락, 변경 규칙, Protocol Action 10개)과 미룰 것(Screen/Component/Event/Binding 저장, Draft/Publish/Version/Rollback, 계약 조회 API 등) 구분 (코드 수정 없음)
 - 2026-10-27 16:10 결정 AC1~AC13 기록(A1~A10 + contractVersion, UNKNOWN_FIELD, 결정적 다국어 키, Designer 미구현), Protocol Reference 구현 계획 업로드 (코드 수정 없음)
+- 2026-10-27 16:35 **PR-1 Action Contract Core 로컬 commit `02ab18c`**: 빌드 5종 PASS, 테스트 19/19, Action smoke 18/18. 기존 응답 변화: Handler 없음 400→501, 정의 없음 400→404, 매핑 없는 경로 500→404
