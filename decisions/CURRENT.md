@@ -64,3 +64,13 @@
 | AC11 | 계약에 `contractVersion` 포함. 같은 업무 계약의 진화는 version으로 관리, **업무 의미가 달라질 때만 새 ACT_CD**. 실제 Publish/version 관리는 Designer 단계 | 10/27 |
 | AC12 | Input 계약에 선언되지 않은 필드는 `400 VALIDATION / UNKNOWN_FIELD` (중첩 object·list 원소 포함) | 10/27 |
 | AC13 | Designer·Renderer·Publish(Screen/Component/Event/Binding, Draft/Publish/Version/Rollback)는 구현하지 않음 — 이후 단계 | 10/27 |
+
+## Protocol Reference 세부 (2026-10-27 16:02 사용자 승인)
+| # | 결정 | 일자 |
+|---|---|---|
+| PR-Q1 | GRP_CREATE 시 기본 Protocol `{그룹}0000` 자동 생성 — **같은 Transaction** | 10/27 |
+| PR-Q2 | `PTL_CD` 형식 강제하지 않음 (길이만 검사) | 10/27 |
+| PR-Q3 | GRP_DELETE는 하위 Protocol·Packet 함께 논리 삭제 — **같은 Transaction**. 삭제 전 Device 참조 + 하위 Protocol의 Experiment 참조를 **전체 선검사**, 하나라도 사용 중이면 409로 전체 rollback | 10/27 |
+| PR-Q4 | `PTL_VAL` 편집 허용 | 10/27 |
+| PR-Q5 | 비관리자 `M02010100` = `01`(조회만) 유지 | 10/27 |
+| PR-E1 | 정의 없는 Action = 404, DB Action 존재 + Handler 없음 = 501 (두 경로 모두) | 10/27 |
