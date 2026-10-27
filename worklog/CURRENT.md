@@ -1,4 +1,4 @@
-# 지금 할 일 (2026-10-27 22:50 기준 — PC-B 재현 검증 PASS, 제품 코드 수정 중단 유지)
+# 지금 할 일 (2026-10-28 08:00 기준 — 오늘 작업 PC는 PC-A, PC-B는 저녁 정리)
 
 단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → JU-1c Desktop ✅ → **Protocol Reference Implementation — PR-1 `02ab18c` + PR-2 `157635a` 원격 브랜치 `feature/protocol-ref` (**PC-B 재현 PASS**), PR-3 보류**
 
@@ -11,8 +11,8 @@
 | 참고 | JU-1c 범위 밖 보고 항목: template.accdb의 이전 LOCAL_USER, DPAPI(D3), Terminal/IPC 인증(D8), `SyncDevicesToTerminalAsync` TEMP TEST 코드, `InitializeIpcAsync` 미사용, Updater Form1 |
 | 사용자 | 운영 Desktop 사용 시 `desktop\app\config\client.json`의 ServerUrl을 18081 → `http://localhost:8081/juprovider/`로 변경 (키는 그대로 유효) |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
-| 사용자 | PC-B 기존 작업 폴더 10/25 미커밋 변경 처리 결정 (juprovider `feature/ju-0-install` 40건, juproject `feature/sys-core-schema` 36건 — 그대로 둠). 검증은 별도 worktree `workspace_verify`에서 수행 |
-| 사용자·Claude | PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)): JDK/Maven MyTool→MyDev 경로, vcpkg·VCPKG_ROOT(점검 FAIL 1), JU_WORKSPACE/JU_TOMCAT_HOME — 이번 빌드·검증에는 영향 없음 |
+| 사용자·Claude | **저녁 PC-B 정리** (사용자 결정 10/28): ① 기존 작업 폴더의 10/25 이전 미커밋 변경 **모두 삭제** (juprovider `feature/ju-0-install` 40건, juproject `feature/sys-core-schema` 36건) → origin 기준으로 정렬 ② PC-A와 같은 환경: JDK/Maven `MyDev` 경로, vcpkg(`MyTool\vcpkg` + VCPKG_ROOT), JAVA_HOME·JU_WORKSPACE·JU_TOMCAT_HOME 등 환경변수 ③ Desktop `desktop\app\config\template.accdb` 배치 (아래 참고) ④ 검증 worktree `workspace_verify` 정리 여부 결정 |
+| 참고 | PC-B 사용자 확인(10/28): 서버 정상. Desktop Client는 `config\template.accdb` 없음으로 실행 안 됨 → **환경 문제로 판단**. `desktop/app/`은 .gitignore 대상이라 template이 저장소에 없음 (PC-A에는 로컬 파일만 있음). 저녁 정리 때 PC-A 파일을 복사해 배치. 저장소에 template을 둘지(예: `desktop/resources/`)는 별도 결정 사항 |
 
 ## 현재 상태
 | 저장소 | main | 실제 DB | Jenkins |
@@ -44,3 +44,4 @@
 - 2026-10-27 17:05 **PR-2 Protocol Backend 로컬 commit `157635a`**: 빌드 5종, 테스트 23/23, 06(1·2회·신규 설치 동일), HTTP smoke 58/58 — 원자성(GRP_CREATE·GRP_DELETE·CREATE 트리거 주입 rollback), GRP_DELETE 장치+실험 전체 선검사 409 무변경
 - 2026-10-27 17:04 **PC-A 작업 종료**: `feature/protocol-ref`(`02ab18c`, `157635a`)를 원격에 브랜치로만 push. origin/main은 `fce5048` 그대로. 제품 코드 수정 중단, PC-B 검증 대기
 - 2026-10-27 22:45 **PC-B 재현 검증 PASS** (`JUSAMUEL`, worktree `workspace_verify`): HEAD `157635a`·계보 확인, 환경 PASS 22/WARN 9/FAIL 1(vcpkg, 빌드 무관), 빌드 5종 PASS, 테스트 23/23, 06 재실행 무변경·신규 설치 동일, HTTP smoke 64/64 + Device GET·501 보완 14/14. 테스트 DB·프로세스 정리. 제품 코드 수정·push 없음
+- 2026-10-28 07:53 사용자: PC-B 서버 정상 확인, Client는 template.accdb 없음(환경 문제). 오늘은 PC-A 작업, PC-B는 저녁에 미커밋 삭제·환경 정렬
