@@ -1,13 +1,13 @@
-# 지금 할 일 (2026-10-27 08:40 기준)
+# 지금 할 일 (2026-10-27 09:20 기준)
 
-단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → **JU-1B** → JU-1C → JU-1c Desktop
+단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → **JU-1C** → JU-1c Desktop
 (JU-1A/1B/1C는 로컬 commit을 나누고, 1C까지 로컬 Build/Smoke 후 함께 push — ChatGPT 보정 R1)
 
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT | JU-1B 보정 확인 (재발급 재활성화 제거, 6장): [reviews/claude/2026-10-27_ju-1b_result.md](../reviews/claude/2026-10-27_ju-1b_result.md) → JU-1C 지시 |
-| 사용자 | 실제 juprovider DB migration 05 적용 승인 (백업 후, 1A~1C push 전) |
+| ChatGPT | JU-1C 검토: [reviews/claude/2026-10-27_ju-1c_result.md](../reviews/claude/2026-10-27_ju-1c_result.md) → 1A~1C 묶음 push 판단 |
+| 사용자 | **1A~1C push 전**: 실제 juprovider DB migration 05 적용 승인(백업 후) → push → Jenkins. 이후 운영 `admin` 최초 비밀번호 변경, Desktop Client 등록 |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
@@ -17,7 +17,8 @@
 | JU-0 + JU-1 (juprovider) | Claude 작업공간 stash (`feature/ju-0-install`) | 재사용 후보. PC-A 미적용 |
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
 | JU-1A | PC-A juprovider `feature/ju-1a` 로컬 commit `6fb591a` | PASS. push 보류 |
-| JU-1B | PC-A juprovider `feature/ju-1b` **로컬 commit `be1a664`** (← 6fb591a, 재발급 보정 amend) | 빌드·테스트 8/8·05 테스트 DB·권한/Client/Desktop smoke + 재발급 보정 10건 PASS. push 보류, 실제 DB 05 미적용 |
+| JU-1C | PC-A juprovider `feature/ju-1c` **로컬 commit `acac1fa`** (← be1a664) | 빌드 5종·`/me` 메뉴·SPA forward·브라우저 smoke 9건 PASS. push 보류 |
+| JU-1B | PC-A juprovider `feature/ju-1b` 로컬 commit `be1a664` (← 6fb591a, 재발급 보정 amend) | 빌드·테스트 8/8·05 테스트 DB·권한/Client/Desktop smoke + 재발급 보정 10건 PASS. push 보류, 실제 DB 05 미적용 |
 
 ## 최근 확인
 - 2026-10-26 10:31 PC-A `feature/env-0`: 환경검사 PASS 30 / WARN 4 / FAIL 0, 로컬 빌드 5종 PASS, `global.json` → SDK 10.0.402
@@ -31,3 +32,4 @@
 - 2026-10-26 16:40 SEC-01 `68d610b` push, Jenkins `juproject-ai` #4 SUCCESS / JU-1A 로컬 commit `6fb591a` (smoke 26/26)
 - 2026-10-27 08:20 JU-1B 로컬 commit `9cd1830` (FAIL 0)
 - 2026-10-27 08:35 JU-1B 보정: 재발급은 사용 중 Client만, 재활성화는 재등록에서만 → amend `be1a664` (FAIL 0)
+- 2026-10-27 09:15 JU-1C 로컬 commit `acac1fa` — 브라우저 smoke PASS (재로그인 토큰 버그 수정 포함)

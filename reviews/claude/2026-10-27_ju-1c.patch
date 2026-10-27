@@ -1,0 +1,664 @@
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java
+index 6449493..c96d10e 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/AuthController.java
+@@ -6,6 +6,7 @@ import org.springframework.web.bind.annotation.GetMapping;
+ import org.springframework.web.bind.annotation.PostMapping;
+ import org.springframework.web.bind.annotation.RequestBody;
+ import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RequestParam;
+ import org.springframework.web.bind.annotation.RestController;
+ 
+ import com.asdp.juprovider.dto.ApiResponse;
+@@ -35,8 +36,10 @@ public class AuthController {
+     }
+ 
+     @GetMapping("/me")
+-    public ApiResponse<MeResponse> me(@AuthenticationPrincipal Jwt jwt) {
+-        return ApiResponse.ok(authService.me(JwtTokenService.userId(jwt)));
++    public ApiResponse<MeResponse> me(
++            @AuthenticationPrincipal Jwt jwt,
++            @RequestParam(defaultValue = "LANG0001") String langCd) {
++        return ApiResponse.ok(authService.me(JwtTokenService.userId(jwt), langCd));
+     }
+ 
+     /** 성공하면 이전에 발급된 토큰은 모두 무효. 새로 로그인한다. */
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/SpaForwardController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/SpaForwardController.java
+new file mode 100644
+index 0000000..e3894e6
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/SpaForwardController.java
+@@ -0,0 +1,17 @@
++package com.asdp.juprovider.controller;
++
++import org.springframework.stereotype.Controller;
++import org.springframework.web.bind.annotation.GetMapping;
++
++/**
++ * Vue Router(history 모드) 화면 주소를 새로고침하거나 직접 열면 index.html을 돌려준다.
++ * (/api/** 와 정적 파일은 해당하지 않음)
++ */
++@Controller
++public class SpaForwardController {
++
++    @GetMapping({ "/login", "/password-change", "/forbidden", "/console", "/console/**" })
++    public String forward() {
++        return "forward:/index.html";
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/MeResponse.java b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/MeResponse.java
+index d31b7d6..e3d0801 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/dto/MeResponse.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/dto/MeResponse.java
+@@ -1,6 +1,25 @@
+ package com.asdp.juprovider.dto;
+ 
++import java.util.List;
++
++/**
++ * 현재 사용자, 최초 비밀번호 변경 필요 여부, 권한에 포함된 메뉴.
++ * menus.permission = AUTH_ATTR 비트(16진 2자리). "00"이면 메뉴 표시만 허용.
++ * 비밀번호 변경 전에는 menus가 비어 있다.
++ */
+ public record MeResponse(
+         UserInfo user,
+-        boolean passwordChangeRequired) {
++        boolean passwordChangeRequired,
++        List<MenuPermission> menus) {
++
++    public record MenuPermission(
++            Long menuId,
++            String menuCode,
++            Long parentMenuId,
++            Integer menuLevel,
++            String menuUrl,
++            String menuName,
++            Integer sortOrder,
++            String permission) {
++    }
+ }
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java b/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
+index 5e24e72..af69569 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/service/AuthService.java
+@@ -3,12 +3,15 @@ package com.asdp.juprovider.service;
+ import java.time.LocalDateTime;
+ import java.time.ZoneOffset;
+ import java.time.temporal.ChronoUnit;
++import java.util.List;
+ import java.util.Optional;
+ 
+ import org.springframework.security.crypto.password.PasswordEncoder;
+ import org.springframework.stereotype.Service;
+ import org.springframework.transaction.annotation.Transactional;
+ 
++import com.asdp.juprovider.core.security.AuthorityAttribute;
++import com.asdp.juprovider.core.security.PermissionService;
+ import com.asdp.juprovider.dto.LoginRequest;
+ import com.asdp.juprovider.dto.LoginResponse;
+ import com.asdp.juprovider.dto.MeResponse;
+@@ -45,18 +48,21 @@ public class AuthService {
+     private final AuthRepository authRepository;
+     private final PasswordEncoder passwordEncoder;
+     private final JwtTokenService jwtTokenService;
++    private final PermissionService permissionService;
+ 
+     public AuthService(
+             UserRepository userRepository,
+             UserDetailRepository userDetailRepository,
+             AuthRepository authRepository,
+             PasswordEncoder passwordEncoder,
+-            JwtTokenService jwtTokenService) {
++            JwtTokenService jwtTokenService,
++            PermissionService permissionService) {
+         this.userRepository = userRepository;
+         this.userDetailRepository = userDetailRepository;
+         this.authRepository = authRepository;
+         this.passwordEncoder = passwordEncoder;
+         this.jwtTokenService = jwtTokenService;
++        this.permissionService = permissionService;
+     }
+ 
+     /** 실패 횟수 기록이 예외로 롤백되지 않도록 트랜잭션으로 묶지 않는다 (저장은 repository 단위). */
+@@ -93,15 +99,32 @@ public class AuthService {
+                 detail.isPasswordChangeRequired());
+     }
+ 
++    /** 사용자·권한 메뉴. 비밀번호 변경 전이거나 권한이 미사용이면 메뉴는 비어 있다. */
+     @Transactional(readOnly = true)
+-    public MeResponse me(Long userId) {
++    public MeResponse me(Long userId, String langCd) {
+         JuUser user = userRepository.findById(userId)
+                 .orElseThrow(() -> new AuthenticationFailedException("사용자를 찾을 수 없습니다."));
+         JuUserDetail detail = userDetailRepository.findById(userId).orElse(null);
+         JuAuth auth = authRepository.findById(user.getAuthId()).orElse(null);
+-        return new MeResponse(
+-                toUserInfo(user, detail, auth),
+-                detail == null || detail.isPasswordChangeRequired());
++        boolean passwordChangeRequired = detail == null || detail.isPasswordChangeRequired();
++
++        List<MeResponse.MenuPermission> menus = List.of();
++        if (!passwordChangeRequired && auth != null && USE_YES.equals(auth.getUseYn())) {
++            AuthorityAttribute authority = permissionService.getAuthority(auth.getAuthId());
++            menus = permissionService.getPermittedMenus(authority, langCd)
++                    .stream()
++                    .map(menu -> new MeResponse.MenuPermission(
++                            menu.getMenuId(),
++                            menu.getMenuCode(),
++                            menu.getParentMenuId(),
++                            menu.getMenuLevel(),
++                            menu.getMenuUrl(),
++                            menu.getMenuName(),
++                            menu.getSortOrder(),
++                            AuthorityAttribute.toHex(authority.bitsOf(menu.getMenuCode()))))
++                    .toList();
++        }
++        return new MeResponse(toUserInfo(user, detail, auth), passwordChangeRequired, menus);
+     }
+ 
+     @Transactional
+diff --git a/juprovider.frontvue/src/App.vue b/juprovider.frontvue/src/App.vue
+index 587aebb..f264c3d 100644
+--- a/juprovider.frontvue/src/App.vue
++++ b/juprovider.frontvue/src/App.vue
+@@ -1 +1,31 @@
+-<template><router-view/></template>
+\ No newline at end of file
++<template>
++  <div v-if="showBar" class="session-bar">
++    <span class="menus" :title="menuNames">권한 메뉴 {{ session.menus.length }}개</span>
++    <span>{{ session.user.userName }} ({{ session.user.loginId }})</span>
++    <button type="button" @click="logout">로그아웃</button>
++  </div>
++  <router-view/>
++</template>
++
++<script setup>
++import { computed } from 'vue'
++import { useRoute, useRouter } from 'vue-router'
++import { clearSession, session } from './auth/session'
++
++const route = useRoute()
++const router = useRouter()
++
++const showBar = computed(() => session.user && !route.meta.public)
++const menuNames = computed(() => session.menus.filter(m => m.menuLevel === 1).map(m => m.menuName).join(', '))
++
++function logout() {
++  clearSession()
++  router.replace({ name: 'login' })
++}
++</script>
++
++<style scoped>
++.session-bar { display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 6px 16px; font-size: 13px; border-bottom: 1px solid #ddd; }
++.session-bar .menus { margin-right: auto; color: #666; }
++.session-bar button { cursor: pointer; }
++</style>
+diff --git a/juprovider.frontvue/src/api/api.js b/juprovider.frontvue/src/api/api.js
+index 1f9d42a..a557847 100644
+--- a/juprovider.frontvue/src/api/api.js
++++ b/juprovider.frontvue/src/api/api.js
+@@ -1,4 +1,5 @@
+ import axios from 'axios'
++import { clearSession, getToken } from '../auth/session'
+ 
+ export const api = axios.create({
+   baseURL: '/juprovider/api',
+@@ -8,11 +9,37 @@ export const api = axios.create({
+   }
+ })
+ 
++/*
++ * 로그인 토큰을 요청에 붙인다.
++ * 로그인 요청에는 붙이지 않는다: 서버는 Bearer 헤더가 있으면 공개 API라도 토큰을 검사하므로,
++ * 무효가 된 토큰(비밀번호 변경 직후 등)이 남아 있으면 로그인이 401이 된다.
++ */
++api.interceptors.request.use(config => {
++  const token = config.url?.startsWith('/auth/login') ? null : getToken()
++
++  if (token) {
++    config.headers.Authorization = `Bearer ${token}`
++  }
++
++  return config
++})
++
++/* 401(토큰 없음/만료/비밀번호 변경으로 무효)이면 세션을 지우고 로그인 화면으로 보낸다. */
+ api.interceptors.response.use(
+   response => response,
+   error => {
++    if (error.response?.status === 401
++        && !error.config?.url?.startsWith('/auth/login')) {
++      clearSession()
++
++      if (!window.location.pathname.startsWith('/juprovider/login')) {
++        const redirect = window.location.pathname.replace(/^\/juprovider/, '') + window.location.search
++        window.location.assign('/juprovider/login?redirect=' + encodeURIComponent(redirect || '/'))
++      }
++    }
++
+     return Promise.reject(error)
+   }
+ )
+ 
+-export default api
+\ No newline at end of file
++export default api
+diff --git a/juprovider.frontvue/src/api/authApi.js b/juprovider.frontvue/src/api/authApi.js
+new file mode 100644
+index 0000000..f482ffc
+--- /dev/null
++++ b/juprovider.frontvue/src/api/authApi.js
+@@ -0,0 +1,25 @@
++import api from './api'
++import { saveLogin, saveMe } from '../auth/session'
++
++export async function login(loginId, password) {
++  const response = await api.post('/auth/login', { loginId, password })
++  saveLogin(response.data.data)
++  return response.data.data
++}
++
++export async function loadMe(langCd = 'LANG0001') {
++  const response = await api.get('/auth/me', { params: { langCd } })
++  saveMe(response.data.data)
++  return response.data.data
++}
++
++/** 성공하면 서버가 이전 토큰을 모두 무효로 하므로, 호출한 쪽에서 새 비밀번호로 다시 로그인한다. */
++export async function changePassword(currentPassword, newPassword) {
++  const response = await api.post('/auth/password', { currentPassword, newPassword })
++  return response.data
++}
++
++/** 서버 오류 응답(ApiResponse.message)을 화면 문구로 바꾼다. */
++export function errorMessage(error, fallback = '요청을 처리하지 못했습니다.') {
++  return error?.response?.data?.message || fallback
++}
+diff --git a/juprovider.frontvue/src/auth/session.js b/juprovider.frontvue/src/auth/session.js
+new file mode 100644
+index 0000000..d392f25
+--- /dev/null
++++ b/juprovider.frontvue/src/auth/session.js
+@@ -0,0 +1,90 @@
++import { reactive } from 'vue'
++
++/*
++ * JU 로그인 세션 (JU-1C)
++ * - Access Token은 sessionStorage에 둔다 (탭을 닫으면 삭제)
++ * - 사용자·권한 메뉴는 로그인/새로고침 때 /auth/me로 다시 받는다
++ * - 비밀번호 변경이 필요하면(passwordChangeRequired) 변경 화면만 쓸 수 있다
++ */
++const TOKEN_KEY = 'juprovider.accessToken'
++const EXPIRES_KEY = 'juprovider.expiresAt'
++const USER_KEY = 'juprovider.user'
++const PWC_KEY = 'juprovider.passwordChangeRequired'
++
++function readJson(key) {
++  try {
++    const value = sessionStorage.getItem(key)
++    return value ? JSON.parse(value) : null
++  } catch {
++    return null
++  }
++}
++
++export const session = reactive({
++  user: readJson(USER_KEY),
++  passwordChangeRequired: sessionStorage.getItem(PWC_KEY) === 'true',
++  menus: [],
++  menusLoaded: false
++})
++
++export function getToken() {
++  const token = sessionStorage.getItem(TOKEN_KEY)
++  const expiresAt = sessionStorage.getItem(EXPIRES_KEY)
++
++  if (!token || !expiresAt) {
++    return null
++  }
++
++  if (new Date(expiresAt).getTime() <= Date.now()) {
++    clearSession()
++    return null
++  }
++
++  return token
++}
++
++export function isLoggedIn() {
++  return getToken() !== null
++}
++
++export function isPasswordChangeRequired() {
++  return session.passwordChangeRequired === true
++}
++
++/** 메뉴 코드 권한 (로그인 사용자의 AUTH_ATTR에 포함된 메뉴) */
++export function hasMenu(menuCode) {
++  return session.menus.some(menu => menu.menuCode === menuCode)
++}
++
++/** 로그인 응답 { accessToken, expiresAt, user, passwordChangeRequired } 저장 */
++export function saveLogin(loginResponse) {
++  sessionStorage.setItem(TOKEN_KEY, loginResponse.accessToken)
++  sessionStorage.setItem(EXPIRES_KEY, loginResponse.expiresAt)
++  sessionStorage.setItem(USER_KEY, JSON.stringify(loginResponse.user))
++  sessionStorage.setItem(PWC_KEY, String(loginResponse.passwordChangeRequired === true))
++  session.user = loginResponse.user
++  session.passwordChangeRequired = loginResponse.passwordChangeRequired === true
++  session.menus = []
++  session.menusLoaded = false
++}
++
++/** /auth/me 응답 { user, passwordChangeRequired, menus } 저장 */
++export function saveMe(me) {
++  session.user = me.user
++  session.passwordChangeRequired = me.passwordChangeRequired === true
++  session.menus = me.menus || []
++  session.menusLoaded = true
++  sessionStorage.setItem(USER_KEY, JSON.stringify(me.user))
++  sessionStorage.setItem(PWC_KEY, String(session.passwordChangeRequired))
++}
++
++export function clearSession() {
++  sessionStorage.removeItem(TOKEN_KEY)
++  sessionStorage.removeItem(EXPIRES_KEY)
++  sessionStorage.removeItem(USER_KEY)
++  sessionStorage.removeItem(PWC_KEY)
++  session.user = null
++  session.passwordChangeRequired = false
++  session.menus = []
++  session.menusLoaded = false
++}
+diff --git a/juprovider.frontvue/src/router/index.js b/juprovider.frontvue/src/router/index.js
+index fe6b6f7..4be7f2a 100644
+--- a/juprovider.frontvue/src/router/index.js
++++ b/juprovider.frontvue/src/router/index.js
+@@ -1,16 +1,40 @@
+ import { createRouter, createWebHistory } from 'vue-router'
+ 
+ import DeviceManagement from '../views/device/DeviceManagement.vue'
++import LoginView from '../views/auth/LoginView.vue'
++import PasswordChangeView from '../views/auth/PasswordChangeView.vue'
++import ForbiddenView from '../views/auth/ForbiddenView.vue'
++import { hasMenu, isLoggedIn, isPasswordChangeRequired, session } from '../auth/session'
++import { loadMe } from '../api/authApi'
+ 
+ const routes = [
+   {
+     path: '/',
+     redirect: '/console/device/manage'
+   },
++  {
++    path: '/login',
++    name: 'login',
++    component: LoginView,
++    meta: { public: true }
++  },
++  {
++    path: '/password-change',
++    name: 'password-change',
++    component: PasswordChangeView,
++    meta: { passwordChange: true }
++  },
++  {
++    path: '/forbidden',
++    name: 'forbidden',
++    component: ForbiddenView
++  },
+   {
+     path: '/console/device/manage',
+     name: 'device-management',
+-    component: DeviceManagement
++    component: DeviceManagement,
++    // ju_menu M02010000 (장치관리, MNU_ID 15) 권한이 있어야 한다
++    meta: { menuCode: 'M02010000' }
+   }
+ ]
+ 
+@@ -19,4 +43,39 @@ const router = createRouter({
+   routes
+ })
+ 
+-export default router
+\ No newline at end of file
++/*
++ * 로그인 가드
++ * - 로그인 전: /login 외에는 로그인 화면으로 (원래 주소는 redirect로 보존)
++ * - 비밀번호 변경 필요: /password-change 외에는 변경 화면으로
++ * - 새로고침 후에는 /auth/me로 사용자·권한 메뉴를 다시 받는다
++ * - meta.menuCode가 권한 메뉴에 없으면 /forbidden
++ */
++router.beforeEach(async to => {
++  if (to.meta.public) {
++    return isLoggedIn() && to.name === 'login' && !isPasswordChangeRequired() ? '/' : true
++  }
++
++  if (!isLoggedIn()) {
++    return { name: 'login', query: { redirect: to.fullPath } }
++  }
++
++  if (!session.menusLoaded) {
++    try {
++      await loadMe()
++    } catch {
++      return { name: 'login', query: { redirect: to.fullPath } }
++    }
++  }
++
++  if (isPasswordChangeRequired()) {
++    return to.meta.passwordChange ? true : { name: 'password-change', query: { redirect: to.fullPath } }
++  }
++
++  if (to.meta.menuCode && !hasMenu(to.meta.menuCode)) {
++    return { name: 'forbidden' }
++  }
++
++  return true
++})
++
++export default router
+diff --git a/juprovider.frontvue/src/views/auth/ForbiddenView.vue b/juprovider.frontvue/src/views/auth/ForbiddenView.vue
+new file mode 100644
+index 0000000..5bd917d
+--- /dev/null
++++ b/juprovider.frontvue/src/views/auth/ForbiddenView.vue
+@@ -0,0 +1,17 @@
++<template>
++  <div class="forbidden">
++    <h1>권한이 없습니다</h1>
++    <p>이 화면을 사용할 권한이 없습니다. 관리자에게 문의하세요.</p>
++    <p v-if="session.menus.length">사용할 수 있는 메뉴: {{ session.menus.filter(m => m.menuLevel === 1).map(m => m.menuName).join(', ') }}</p>
++  </div>
++</template>
++
++<script setup>
++import { session } from '../../auth/session'
++</script>
++
++<style scoped>
++.forbidden { padding: 32px 16px; max-width: 640px; }
++.forbidden h1 { font-size: 20px; margin: 0 0 12px; }
++.forbidden p { font-size: 14px; margin: 0 0 8px; }
++</style>
+diff --git a/juprovider.frontvue/src/views/auth/LoginView.vue b/juprovider.frontvue/src/views/auth/LoginView.vue
+new file mode 100644
+index 0000000..b3cfa47
+--- /dev/null
++++ b/juprovider.frontvue/src/views/auth/LoginView.vue
+@@ -0,0 +1,74 @@
++<template>
++  <div class="auth-page">
++    <form class="auth-box" @submit.prevent="submit">
++      <h1>JuProvider</h1>
++
++      <label>
++        아이디
++        <input v-model.trim="loginId" autocomplete="username" required>
++      </label>
++
++      <label>
++        비밀번호
++        <input v-model="password" type="password" autocomplete="current-password" required>
++      </label>
++
++      <p v-if="message" class="auth-error">{{ message }}</p>
++
++      <button type="submit" :disabled="loading">
++        {{ loading ? '로그인 중...' : '로그인' }}
++      </button>
++    </form>
++  </div>
++</template>
++
++<script setup>
++import { ref } from 'vue'
++import { useRoute, useRouter } from 'vue-router'
++import { errorMessage, loadMe, login } from '../../api/authApi'
++
++const route = useRoute()
++const router = useRouter()
++
++const loginId = ref('')
++const password = ref('')
++const message = ref('')
++const loading = ref(false)
++
++async function submit() {
++  message.value = ''
++  loading.value = true
++
++  try {
++    const result = await login(loginId.value, password.value)
++
++    if (result.passwordChangeRequired) {
++      await router.replace({ name: 'password-change', query: route.query })
++      return
++    }
++
++    await loadMe()
++    await router.replace(safeRedirect(route.query.redirect))
++  } catch (error) {
++    message.value = errorMessage(error, '로그인하지 못했습니다.')
++  } finally {
++    loading.value = false
++  }
++}
++
++function safeRedirect(redirect) {
++  return typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//')
++    ? redirect
++    : '/'
++}
++</script>
++
++<style scoped>
++.auth-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
++.auth-box { width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 12px; }
++.auth-box h1 { margin: 0 0 8px; font-size: 22px; }
++.auth-box label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
++.auth-box input { padding: 8px; font-size: 14px; }
++.auth-box button { padding: 10px; font-size: 14px; cursor: pointer; }
++.auth-error { color: #c0392b; margin: 0; font-size: 13px; }
++</style>
+diff --git a/juprovider.frontvue/src/views/auth/PasswordChangeView.vue b/juprovider.frontvue/src/views/auth/PasswordChangeView.vue
+new file mode 100644
+index 0000000..cadcca0
+--- /dev/null
++++ b/juprovider.frontvue/src/views/auth/PasswordChangeView.vue
+@@ -0,0 +1,93 @@
++<template>
++  <div class="auth-page">
++    <form class="auth-box" @submit.prevent="submit">
++      <h1>비밀번호 변경</h1>
++      <p v-if="required" class="auth-note">처음 로그인했거나 초기 비밀번호를 쓰고 있습니다. 비밀번호를 바꿔야 계속 사용할 수 있습니다.</p>
++
++      <label>
++        현재 비밀번호
++        <input v-model="currentPassword" type="password" autocomplete="current-password" required>
++      </label>
++
++      <label>
++        새 비밀번호 (8자 이상)
++        <input v-model="newPassword" type="password" autocomplete="new-password" minlength="8" required>
++      </label>
++
++      <label>
++        새 비밀번호 확인
++        <input v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" required>
++      </label>
++
++      <p v-if="message" class="auth-error">{{ message }}</p>
++
++      <button type="submit" :disabled="loading">
++        {{ loading ? '변경 중...' : '변경' }}
++      </button>
++    </form>
++  </div>
++</template>
++
++<script setup>
++import { computed, ref } from 'vue'
++import { useRoute, useRouter } from 'vue-router'
++import { changePassword, errorMessage, loadMe, login } from '../../api/authApi'
++import { clearSession, isPasswordChangeRequired, session } from '../../auth/session'
++
++const route = useRoute()
++const router = useRouter()
++
++const currentPassword = ref('')
++const newPassword = ref('')
++const confirmPassword = ref('')
++const message = ref('')
++const loading = ref(false)
++
++const required = computed(() => isPasswordChangeRequired())
++
++async function submit() {
++  message.value = ''
++
++  if (newPassword.value !== confirmPassword.value) {
++    message.value = '새 비밀번호가 서로 다릅니다.'
++    return
++  }
++
++  loading.value = true
++
++  try {
++    const loginId = session.user?.loginId
++    await changePassword(currentPassword.value, newPassword.value)
++
++    // 변경 전 토큰은 서버에서 무효가 되므로 새 비밀번호로 다시 로그인한다.
++    try {
++      await login(loginId, newPassword.value)
++    } catch {
++      clearSession()
++      await router.replace({ name: 'login' })
++      return
++    }
++    await loadMe()
++
++    const redirect = route.query.redirect
++    await router.replace(
++      typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/'
++    )
++  } catch (error) {
++    message.value = errorMessage(error, '비밀번호를 바꾸지 못했습니다.')
++  } finally {
++    loading.value = false
++  }
++}
++</script>
++
++<style scoped>
++.auth-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
++.auth-box { width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 12px; }
++.auth-box h1 { margin: 0 0 8px; font-size: 22px; }
++.auth-box label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
++.auth-box input { padding: 8px; font-size: 14px; }
++.auth-box button { padding: 10px; font-size: 14px; cursor: pointer; }
++.auth-note { margin: 0; font-size: 13px; }
++.auth-error { color: #c0392b; margin: 0; font-size: 13px; }
++</style>

@@ -24,7 +24,8 @@ ChatGPT와 Claude가 함께 쓰는 설계·조사·결정·검토·환경 문서
 4. SYS-01: **완료** (실제 DB 적용, `adb3556` push, Jenkins #3 SUCCESS)
 5. SEC-01: **완료** (`68d610b` push, Jenkins #4 SUCCESS)
 6. JU-1A 로컬 commit `6fb591a` (push 보류)
-7. **JU-1B 로컬 commit `be1a664` (재발급 보정 포함, push 보류)**: [reviews/claude/2026-10-27_ju-1b_result.md](reviews/claude/2026-10-27_ju-1b_result.md)
+7. JU-1B 로컬 commit `be1a664` (push 보류)
+8. **JU-1C 로컬 commit `acac1fa` (push 보류)**: [reviews/claude/2026-10-27_ju-1c_result.md](reviews/claude/2026-10-27_ju-1c_result.md): [reviews/claude/2026-10-27_ju-1b_result.md](reviews/claude/2026-10-27_ju-1b_result.md)
 
 ## 제품 저장소
 
