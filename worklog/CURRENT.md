@@ -1,4 +1,4 @@
-# 지금 할 일 (2026-10-27 09:20 기준)
+# 지금 할 일 (2026-10-27 09:40 기준)
 
 단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → **JU-1C** → JU-1c Desktop
 (JU-1A/1B/1C는 로컬 commit을 나누고, 1C까지 로컬 Build/Smoke 후 함께 push — ChatGPT 보정 R1)
@@ -7,7 +7,7 @@
 | 담당 | 내용 |
 |---|---|
 | ChatGPT | JU-1C 검토: [reviews/claude/2026-10-27_ju-1c_result.md](../reviews/claude/2026-10-27_ju-1c_result.md) → 1A~1C 묶음 push 판단 |
-| 사용자 | **1A~1C push 전**: 실제 juprovider DB migration 05 적용 승인(백업 후) → push → Jenkins. 이후 운영 `admin` 최초 비밀번호 변경, Desktop Client 등록 |
+| 사용자 | **JU-1 통합 검증 (준비 완료, 미실행)**: [절차](../reviews/claude/2026-10-27_ju-1_integration_plan.md) — "05 실제 적용 승인" → `run_ai_ju1_db05.cmd`(백업→05→검증) → `run_ai_ju1_local_start.cmd`(18081) → admin 최초 비밀번호 변경·메뉴 확인 → `run_ai_ju1_client_register.cmd` → Desktop 동기화 → push 판단. 되돌리기 `run_ai_ju1_db05_rollback.cmd` |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |
 
@@ -33,3 +33,4 @@
 - 2026-10-27 08:20 JU-1B 로컬 commit `9cd1830` (FAIL 0)
 - 2026-10-27 08:35 JU-1B 보정: 재발급은 사용 중 Client만, 재활성화는 재등록에서만 → amend `be1a664` (FAIL 0)
 - 2026-10-27 09:15 JU-1C 로컬 commit `acac1fa` — 브라우저 smoke PASS (재로그인 토큰 버그 수정 포함)
+- 2026-10-27 09:40 JU-1 통합 검증 스크립트·절차 준비 (PC-A workspace `run_ai_ju1_*.cmd`). 실제 DB 미변경, push 없음
