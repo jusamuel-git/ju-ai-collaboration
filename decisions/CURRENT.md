@@ -47,3 +47,20 @@
 | D6 | Client 키 거부(401/403) = CLIENT_REJECTED → 로그인 차단. **서버 401(사용자 인증 실패)과 CLIENT_REJECTED는 offline fallback 금지**. offline은 연결 실패·타임아웃·5xx일 때만 | 10/27 |
 | D7 | 로그아웃 → 로그인 폼 복귀, 토큰은 메모리에서만 보관·폐기 | 10/27 |
 | D8 | Terminal/IPC 인증은 이번 단계 제외 | 10/27 |
+
+## Action 계약 / Designer 방향 (2026-10-27 15:54 사용자 승인, 근거: [design](../reviews/claude/2026-10-27_action-contract_designer_design.md))
+| # | 결정 | 일자 |
+|---|---|---|
+| AC1 | Action 공개 키 = `MNU_CD + ACT_CD`, `POST /api/action/{mnuCd}/{actCd}` 추가 (기존 menuId 경로는 Device 호환용 유지) | 10/27 |
+| AC2 | Action은 leaf 메뉴 소속, 권한은 호출 대상 메뉴 기준 | 10/27 |
+| AC3 | Input 계약은 Handler 코드에 선언, 서버가 실행 전 검증 (형 8종: string·integer·decimal·boolean·datetime·code·object·list) | 10/27 |
+| AC4 | Output kind 4종 고정: `list={items,total}` · `record` · `key`(자연키) · `none` | 10/27 |
+| AC5 | 응답 봉투에 `code`, `errors[]` 추가 (기존 success/data/message 유지). 400 VALIDATION · 401 · 403 · 404 NOT_FOUND · 409 CONFLICT · 501 NOT_IMPLEMENTED | 10/27 |
+| AC6 | `ActionRequest`에 실행 주체·langCd·requestId. 쓰기 Action 1건 = 트랜잭션 1건 | 10/27 |
+| AC7 | 기동 시 DB HANDLER_ID ↔ 코드 불일치는 WARN, 호출 시 501 | 10/27 |
+| AC8 | Protocol Action 10개(`M02010100`: GRP_SEARCH/GET/CREATE/UPDATE/DELETE, SEARCH/GET/CREATE/UPDATE/DELETE), 패킷은 프로토콜 하위 목록, 논리 삭제, 사용 중이면 409 | 10/27 |
+| AC9 | 다국어 키는 **도메인+자연키+필드 결정적 규칙** (예: `PROTOCOL_GROUP.{ptlGrpCd}.NM`, `PROTOCOL.{ptlGrpCd}.{ptlCd}.NM`) — 기존 seed 키와 동일 형식 | 10/27 |
+| AC10 | `/api/core/protocol*` 조회 경로는 Protocol 화면 전환 후 제거 | 10/27 |
+| AC11 | 계약에 `contractVersion` 포함. 같은 업무 계약의 진화는 version으로 관리, **업무 의미가 달라질 때만 새 ACT_CD**. 실제 Publish/version 관리는 Designer 단계 | 10/27 |
+| AC12 | Input 계약에 선언되지 않은 필드는 `400 VALIDATION / UNKNOWN_FIELD` (중첩 object·list 원소 포함) | 10/27 |
+| AC13 | Designer·Renderer·Publish(Screen/Component/Event/Binding, Draft/Publish/Version/Rollback)는 구현하지 않음 — 이후 단계 | 10/27 |
