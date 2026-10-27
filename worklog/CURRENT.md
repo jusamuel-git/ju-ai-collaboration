@@ -1,11 +1,11 @@
 # 지금 할 일 (2026-10-27 11:15 기준)
 
-단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → **JU-1c Desktop (사전 조사 중)**
+단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → **JU-1c Desktop (구현 중)**
 
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT·사용자 | **JU-1c Desktop 사전 조사 검토 → 결정 D1~D8**: [reviews/claude/2026-10-27_ju-1c-desktop_precheck.md](../reviews/claude/2026-10-27_ju-1c-desktop_precheck.md). 결정 전 제품 코드 수정 없음 |
+| Claude | **JU-1c Desktop 구현 중** — D1~D8 승인(10/27 11:13, [decisions/CURRENT.md](../decisions/CURRENT.md)). 구현 → 빌드 → online/offline smoke → 로컬 commit. 제품 repo push는 검토 후 |
 | 사용자 | 운영 Desktop 사용 시 `desktop\app\config\client.json`의 ServerUrl을 18081 → `http://localhost:8081/juprovider/`로 변경 (키는 그대로 유효) |
 | 사용자 | juproject `admin` 비밀번호 변경 → PC-A user-secrets `Seed:AdminPassword` 새 값으로 |
 | 사용자·Claude | 저녁 PC-B 정렬 ([environment/PC_B.md](../environment/PC_B.md)) |

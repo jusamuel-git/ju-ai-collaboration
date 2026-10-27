@@ -1,4 +1,4 @@
-# 유효한 결정 (2026-10-26 기준)
+# 유효한 결정 (2026-10-27 기준)
 
 날짜별 원문은 같은 폴더의 `YYYY-MM-DD_*.md`. 바뀐 결정은 여기서 고치고 원문은 남긴다.
 
@@ -35,3 +35,15 @@
 - Jenkinsfile Tomcat 경로 → `JU_TOMCAT_HOME`, 포트 → `HTTP_PORT`
 - 제품 저장소 `AI_COLLABORATION.md`를 이 저장소를 가리키는 안내로 바꾸는 것
 - 재설계 요청서의 A~K 항목
+
+## JU-1c Desktop (2026-10-27 11:13 사용자 승인, 근거: [precheck](../reviews/claude/2026-10-27_ju-1c-desktop_precheck.md))
+| # | 결정 | 일자 |
+|---|---|---|
+| D1 | offline 검증자 = PBKDF2-SHA256(반복 210,000, 사용자별 salt) 문자열을 `LOCAL_USER.OFFLINE_TOKEN`에 저장. 서버 비밀번호 평문·서버 해시 로컬 저장 금지. 기본 라이브러리만 사용 | 10/27 |
+| D2 | offline 유효기간 = 마지막 온라인 인증 후 7일 (`EXPIRE_DT`, Desktop 상수) | 10/27 |
+| D3 | DPAPI 암호화(`OFFLINE_TOKEN`·`client.json`)는 이번 단계 제외 | 10/27 |
+| D4 | `passwordChangeRequired=true`면 Desktop 로그인 거부 + 웹 변경 안내, offline credential 저장 안 함 | 10/27 |
+| D5 | offline 연속 5회 실패 시 해당 사용자 offline 잠금, 온라인 로그인 성공 시 해제. **`LOCAL_USER`에 실패횟수·잠금 컬럼 추가** (`LOCAL_SYNC_STATE` 사용 안 함) | 10/27 |
+| D6 | Client 키 거부(401/403) = CLIENT_REJECTED → 로그인 차단. **서버 401(사용자 인증 실패)과 CLIENT_REJECTED는 offline fallback 금지**. offline은 연결 실패·타임아웃·5xx일 때만 | 10/27 |
+| D7 | 로그아웃 → 로그인 폼 복귀, 토큰은 메모리에서만 보관·폐기 | 10/27 |
+| D8 | Terminal/IPC 인증은 이번 단계 제외 | 10/27 |
