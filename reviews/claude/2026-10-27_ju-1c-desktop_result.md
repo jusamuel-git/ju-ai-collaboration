@@ -1,4 +1,4 @@
-# JU-1c Desktop 결과 (2026-10-27 11:31) — PASS, 로컬 commit, push 안 함
+# JU-1c Desktop 결과 (2026-10-27) — PASS, main push 완료
 
 - 브랜치: PC-A juprovider `feature/ju-1c-desktop` @ **`fce5048`** (← main `acac1fa`)
 - `feat(desktop): add user login and offline authentication` — 10 files, +1466 / −135 (patch: [2026-10-27_ju-1c-desktop.patch](2026-10-27_ju-1c-desktop.patch))
@@ -33,3 +33,8 @@ smoke 시나리오: PBKDF2 형식·salt·변조 거부 / 상태 분류(유효 �
 2. UI 화면은 빌드·로직 smoke로 확인. 로그인 화면 실제 조작은 사용자 확인 권장 (8081 운영 서버 + `PCA_DESKTOP01`로 가능, 서버 변경 없음)
 3. 범위 밖(보고만): `InitializeIpcAsync` 미사용, `client.json`·`OFFLINE_TOKEN` DPAPI 보호(D3), Terminal/IPC 인증(D8), `SyncDevicesToTerminalAsync`의 TEMP TEST 연결 요청 코드, Updater Form1
 4. PC-A에서 smoke 실행 중 탐색기 조작 실수로 이전 로그 파일 1개(`ai_ju1c_finish_DESKTOP-CE5BGKK.log`)가 메모장으로 열렸음 (변경 없음)
+
+## push·Jenkins (14:27)
+- 사용자 실기 검증 PASS (14:20) 후 승인 → main `acac1fa..fce5048` fast-forward push (`tools/ai_ju1cd_push.ps1`)
+- Jenkins `juprovider-ai` #15 SUCCESS: rev `fce5048`, 테스트 8/8, Health UP
+- 참고: Jenkins 파이프라인 단계는 Core·Backend WAR·배포·Health Check뿐이며 Desktop은 빌드하지 않는다 (Desktop 검증 = PC-A 로컬 빌드 + smoke)
