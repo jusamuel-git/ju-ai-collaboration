@@ -1,0 +1,10 @@
+feat(web): split public home page and console layout (WEB-02/03)
+
+- / : public home (PublicShell + HomeView), /login public
+- /console/** : ConsoleShell (menu nav from route meta.menuCode + /auth/me, user, logout)
+- /password-change, /forbidden keep their URLs inside ConsoleShell (logout available)
+- Logout -> /, login/password-change default -> /console, logged-in /login -> /console
+- JWT, /auth/me, menu permission guard and Protocol actions unchanged
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

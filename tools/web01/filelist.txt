@@ -1,0 +1,7 @@
+juprovider.frontvue/src/App.vue
+juprovider.frontvue/src/layouts/ConsoleShell.vue
+juprovider.frontvue/src/layouts/PublicShell.vue
+juprovider.frontvue/src/router/index.js
+juprovider.frontvue/src/views/auth/LoginView.vue
+juprovider.frontvue/src/views/auth/PasswordChangeView.vue
+juprovider.frontvue/src/views/public/HomeView.vue

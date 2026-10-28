@@ -1,0 +1,326 @@
+From 6e5f1b185536517edb7ad1d9f1d088cfac8b2b9c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 09:42:10 +0900
+Subject: [PATCH] feat(web): split public home page and console layout
+ (WEB-02/03)
+
+- / : public home (PublicShell + HomeView), /login public
+- /console/** : ConsoleShell (menu nav from route meta.menuCode + /auth/me, user, logout)
+- /password-change, /forbidden keep their URLs inside ConsoleShell (logout available)
+- Logout -> /, login/password-change default -> /console, logged-in /login -> /console
+- JWT, /auth/me, menu permission guard and Protocol actions unchanged
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ juprovider.frontvue/src/App.vue               | 28 --------
+ .../src/layouts/ConsoleShell.vue              | 47 ++++++++++++++
+ .../src/layouts/PublicShell.vue               | 36 +++++++++++
+ juprovider.frontvue/src/router/index.js       | 64 +++++++++++--------
+ .../src/views/auth/LoginView.vue              |  2 +-
+ .../src/views/auth/PasswordChangeView.vue     |  2 +-
+ .../src/views/public/HomeView.vue             | 32 ++++++++++
+ 7 files changed, 155 insertions(+), 56 deletions(-)
+ create mode 100644 juprovider.frontvue/src/layouts/ConsoleShell.vue
+ create mode 100644 juprovider.frontvue/src/layouts/PublicShell.vue
+ create mode 100644 juprovider.frontvue/src/views/public/HomeView.vue
+
+diff --git a/juprovider.frontvue/src/App.vue b/juprovider.frontvue/src/App.vue
+index f264c3d..083049b 100644
+--- a/juprovider.frontvue/src/App.vue
++++ b/juprovider.frontvue/src/App.vue
+@@ -1,31 +1,3 @@
+ <template>
+-  <div v-if="showBar" class="session-bar">
+-    <span class="menus" :title="menuNames">권한 메뉴 {{ session.menus.length }}개</span>
+-    <span>{{ session.user.userName }} ({{ session.user.loginId }})</span>
+-    <button type="button" @click="logout">로그아웃</button>
+-  </div>
+   <router-view/>
+ </template>
+-
+-<script setup>
+-import { computed } from 'vue'
+-import { useRoute, useRouter } from 'vue-router'
+-import { clearSession, session } from './auth/session'
+-
+-const route = useRoute()
+-const router = useRouter()
+-
+-const showBar = computed(() => session.user && !route.meta.public)
+-const menuNames = computed(() => session.menus.filter(m => m.menuLevel === 1).map(m => m.menuName).join(', '))
+-
+-function logout() {
+-  clearSession()
+-  router.replace({ name: 'login' })
+-}
+-</script>
+-
+-<style scoped>
+-.session-bar { display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 6px 16px; font-size: 13px; border-bottom: 1px solid #ddd; }
+-.session-bar .menus { margin-right: auto; color: #666; }
+-.session-bar button { cursor: pointer; }
+-</style>
+diff --git a/juprovider.frontvue/src/layouts/ConsoleShell.vue b/juprovider.frontvue/src/layouts/ConsoleShell.vue
+new file mode 100644
+index 0000000..5d2021f
+--- /dev/null
++++ b/juprovider.frontvue/src/layouts/ConsoleShell.vue
+@@ -0,0 +1,47 @@
++<script setup>
++/*
++ * 관리 콘솔 레이아웃 (WEB-02). /console/** 는 로그인 + 비밀번호 변경 완료 후에만 들어온다 (router 가드).
++ * 상단: 콘솔 메뉴(권한 메뉴 중 이 앱에 화면이 있는 것), 사용자, 로그아웃(→ 공개 홈 /).
++ */
++import { computed } from 'vue'
++import { useRouter } from 'vue-router'
++import { clearSession, session } from '../auth/session'
++
++const router = useRouter()
++
++// 이 앱에 화면(route meta.menuCode)이 있고, 권한 메뉴에 포함된 것만. 이름은 서버 메뉴명
++const consoleMenus = computed(() => router.getRoutes()
++  .filter(r => r.path.startsWith('/console/') && r.meta.menuCode)
++  .map(r => ({ path: r.path, menu: session.menus.find(m => m.menuCode === r.meta.menuCode) }))
++  .filter(x => x.menu)
++  .sort((a, b) => (a.menu.sortOrder ?? 0) - (b.menu.sortOrder ?? 0)))
++
++function logout() {
++  clearSession()
++  router.replace('/')
++}
++</script>
++
++<template>
++  <div class="console">
++    <header class="console-bar">
++      <router-link to="/" class="brand">JuProvider</router-link>
++      <nav class="console-nav" data-test="console-nav">
++        <router-link v-for="x in consoleMenus" :key="x.path" :to="x.path">{{ x.menu.menuName }}</router-link>
++      </nav>
++      <span class="user">{{ session.user?.userName }} ({{ session.user?.loginId }})</span>
++      <button type="button" data-test="logout" @click="logout">로그아웃</button>
++    </header>
++    <router-view />
++  </div>
++</template>
++
++<style scoped>
++.console-bar { display: flex; align-items: center; gap: 16px; padding: 8px 16px; border-bottom: 1px solid #dde3ea; background: #fff; font-size: 14px; flex-wrap: wrap; }
++.brand { font-weight: 700; color: #152238; }
++.console-nav { display: flex; gap: 12px; margin-right: auto; flex-wrap: wrap; }
++.console-nav a { color: #475467; padding: 4px 2px; }
++.console-nav a.router-link-active { color: #245fae; font-weight: 600; border-bottom: 2px solid #245fae; }
++.user { color: #475467; }
++button { cursor: pointer; }
++</style>
+diff --git a/juprovider.frontvue/src/layouts/PublicShell.vue b/juprovider.frontvue/src/layouts/PublicShell.vue
+new file mode 100644
+index 0000000..48f17cc
+--- /dev/null
++++ b/juprovider.frontvue/src/layouts/PublicShell.vue
+@@ -0,0 +1,36 @@
++<script setup>
++/*
++ * 공개 홈페이지 레이아웃 (WEB-02). 로그인 없이 볼 수 있다.
++ * 로그인 상태면 "콘솔로 이동", 아니면 "로그인"을 보여준다.
++ */
++import { computed } from 'vue'
++import { isLoggedIn, session } from '../auth/session'
++
++const loggedIn = computed(() => isLoggedIn() && !!session.user)
++</script>
++
++<template>
++  <div class="public">
++    <header class="public-header">
++      <div class="container bar">
++        <router-link to="/" class="brand">JuProvider</router-link>
++        <nav>
++          <router-link v-if="loggedIn" class="btn primary" to="/console" data-test="go-console">콘솔로 이동</router-link>
++          <router-link v-else class="btn primary" to="/login" data-test="go-login">로그인</router-link>
++        </nav>
++      </div>
++    </header>
++    <router-view />
++    <footer class="public-footer">
++      <div class="container">ASDP · JuProvider</div>
++    </footer>
++  </div>
++</template>
++
++<style scoped>
++.public { min-height: 100vh; display: flex; flex-direction: column; }
++.public-header { height: 64px; background: #fff; border-bottom: 1px solid #dde3ea; }
++.bar { height: 100%; display: flex; align-items: center; justify-content: space-between; }
++.brand { font-size: 20px; font-weight: 700; color: #152238; }
++.public-footer { margin-top: auto; padding: 20px 0; color: #667085; font-size: 13px; border-top: 1px solid #dde3ea; background: #fff; }
++</style>
+diff --git a/juprovider.frontvue/src/router/index.js b/juprovider.frontvue/src/router/index.js
+index 76082b6..dc26b86 100644
+--- a/juprovider.frontvue/src/router/index.js
++++ b/juprovider.frontvue/src/router/index.js
+@@ -5,13 +5,25 @@ import ProtocolManagement from '../views/device/ProtocolManagement.vue'
+ import LoginView from '../views/auth/LoginView.vue'
+ import PasswordChangeView from '../views/auth/PasswordChangeView.vue'
+ import ForbiddenView from '../views/auth/ForbiddenView.vue'
++import HomeView from '../views/public/HomeView.vue'
++import PublicShell from '../layouts/PublicShell.vue'
++import ConsoleShell from '../layouts/ConsoleShell.vue'
+ import { hasMenu, isLoggedIn, isPasswordChangeRequired, session } from '../auth/session'
+ import { loadMe } from '../api/authApi'
+ 
+ const routes = [
++  /*
++   * WEB-02: 공개 홈페이지(/) 와 관리 콘솔(/console/**) 분리
++   * - 공개: /, /login (로그인 없이)
++   * - 콘솔: /console/** (로그인 + 비밀번호 변경 완료 + 메뉴 권한)
++   */
+   {
+     path: '/',
+-    redirect: '/console/device/manage'
++    component: PublicShell,
++    meta: { public: true },
++    children: [
++      { path: '', name: 'home', component: HomeView, meta: { public: true } }
++    ]
+   },
+   {
+     path: '/login',
+@@ -20,29 +32,28 @@ const routes = [
+     meta: { public: true }
+   },
+   {
+-    path: '/password-change',
+-    name: 'password-change',
+-    component: PasswordChangeView,
+-    meta: { passwordChange: true }
+-  },
+-  {
+-    path: '/forbidden',
+-    name: 'forbidden',
+-    component: ForbiddenView
+-  },
+-  {
+-    path: '/console/device/manage',
+-    name: 'device-management',
+-    component: DeviceManagement,
+-    // ju_menu M02010000 (장치관리, MNU_ID 15) 권한이 있어야 한다
+-    meta: { menuCode: 'M02010000' }
+-  },
+-  {
+-    path: '/console/device/protocol',
+-    name: 'protocol-management',
+-    component: ProtocolManagement,
+-    // ju_menu M02010100 (프로토콜관리, MNU_URL 동일). 데이터는 모두 Action(MNU_CD)으로 호출
+-    meta: { menuCode: 'M02010100' }
++    path: '/console',
++    component: ConsoleShell,
++    children: [
++      // 콘솔 상단(사용자·로그아웃)을 함께 쓰도록 같은 레이아웃 안에 둔다. 주소는 그대로(/password-change, /forbidden)
++      { path: '/password-change', name: 'password-change', component: PasswordChangeView, meta: { passwordChange: true } },
++      { path: '/forbidden', name: 'forbidden', component: ForbiddenView },
++      { path: '', name: 'console-home', redirect: '/console/device/manage' },
++      {
++        path: 'device/manage',
++        name: 'device-management',
++        component: DeviceManagement,
++        // ju_menu M02010000 (장치관리, MNU_ID 15) 권한이 있어야 한다
++        meta: { menuCode: 'M02010000' }
++      },
++      {
++        path: 'device/protocol',
++        name: 'protocol-management',
++        component: ProtocolManagement,
++        // ju_menu M02010100 (프로토콜관리, MNU_URL 동일). 데이터는 모두 Action(MNU_CD)으로 호출
++        meta: { menuCode: 'M02010100' }
++      }
++    ]
+   }
+ ]
+ 
+@@ -53,14 +64,15 @@ const router = createRouter({
+ 
+ /*
+  * 로그인 가드
+- * - 로그인 전: /login 외에는 로그인 화면으로 (원래 주소는 redirect로 보존)
++ * - 공개(/, /login): 로그인 없이 허용. 로그인 상태에서 /login → /console
++ * - 로그인 전: 그 외(/console/** 등)는 로그인 화면으로 (원래 주소는 redirect로 보존)
+  * - 비밀번호 변경 필요: /password-change 외에는 변경 화면으로
+  * - 새로고침 후에는 /auth/me로 사용자·권한 메뉴를 다시 받는다
+  * - meta.menuCode가 권한 메뉴에 없으면 /forbidden
+  */
+ router.beforeEach(async to => {
+   if (to.meta.public) {
+-    return isLoggedIn() && to.name === 'login' && !isPasswordChangeRequired() ? '/' : true
++    return isLoggedIn() && to.name === 'login' && !isPasswordChangeRequired() ? '/console' : true
+   }
+ 
+   if (!isLoggedIn()) {
+diff --git a/juprovider.frontvue/src/views/auth/LoginView.vue b/juprovider.frontvue/src/views/auth/LoginView.vue
+index b3cfa47..e08646f 100644
+--- a/juprovider.frontvue/src/views/auth/LoginView.vue
++++ b/juprovider.frontvue/src/views/auth/LoginView.vue
+@@ -59,7 +59,7 @@ async function submit() {
+ function safeRedirect(redirect) {
+   return typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//')
+     ? redirect
+-    : '/'
++    : '/console'
+ }
+ </script>
+ 
+diff --git a/juprovider.frontvue/src/views/auth/PasswordChangeView.vue b/juprovider.frontvue/src/views/auth/PasswordChangeView.vue
+index cadcca0..1d9a3dd 100644
+--- a/juprovider.frontvue/src/views/auth/PasswordChangeView.vue
++++ b/juprovider.frontvue/src/views/auth/PasswordChangeView.vue
+@@ -71,7 +71,7 @@ async function submit() {
+ 
+     const redirect = route.query.redirect
+     await router.replace(
+-      typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/'
++      typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/console'
+     )
+   } catch (error) {
+     message.value = errorMessage(error, '비밀번호를 바꾸지 못했습니다.')
+diff --git a/juprovider.frontvue/src/views/public/HomeView.vue b/juprovider.frontvue/src/views/public/HomeView.vue
+new file mode 100644
+index 0000000..3865570
+--- /dev/null
++++ b/juprovider.frontvue/src/views/public/HomeView.vue
+@@ -0,0 +1,32 @@
++<template>
++  <main data-test="home">
++    <section class="hero">
++      <div class="container">
++        <h1>JuProvider</h1>
++        <p>DAQ 장치 연결, 프로토콜, 데이터 수집과 실험을 한곳에서 관리하는 데이터 수집 플랫폼입니다.</p>
++      </div>
++    </section>
++    <section class="section">
++      <div class="container cards">
++        <div class="card">
++          <h3>장치 관리</h3>
++          <p>Network·Serial·가상 장치를 등록하고 연결 상태를 관리합니다.</p>
++        </div>
++        <div class="card">
++          <h3>프로토콜</h3>
++          <p>장치별 송수신 프로토콜과 패킷 구성을 정의합니다.</p>
++        </div>
++        <div class="card">
++          <h3>수집과 실험</h3>
++          <p>Desktop Client가 데이터를 수집하고 서버와 동기화합니다.</p>
++        </div>
++      </div>
++    </section>
++  </main>
++</template>
++
++<style scoped>
++.hero p { font-size: 18px; max-width: 640px; line-height: 1.6; color: #d6deea; }
++.card h3 { margin: 0 0 8px; }
++.card p { margin: 0; color: #475467; line-height: 1.55; }
++</style>
+-- 
+2.43.0
+
