@@ -56,7 +56,7 @@
 - 2026-10-28 08:25 **SEC-S1 로컬 commit `4187280`** (`feature/sec-s1` ← main): Client 체인 sync GET만 허용, Device PUT 제거, Desktop SaveDeviceAsync 제거. 빌드 5종, 테스트 9/9, smoke 25/25, 장치 정의 무변경. 남은 문제: Client 403 메시지 문구
 - 2026-10-28 08:47 **PR-3 로컬 commit `1d1c1ab`** (`feature/protocol-ref`): ProtocolManagement.vue(Action v1만 사용), executeByCode, 권한 비트 버튼, 레거시 protocol 조회 API 제거. 브라우저 smoke: 필드 오류 표시(REQUIRED·INVALID_VALUE·DUPLICATE), 기본 프로토콜 자동생성, 409 무변경, 조회자 버튼 숨김·서버 403. 남은 문제: 선택 항목 비우기 불가(COALESCE)
 - 2026-10-28 08:52 사용자 판단: PR-1 승인, PR-2 기능 PASS(최종 코드 검토 문서 없음), PR-3 조건부 승인, SEC-S1 통합 대기, main 금지 유지. 보완 과제 5건 + SYSINFO-02 계획 요청
-- 2026-10-28 09:18 PR-3 최종 확인 (`1d1c1ab`, PC-A): 빌드 5종, 테스트 23/23, API smoke 12/12, CRUD 최종 39항목 PASS. 수정 불필요 → commit 없음
+- 2026-10-28 09:18 PR-3 최종 확인 (`1d1c1ab`, PC-A): 빌드 5종, 테스트 23/23, API smoke 12/12, CRUD 최종 35항목 PASS. 수정 불필요 → commit 없음
 - 2026-10-28 09:10 SYSINFO-02 계획 업로드 (A1 빈 문자열=지우기 계약, A2 PTL_CD 한계 기록, A3 403 문구 수정 계획, A4 smoke 재실행은 통합 검증에서, A5 통합·06 적용 절차) — 코드 수정 없음
 - 2026-10-28 08:30 SYSINFO-01 사전 조사 업로드: 버전 정보 노출·스키마 버전 테이블 없음, Device 전체 동기화만(비활성 장치 로컬 잔존), 장치 설정 전역 1벌(ClientId 구분 없음), Client→서버 장치 PUT 경로 존재(미호출), template.accdb 저장소 없음 (코드 수정 없음)
 - 2026-10-28 07:53 사용자: PC-B 서버 정상 확인, Client는 template.accdb 없음(환경 문제). 오늘은 PC-A 작업, PC-B는 저녁에 미커밋 삭제·환경 정렬
