@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자·Claude | **18081 미리보기 실행 중** (PC-A, `feature/web-01@60bc008` WAR + 테스트 DB `juprovider_preview`(실제 DB 사본+06)). 확인 후 `run_preview_stop.cmd`로 종료·DB 삭제 |
 | 사용자 | **WEB-02/03 결과 검토**: [reviews/claude/2026-10-28_web-02-03_result.md](../reviews/claude/2026-10-28_web-02-03_result.md) — `feature/web-01` 로컬 commit `60bc008` (← protocol-ref `1d1c1ab`, push 없음), 공개 홈 `/`·콘솔 `/console/**` 분리, 자동 54/54 + 브라우저(복귀 URL·로그아웃·조회자·비밀번호 변경 필수) PASS. clearable은 Action Contract v2 후속 과제 |
 | 사용자 | **PR-3 최종 확인 PASS (FAIL 0, 코드 수정 없음)**: [reviews/claude/2026-10-28_pr3-final-check.md](../reviews/claude/2026-10-28_pr3-final-check.md) — API smoke 12/12, 권한·자동생성·패킷 교체·논리삭제/재사용·참조 409 전부 PASS. 결정 대기: 선택 텍스트 지우기 최소 수정안(6파일, 계약 v1 유지) |
 | 사용자·ChatGPT | **SYSINFO-02 단계별 계획 + 보완 과제 A1~A5 검토·승인 (G1)**: [reviews/claude/2026-10-28_sysinfo-02_plan.md](../reviews/claude/2026-10-28_sysinfo-02_plan.md) — 서버 build-info·`/api/system/version`, migration 07 `ju_schema_version`(기존 이력 검증 후 기록), Desktop 공통 Version, 빈 template.accdb·client.sample.json, 통합 절차(I-1~I-7), 결정 S2-Q1~Q5. **제품 코드 수정 없음, 승인 대기** |
