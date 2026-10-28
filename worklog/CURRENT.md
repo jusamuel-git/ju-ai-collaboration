@@ -1,5 +1,9 @@
 # 지금 할 일 (2026-10-28 08:30 기준 — 오늘 작업 PC는 PC-A, PC-B는 저녁 정리)
 
+> **우선 작업 (10/28 09:12 사용자 지시): 금요일(10/30) 17시까지 Protocol CRUD 안정화.** 신규 기능 확대 중단.
+> 기준: PR-1 `02ab18c` · PR-2 `157635a` · PR-3 `1d1c1ab` (`feature/protocol-ref`), SEC-S1 `4187280` (별도 브랜치).
+> 보류(금요일 이후): SYSINFO-02(계획 검토 완료), SYNC-01, Designer, Updater. main merge/push·실제 DB 06 적용은 사용자 승인 전 금지.
+
 단계 계획: v1.3 — ENV-0 → JU-0A → JU-0B → SYS-01 → JU-1A → JU-1B → JU-1C ✅ → JU-1c Desktop ✅ → **Protocol Reference Implementation — PR-1 `02ab18c` + PR-2 `157635a` 원격 브랜치 `feature/protocol-ref` (**PC-B 재현 PASS**), PR-3 보류**
 
 ## 대기 중
