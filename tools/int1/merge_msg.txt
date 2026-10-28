@@ -1,0 +1,4 @@
+merge: integrate SEC-S1 (client device write path block) into web-01
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자·Claude | **18081 미리보기 실행 중** (PC-A, `feature/web-01@60bc008` WAR + 테스트 DB `juprovider_preview`(실제 DB 사본+06)). 확인 후 `run_preview_stop.cmd`로 종료·DB 삭제 |
+| 사용자 | **INT-1 통합 PASS → 8081 반영 승인 대기 (G4 실제 DB 06, G5 main push·Jenkins)**: [reviews/claude/2026-10-28_int1_result.md](../reviews/claude/2026-10-28_int1_result.md) — `feature/integration-1` @ `14d1ab9` (PR-1~3 + WEB-02/03 + SEC-S1 + SEC-S1b), 빌드 5종·테스트 27/27·회귀 75항목 FAIL 0 |
 | 사용자 | **WEB-02/03 결과 검토**: [reviews/claude/2026-10-28_web-02-03_result.md](../reviews/claude/2026-10-28_web-02-03_result.md) — `feature/web-01` 로컬 commit `60bc008` (← protocol-ref `1d1c1ab`, push 없음), 공개 홈 `/`·콘솔 `/console/**` 분리, 자동 54/54 + 브라우저(복귀 URL·로그아웃·조회자·비밀번호 변경 필수) PASS. clearable은 Action Contract v2 후속 과제 |
 | 사용자 | **PR-3 최종 확인 PASS (FAIL 0, 코드 수정 없음)**: [reviews/claude/2026-10-28_pr3-final-check.md](../reviews/claude/2026-10-28_pr3-final-check.md) — API smoke 12/12, 권한·자동생성·패킷 교체·논리삭제/재사용·참조 409 전부 PASS. 결정 대기: 선택 텍스트 지우기 최소 수정안(6파일, 계약 v1 유지) |
 | 사용자·ChatGPT | **SYSINFO-02 단계별 계획 + 보완 과제 A1~A5 검토·승인 (G1)**: [reviews/claude/2026-10-28_sysinfo-02_plan.md](../reviews/claude/2026-10-28_sysinfo-02_plan.md) — 서버 build-info·`/api/system/version`, migration 07 `ju_schema_version`(기존 이력 검증 후 기록), Desktop 공통 Version, 빈 template.accdb·client.sample.json, 통합 절차(I-1~I-7), 결정 S2-Q1~Q5. **제품 코드 수정 없음, 승인 대기** |
@@ -59,6 +59,8 @@
 - 2026-10-28 08:47 **PR-3 로컬 commit `1d1c1ab`** (`feature/protocol-ref`): ProtocolManagement.vue(Action v1만 사용), executeByCode, 권한 비트 버튼, 레거시 protocol 조회 API 제거. 브라우저 smoke: 필드 오류 표시(REQUIRED·INVALID_VALUE·DUPLICATE), 기본 프로토콜 자동생성, 409 무변경, 조회자 버튼 숨김·서버 403. 남은 문제: 선택 항목 비우기 불가(COALESCE)
 - 2026-10-28 08:52 사용자 판단: PR-1 승인, PR-2 기능 PASS(최종 코드 검토 문서 없음), PR-3 조건부 승인, SEC-S1 통합 대기, main 금지 유지. 보완 과제 5건 + SYSINFO-02 계획 요청
 - 2026-10-28 09:25 사용자: Protocol CRUD 완료 상태 유지, clearable은 Action Contract v2 설계 시 처리(후속). 새 작업 WEB-01 홈페이지/콘솔 분리
+- 2026-10-28 09:47 18081 미리보기(web-01) 사용자 확인 OK
+- 2026-10-28 09:55 **INT-1 `feature/integration-1` @ `14d1ab9`** (로컬): web-01 + merge sec-s1(충돌 없음) + SEC-S1b 403 문구. 27/27, 회귀 75 PASS. 미리보기 서버·DB 정리
 - 2026-10-28 09:41 **WEB-02/03 로컬 commit `60bc008`** (`feature/web-01`): Vue 7파일, 빌드 5종·테스트 23/23·Protocol CRUD 회귀 35/35·브라우저 인증 흐름 PASS
 - 2026-10-28 09:18 PR-3 최종 확인 (`1d1c1ab`, PC-A): 빌드 5종, 테스트 23/23, API smoke 12/12, CRUD 최종 35항목 PASS. 수정 불필요 → commit 없음
 - 2026-10-28 09:10 SYSINFO-02 계획 업로드 (A1 빈 문자열=지우기 계약, A2 PTL_CD 한계 기록, A3 403 문구 수정 계획, A4 smoke 재실행은 통합 검증에서, A5 통합·06 적용 절차) — 코드 수정 없음

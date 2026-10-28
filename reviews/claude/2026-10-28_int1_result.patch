@@ -1,0 +1,98 @@
+From 748937baf5f3990c597583d7f21aa0a354c069e7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 09:49:51 +0900
+Subject: [PATCH] fix(security): plain 403 message for client authentication
+ (SEC-S1b)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- JsonSecurityErrorHandler: CLIENT authority is not a password-change case
+  -> "권한이 없습니다." / FORBIDDEN (user JWT behaviour unchanged)
+- Test: client / user without PW_OK / user with PW_OK
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../security/JsonSecurityErrorHandler.java    |  5 ++
+ .../JsonSecurityErrorHandlerTest.java         | 51 +++++++++++++++++++
+ 2 files changed, 56 insertions(+)
+ create mode 100644 juprovider.backend/src/test/java/com/asdp/juprovider/security/JsonSecurityErrorHandlerTest.java
+
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
+index e60e2ee..4b5b758 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/security/JsonSecurityErrorHandler.java
+@@ -33,7 +33,12 @@ public class JsonSecurityErrorHandler implements AuthenticationEntryPoint, Acces
+             HttpServletResponse response,
+             AccessDeniedException accessDeniedException) throws IOException {
+         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
++        // Desktop Client 인증(CLIENT 권한)에는 PASSWORD_OK가 원래 없다 → 비밀번호 문구 대상 아님 (SEC-S1b)
++        boolean client = authentication != null
++                && authentication.getAuthorities().stream()
++                        .anyMatch(a -> ClientKeyAuthenticationFilter.CLIENT_AUTHORITY.equals(a.getAuthority()));
+         boolean passwordChangeRequired = authentication != null
++                && !client
+                 && authentication.getAuthorities().stream()
+                         .noneMatch(a -> UserTokenAuthenticationConverter.AUTHORITY_PASSWORD_OK
+                                 .equals(a.getAuthority()));
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/security/JsonSecurityErrorHandlerTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/security/JsonSecurityErrorHandlerTest.java
+new file mode 100644
+index 0000000..bf3277c
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/security/JsonSecurityErrorHandlerTest.java
+@@ -0,0 +1,51 @@
++package com.asdp.juprovider.security;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Test;
++import org.springframework.mock.web.MockHttpServletRequest;
++import org.springframework.mock.web.MockHttpServletResponse;
++import org.springframework.security.access.AccessDeniedException;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.security.core.authority.SimpleGrantedAuthority;
++import org.springframework.security.core.context.SecurityContextHolder;
++
++/** SEC-S1b: 403 응답 문구 (Client / 비밀번호 미변경 사용자 / 일반 사용자) */
++class JsonSecurityErrorHandlerTest {
++
++    @AfterEach
++    void clear() {
++        SecurityContextHolder.clearContext();
++    }
++
++    private String forbiddenBodyFor(String... authorities) throws Exception {
++        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
++                "p", null, java.util.Arrays.stream(authorities).map(SimpleGrantedAuthority::new).toList()));
++        MockHttpServletResponse response = new MockHttpServletResponse();
++        new JsonSecurityErrorHandler().handle(new MockHttpServletRequest(), response, new AccessDeniedException("x"));
++        assertEquals(403, response.getStatus());
++        return response.getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
++    }
++
++    @Test
++    void clientGetsPlainForbidden() throws Exception {
++        String body = forbiddenBodyFor(ClientKeyAuthenticationFilter.CLIENT_AUTHORITY);
++        assertTrue(body.contains("권한이 없습니다."), body);
++        assertTrue(body.contains("\"code\":\"FORBIDDEN\""), body);
++    }
++
++    @Test
++    void userWithoutPasswordOkKeepsPasswordMessage() throws Exception {
++        String body = forbiddenBodyFor("ROLE_USER");
++        assertTrue(body.contains("비밀번호를 먼저 변경해야 합니다."), body);
++    }
++
++    @Test
++    void userWithPasswordOkGetsPlainForbidden() throws Exception {
++        String body = forbiddenBodyFor(UserTokenAuthenticationConverter.AUTHORITY_PASSWORD_OK);
++        assertTrue(body.contains("권한이 없습니다."), body);
++    }
++}
+-- 
+2.43.0
+

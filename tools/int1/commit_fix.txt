@@ -1,0 +1,8 @@
+fix(security): plain 403 message for client authentication (SEC-S1b)
+
+- JsonSecurityErrorHandler: CLIENT authority is not a password-change case
+  -> "권한이 없습니다." / FORBIDDEN (user JWT behaviour unchanged)
+- Test: client / user without PW_OK / user with PW_OK
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
