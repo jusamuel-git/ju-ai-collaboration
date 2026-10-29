@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| ChatGPT | **수집 경로 설계 검토 (Protocol → Device → Data)**: [reviews/claude/2026-10-30_collect-path_design.md](../reviews/claude/2026-10-30_collect-path_design.md) — 과거 파서·연결관리 계약 분석, 공통 장치 인터페이스(Transport/Framer/Session/Node), 역할×교환방식 프로토콜 모델, 채널→논리 Data→Runtime 흐름, 단계 C1~C6(C1~C3은 서버·DB 무변경), 결정 CP-Q1~Q6. 설계만 |
+| ChatGPT | **C0 공통 계약 설계 검토**: [reviews/claude/2026-10-30_c0-common-contract_design.md](../reviews/claude/2026-10-30_c0-common-contract_design.md) — Gateway(Link 1개·하위 Session N개, TRANSPARENT/ADDRESSED), Command Scheduler(직렬 기본·응답 매칭·타임아웃·취소), Role(복수)×Pattern, Frame/Parse Rule 분리(JSON v1, 바이너리·가변 길이), 범용 시뮬레이터+프로파일, Device·Channel·LogicalData 식별자 분리, 기존 계약 영향표, 결정 C0-Q1~Q8. 선행: [수집 경로 설계](../reviews/claude/2026-10-30_collect-path_design.md) 조건부 승인·구현 보류 |
 | ChatGPT | **과거 소스 ZIP 조사 구조 검토**: [reviews/claude/2026-10-30_legacy-zip_survey.md](../reviews/claude/2026-10-30_legacy-zip_survey.md) — `backup\juprovider-backup.zip`(10-16, 823파일) 1개. 기능 7개 영역 비교, 재사용 후보 5개(모두 참조 후 재작성), 미사용 항목, 결정 L-Q1~Q5. 과거 기능은 모두 동작 미검증. 조사만(코드·DB 변경 없음) |
 | 사용자 | **INT-1 PASS 인정 (10/28 09:59), 배포 보류 — 금요일(10/30) 17시 이후 G4(실제 DB 06)·G5(main push·Jenkins) 승인 단계**: [결과](../reviews/claude/2026-10-28_int1_result.md) · [배포 체크리스트](../reviews/claude/2026-10-28_deploy_checklist.md). `feature/integration-1` @ `14d1ab9` 로컬 유지, 제품 코드 추가 수정 중단, 8081 기존 상태 유지 |
 | 사용자 | **WEB-02/03 결과 검토**: [reviews/claude/2026-10-28_web-02-03_result.md](../reviews/claude/2026-10-28_web-02-03_result.md) — `feature/web-01` 로컬 commit `60bc008` (← protocol-ref `1d1c1ab`, push 없음), 공개 홈 `/`·콘솔 `/console/**` 분리, 자동 54/54 + 브라우저(복귀 URL·로그아웃·조회자·비밀번호 변경 필수) PASS. clearable은 Action Contract v2 후속 과제 |
@@ -40,6 +40,7 @@
 
 ## 최근 확인
 - 2026-10-26 ENV-0 · JU-0A · JU-0B · SYS-01 · SEC-01 완료 (상세: [2026-10-26.md](2026-10-26.md))
+- 2026-10-30 08:45 사용자: 수집 경로 설계 조건부 승인·구현 보류, C0 공통 계약 보완 요청 → 09:10 C0 설계 업로드 (설계만)
 - 2026-10-30 08:50 수집 경로 설계 업로드 (설계만, 코드·DB 변경 없음). 사용자 방향: 현재 소스 기준, Protocol→Device→Data 우선, Experiment Data 별도, Viewer·Designer 선택형
 - 2026-10-30 08:20 과거 JuProvider 소스 ZIP 조사 업로드 (조사만). 과거 application.yml에 평문 기본 비밀번호 있음 → 값 기록 안 함, 메일 비밀번호 변경 여부 결정 요청
 - 2026-10-27 09:34 실제 juprovider DB migration 05 적용 (백업 `C:\MyData\MyDev\backup\juprovider_20261027_0934_before_05.sql`)
