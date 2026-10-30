@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자 | **C1 PASS** [결과](../reviews/claude/2026-10-30_c1_result.md) — `feature/collect-c1` @ `bcbd6f5` (← main), Desktop 테스트 63/63, push 없음 |
+| 사용자 | **C1 PASS** [결과](../reviews/claude/2026-10-30_c1_result.md) — `feature/collect-c1` @ `5723b03` (C1 + C1b 체크섬 from/to), Desktop 테스트 69/69, push 없음. 다음: C2 진행 결정 대기 |
 | ChatGPT | **과거 소스 ZIP 조사 구조 검토**: [reviews/claude/2026-10-30_legacy-zip_survey.md](../reviews/claude/2026-10-30_legacy-zip_survey.md) — `backup\juprovider-backup.zip`(10-16, 823파일) 1개. 기능 7개 영역 비교, 재사용 후보 5개(모두 참조 후 재작성), 미사용 항목, 결정 L-Q1~Q5. 과거 기능은 모두 동작 미검증. 조사만(코드·DB 변경 없음) |
 | 사용자 | **INT-1 PASS 인정 (10/28 09:59), 배포 보류 — 금요일(10/30) 17시 이후 G4(실제 DB 06)·G5(main push·Jenkins) 승인 단계**: [결과](../reviews/claude/2026-10-28_int1_result.md) · [배포 체크리스트](../reviews/claude/2026-10-28_deploy_checklist.md). `feature/integration-1` @ `14d1ab9` 로컬 유지, 제품 코드 추가 수정 중단, 8081 기존 상태 유지 |
 | 사용자 | **WEB-02/03 결과 검토**: [reviews/claude/2026-10-28_web-02-03_result.md](../reviews/claude/2026-10-28_web-02-03_result.md) — `feature/web-01` 로컬 commit `60bc008` (← protocol-ref `1d1c1ab`, push 없음), 공개 홈 `/`·콘솔 `/console/**` 분리, 자동 54/54 + 브라우저(복귀 URL·로그아웃·조회자·비밀번호 변경 필수) PASS. clearable은 Action Contract v2 후속 과제 |

@@ -1,0 +1,8 @@
+fix(desktop): checksum calculation range from/to (C1b)
+
+- ChecksumRule(Type, From, To): range over data part, To<=0 counts from end
+- Invalid range rejects the frame ("체크섬 범위 오류"); rule reader validates to>=from
+- Tests: from/to range, invalid range, TryRange, rule validation
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

@@ -1,0 +1,5 @@
+desktop/lib/juprovider.lib.protocol/Framing/FramerBase.cs
+desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs
+desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs
+desktop/tests/juprovider.tests.protocol/FramerTests.cs
+desktop/tests/juprovider.tests.protocol/RuleTests.cs
