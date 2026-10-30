@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자 | **C3 PASS** [결과](../reviews/claude/2026-10-30_c3_result.md) — `feature/collect-c3` @ `ad9fda3` (Scheduler·Mapper·Session), Desktop 테스트 144/144, 빌드 5종 PASS, push 없음. 실장비 최종 PASS(STOP 먼저 루틴 + TX_ONLY 간격 200 ms, 케이블 분리·재연결 후 데이터 OK). 다음: C4 착수 결정 (초기화 루틴·간격·수신 규칙 제안 포함) |
+| 사용자 | **C4 PASS** [결과](../reviews/claude/2026-10-30_c4_result.md) — `feature/collect-c4` @ `d3a560a` (내려받기 API·초기화 루틴·명령 간격·시작 문자), 서버 13/13, Desktop 175/175, 빌드 5종 PASS, 실장비 측정 중 분리·재연결 PASS, DB 변경·push 없음. 다음: 검토 대기 |
 | ChatGPT | **과거 소스 ZIP 조사 구조 검토**: [reviews/claude/2026-10-30_legacy-zip_survey.md](../reviews/claude/2026-10-30_legacy-zip_survey.md) — `backup\juprovider-backup.zip`(10-16, 823파일) 1개. 기능 7개 영역 비교, 재사용 후보 5개(모두 참조 후 재작성), 미사용 항목, 결정 L-Q1~Q5. 과거 기능은 모두 동작 미검증. 조사만(코드·DB 변경 없음) |
 | 사용자 | **INT-1 PASS 인정 (10/28 09:59), 배포 보류 — 금요일(10/30) 17시 이후 G4(실제 DB 06)·G5(main push·Jenkins) 승인 단계**: [결과](../reviews/claude/2026-10-28_int1_result.md) · [배포 체크리스트](../reviews/claude/2026-10-28_deploy_checklist.md). `feature/integration-1` @ `14d1ab9` 로컬 유지, 제품 코드 추가 수정 중단, 8081 기존 상태 유지 |
 | 사용자 | **WEB-02/03 결과 검토**: [reviews/claude/2026-10-28_web-02-03_result.md](../reviews/claude/2026-10-28_web-02-03_result.md) — `feature/web-01` 로컬 commit `60bc008` (← protocol-ref `1d1c1ab`, push 없음), 공개 홈 `/`·콘솔 `/console/**` 분리, 자동 54/54 + 브라우저(복귀 URL·로그아웃·조회자·비밀번호 변경 필수) PASS. clearable은 Action Contract v2 후속 과제 |
@@ -39,6 +39,7 @@
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
 
 ## 최근 확인
+- 2026-10-30 11:42 C4 로컬 commit `d3a560a` + 실장비 회귀 PASS (루틴 자동 2회, 재연결 후 150값)
 - 2026-10-30 11:17 C3 실장비 최종 PASS: STOP 먼저 + 간격 200 ms → 재연결 후 150값, 원시 수신 정상, 144/144
 - 2026-10-30 11:06 C3 실장비: 재연결 OK, 재연결 후 데이터 0 → 원인 명령 간격(0 ms 실패, 200 ms 성공), 코드 수정 없음
 - 2026-10-30 10:52 C3 로컬 commit `ad9fda3` (M1–M6, S1–S7, D1–D8 + 세션 통합, 144/144)

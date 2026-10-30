@@ -1,0 +1,2033 @@
+From 4513eef83627ddbbf4d296ab38bb466d0a58d37d Mon Sep 17 00:00:00 2001
+From: JU <jusamuel@gmail.com>
+Date: Fri, 30 Oct 2026 11:43:23 +0900
+Subject: [PATCH] feat(collect): protocol/data-tag sync API, init routine,
+ command gap, frame start (C4)
+
+Server (read-only, no DB change)
+- GET /api/core/sync/protocols[/{ptlGrpCd}], GET /api/core/sync/data-tags?devCd= (client key chain)
+- Response {revision (content SHA-256), items, removed}; groups -> protocols -> packets, data tags by device
+
+Desktop
+- Sync models + JuProviderApiClient.GetProtocolGroupsAsync / GetDataTagsAsync
+- CollectionProfile (per protocol group, desktop resource until DB columns): frame rule, command gap,
+  init routine, protocol overlays; built-in GTEC (STOP -> check -> sensor info -> mode, 200 ms gap, '{' start)
+- CollectionPlanBuilder: server definitions + profile -> DeviceSession config, TAG_ID=CH<n> mapping
+- DeviceSession: init routine on connect/reconnect (Initializing state, external commands wait)
+- Frame rule start option: drop noise before start, drop broken frame when next start arrives before end
+- Tests: frame start/noise, profile/plan, init routine, gap, reconnect regression on GTEC-like device; server service test
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../Api/JuProviderApiClient.cs                |  56 +++
+ .../juprovider.lib.data.csproj                |   2 +
+ .../Framing/Framers.cs                        |  59 ++-
+ .../Rules/FrameRule.cs                        |   6 +
+ .../Rules/RuleReader.cs                       |   3 +-
+ .../Session/DeviceSession.cs                  | 115 ++++-
+ .../Sync/CollectionPlan.cs                    | 148 +++++++
+ .../Sync/CollectionProfile.cs                 | 217 ++++++++++
+ .../Sync/SyncModels.cs                        |  53 +++
+ .../CollectionTests.cs                        | 395 ++++++++++++++++++
+ .../FrameStartTests.cs                        |  85 ++++
+ .../juprovider/JuProviderApplication.java     |   3 +-
+ .../controller/ProtocolSyncController.java    |  53 +++
+ .../protocolsync/ProtocolSyncServiceTest.java | 142 +++++++
+ .../protocolsync/dao/ProtocolSyncDao.java     |  23 +
+ .../core/protocolsync/dto/DataTagSync.java    |  18 +
+ .../protocolsync/dto/ProtocolGroupSync.java   |  14 +
+ .../protocolsync/dto/ProtocolPacketSync.java  |  14 +
+ .../core/protocolsync/dto/ProtocolSync.java   |  14 +
+ .../core/protocolsync/dto/SyncResult.java     |  12 +
+ .../service/ProtocolSyncService.java          | 170 ++++++++
+ .../resources/mapper/ProtocolSyncMapper.xml   |  98 +++++
+ 22 files changed, 1687 insertions(+), 13 deletions(-)
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Sync/CollectionProfile.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/CollectionTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/FrameStartTests.cs
+ create mode 100644 juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java
+ create mode 100644 juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataTagSync.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolPacketSync.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/SyncResult.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java
+ create mode 100644 juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml
+
+diff --git a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+index a295a5b..a02b5bf 100644
+--- a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
++++ b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+@@ -2,6 +2,7 @@
+ using System.Text.Json;
+ 
+ using JuProvider.Lib.Device.Models;
++using JuProvider.Lib.Protocol.Sync;
+ 
+ namespace JuProvider.Lib.Data.Api;
+ 
+@@ -135,6 +136,61 @@ public sealed class JuProviderApiClient : IDisposable
+             );
+     }
+ 
++    /*
++     * Server -> Client (C4)
++     * 프로토콜 그룹·프로토콜·패킷 정의. ptlGrpCd 가 있으면 그 그룹만 (없으면 null).
++     */
++    public async Task<SyncResult<ProtocolGroupSync>?> GetProtocolGroupsAsync(
++        string? ptlGrpCd = null,
++        CancellationToken cancellationToken = default
++    )
++    {
++        string path = string.IsNullOrWhiteSpace(ptlGrpCd)
++            ? "api/core/sync/protocols"
++            : $"api/core/sync/protocols/{Uri.EscapeDataString(ptlGrpCd.Trim())}";
++
++        using HttpResponseMessage response =
++            await _httpClient.GetAsync(path, cancellationToken);
++
++        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
++        {
++            return null;
++        }
++
++        response.EnsureSuccessStatusCode();
++
++        return await response.Content
++            .ReadFromJsonAsync<SyncResult<ProtocolGroupSync>>(
++                _jsonOptions,
++                cancellationToken
++            );
++    }
++
++    /*
++     * Server -> Client (C4)
++     * 장치의 데이터 태그 (ju_data_group.DEV_CD 기준). devCd 가 없으면 전체.
++     */
++    public async Task<SyncResult<DataTagSync>> GetDataTagsAsync(
++        string? devCd = null,
++        CancellationToken cancellationToken = default
++    )
++    {
++        string path = string.IsNullOrWhiteSpace(devCd)
++            ? "api/core/sync/data-tags"
++            : $"api/core/sync/data-tags?devCd={Uri.EscapeDataString(devCd.Trim())}";
++
++        using HttpResponseMessage response =
++            await _httpClient.GetAsync(path, cancellationToken);
++
++        response.EnsureSuccessStatusCode();
++
++        return await response.Content
++            .ReadFromJsonAsync<SyncResult<DataTagSync>>(
++                _jsonOptions,
++                cancellationToken
++            ) ?? new SyncResult<DataTagSync>("", [], []);
++    }
++
+     /*
+      * Client -> Server
+      * Device 저장
+diff --git a/desktop/lib/juprovider.lib.data/juprovider.lib.data.csproj b/desktop/lib/juprovider.lib.data/juprovider.lib.data.csproj
+index 9d874bc..ed77cfc 100644
+--- a/desktop/lib/juprovider.lib.data/juprovider.lib.data.csproj
++++ b/desktop/lib/juprovider.lib.data/juprovider.lib.data.csproj
+@@ -13,6 +13,8 @@
+ 
+   <ItemGroup>
+     <ProjectReference Include="..\juprovider.lib.device\juprovider.lib.device.csproj" />
++    <!-- C4: 프로토콜·데이터 태그 내려받기 모델 -->
++    <ProjectReference Include="..\juprovider.lib.protocol\juprovider.lib.protocol.csproj" />
+   </ItemGroup>
+ 
+ </Project>
+diff --git a/desktop/lib/juprovider.lib.protocol/Framing/Framers.cs b/desktop/lib/juprovider.lib.protocol/Framing/Framers.cs
+index 75c2ae2..fca7380 100644
+--- a/desktop/lib/juprovider.lib.protocol/Framing/Framers.cs
++++ b/desktop/lib/juprovider.lib.protocol/Framing/Framers.cs
+@@ -2,25 +2,56 @@ using JuProvider.Lib.Protocol.Rules;
+ 
+ namespace JuProvider.Lib.Protocol.Framing;
+ 
+-/// <summary>끝 구분자. Body = 구분자 앞부분. 빈 프레임은 건너뜀.</summary>
++/// <summary>
++/// 끝 구분자. Body = 구분자 앞부분. 빈 프레임은 건너뜀.
++/// Start 가 있으면(C4) 시작 문자 앞 잡음 제거, 끝 없이 다음 시작 문자가 오면 깨진 조각 제거(거부 기록).
++/// </summary>
+ public sealed class DelimiterFramer(FrameRule rule) : FramerBase(rule)
+ {
+     protected override bool TryTake(out Frame? frame)
+     {
+         frame = null;
+         byte[] end = Rule.End;
+-        int at = IndexOf(Buffer, end);
+-        if (at < 0) return false;
++        byte[]? start = Rule.Start is { Length: > 0 } s ? s : null;
++
++        if (start is null)
++        {
++            int at = IndexOf(Buffer, end, 0);
++            if (at < 0) return false;
++
++            byte[] raw = TakeFront(at + end.Length);
++            byte[] body = raw[..at];
++            if (body.Length > 0) frame = new Frame(raw, body);
++            return true;
++        }
++
++        int first = IndexOf(Buffer, start, 0);
++        if (first < 0)
++        {
++            int keep = PartialStartSuffix(Buffer, start);
++            int drop = Buffer.Count - keep;
++            if (drop > 0) Reject("시작 문자 전 잡음", TakeFront(drop));
++            return false;
++        }
++        if (first > 0) Reject("시작 문자 전 잡음", TakeFront(first));
++
++        int endAt = IndexOf(Buffer, end, start.Length);
++        int next = IndexOf(Buffer, start, start.Length);
++        if (next >= 0 && (endAt < 0 || next < endAt))
++        {
++            Reject("끝 구분자 없이 다음 시작 문자 (깨진 프레임)", TakeFront(next));
++            return true;
++        }
++        if (endAt < 0) return false;
+ 
+-        byte[] raw = TakeFront(at + end.Length);
+-        byte[] body = raw[..at];
+-        if (body.Length > 0) frame = new Frame(raw, body);
++        byte[] whole = TakeFront(endAt + end.Length);
++        frame = new Frame(whole, whole[..endAt]);
+         return true;
+     }
+ 
+-    private static int IndexOf(List<byte> buffer, byte[] pattern)
++    private static int IndexOf(List<byte> buffer, byte[] pattern, int from)
+     {
+-        for (int i = 0; i <= buffer.Count - pattern.Length; i++)
++        for (int i = from; i <= buffer.Count - pattern.Length; i++)
+         {
+             int j = 0;
+             while (j < pattern.Length && buffer[i + j] == pattern[j]) j++;
+@@ -28,6 +59,18 @@ public sealed class DelimiterFramer(FrameRule rule) : FramerBase(rule)
+         }
+         return -1;
+     }
++
++    /// <summary>버퍼 끝이 시작 문자의 앞부분과 같으면 그 길이 (다음 조각에서 완성될 수 있으므로 남긴다)</summary>
++    private static int PartialStartSuffix(List<byte> buffer, byte[] start)
++    {
++        for (int k = Math.Min(start.Length - 1, buffer.Count); k > 0; k--)
++        {
++            bool match = true;
++            for (int j = 0; j < k && match; j++) match = buffer[buffer.Count - k + j] == start[j];
++            if (match) return k;
++        }
++        return 0;
++    }
+ }
+ 
+ /// <summary>
+diff --git a/desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs b/desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs
+index d24c90f..049f4c6 100644
+--- a/desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs
++++ b/desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs
+@@ -60,6 +60,12 @@ public sealed record FrameRule
+ 
+     public byte[] End { get; init; } = [0x0D, 0x0A];
+ 
++    /// <summary>
++    /// Delim: 프레임 시작 문자(선택, C4). 있으면 시작 문자 앞의 바이트는 잡음으로 버리고,
++    /// 끝 구분자 전에 다음 시작 문자가 오면 앞의 깨진 조각을 버린다. Body 에는 시작 문자가 포함된다.
++    /// </summary>
++    public byte[]? Start { get; init; }
++
+     public byte Stx { get; init; } = 0x02;
+     public byte Etx { get; init; } = 0x03;
+     public byte? Escape { get; init; }
+diff --git a/desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs b/desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs
+index 3d8d444..db9eea8 100644
+--- a/desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs
++++ b/desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs
+@@ -65,7 +65,8 @@ public static class RuleReader
+             "DELIM" => new FrameRule
+             {
+                 Kind = FrameKind.Delim,
+-                End = Bytes(Str(r, "end") ?? "[CR][LF]", "end", minLength: 1)
++                End = Bytes(Str(r, "end") ?? "[CR][LF]", "end", minLength: 1),
++                Start = Str(r, "start") is { } st ? Bytes(st, "start", minLength: 1) : null
+             },
+             "STXETX" => new FrameRule
+             {
+diff --git a/desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs b/desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs
+index be93f7e..1d02c1e 100644
+--- a/desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs
++++ b/desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs
+@@ -32,6 +32,8 @@ public sealed record ProtocolDefinition
+ public enum DeviceSessionState
+ {
+     Created,
++    /// <summary>연결·재연결 직후 초기화 루틴 실행 중 (C4). 외부 명령은 루틴이 끝날 때까지 기다린다</summary>
++    Initializing,
+     Ready,
+     /// <summary>연속 타임아웃으로 Link 의심. 재연결 판단은 Link 소유자</summary>
+     Degraded,
+@@ -40,6 +42,21 @@ public enum DeviceSessionState
+     Stopped
+ }
+ 
++/// <summary>
++/// 세션 설정 (C4). InitRoutine: 연결·재연결 때마다 순서대로 실행할 프로토콜(예: GTEC STOP → 장치확인 → 센서정보 → 모드).
++/// InitDelayMs: Link 열린 뒤 루틴 시작 전 대기(장비 기동 시간).
++/// </summary>
++public sealed record DeviceSessionOptions(IReadOnlyList<string>? InitRoutine = null, int InitDelayMs = 500)
++{
++    public static DeviceSessionOptions Default { get; } = new();
++}
++
++/// <summary>초기화 루틴 1회 결과. Completed=false 면 Link 끊김·중지로 중단됨</summary>
++public sealed record InitRoutineResult(bool Completed, IReadOnlyList<KeyValuePair<string, CommandResult>> Steps)
++{
++    public bool AllOk => Completed && Steps.All(s => s.Value.Ok);
++}
++
+ public sealed class ValuesEventArgs(string ptlCd, IReadOnlyList<LogicalValue> values) : EventArgs
+ {
+     public string PtlCd { get; } = ptlCd;
+@@ -61,12 +78,16 @@ public sealed class DeviceSession : IAsyncDisposable
+     private readonly List<ProtocolDefinition> _streams;
+     private readonly Dictionary<string, IFrameParser> _parsers = new(StringComparer.Ordinal);
+     private readonly SchedulerOptions _schedulerOptions;
++    private readonly DeviceSessionOptions _options;
+     private readonly object _stateLock = new();
++    private readonly object _initLock = new();
++    private CancellationTokenSource? _initCts;
++    private Task _initTask = Task.CompletedTask;
+     private CommandScheduler? _scheduler;
+     private DeviceSessionState _state = DeviceSessionState.Created;
+ 
+     public DeviceSession(string devCd, ITransport transport, FrameRule frameRule, IEnumerable<ProtocolDefinition> protocols,
+-        IDataMapper mapper, SchedulerOptions? schedulerOptions = null)
++        IDataMapper mapper, SchedulerOptions? schedulerOptions = null, DeviceSessionOptions? options = null)
+     {
+         if (string.IsNullOrEmpty(devCd)) throw new ArgumentException("DEV_CD 필요", nameof(devCd));
+         DevCd = devCd;
+@@ -75,6 +96,7 @@ public sealed class DeviceSession : IAsyncDisposable
+         _framer = FramerFactory.Create(frameRule ?? throw new ArgumentNullException(nameof(frameRule)));
+         _mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
+         _schedulerOptions = schedulerOptions ?? new SchedulerOptions();
++        _options = options ?? DeviceSessionOptions.Default;
+ 
+         _protocols = new Dictionary<string, ProtocolDefinition>(StringComparer.Ordinal);
+         _streams = [];
+@@ -84,6 +106,14 @@ public sealed class DeviceSession : IAsyncDisposable
+             if (p.Parse is not null) _parsers[p.PtlCd] = ParserFactory.Create(p.Parse);
+             if (p.Pattern == ExchangePattern.RxStream) _streams.Add(p);
+         }
++
++        foreach (string step in _options.InitRoutine ?? [])
++        {
++            if (!_protocols.TryGetValue(step, out ProtocolDefinition? d))
++                throw new ArgumentException($"초기화 루틴의 프로토콜 없음: {step}", nameof(options));
++            if (d.Pattern == ExchangePattern.RxStream)
++                throw new ArgumentException($"초기화 루틴에 RX_STREAM 불가: {step}", nameof(options));
++        }
+     }
+ 
+     public string DevCd { get; }
+@@ -100,6 +130,11 @@ public sealed class DeviceSession : IAsyncDisposable
+ 
+     public event EventHandler<string>? Warning;
+ 
++    /// <summary>초기화 루틴 1회 끝 (연결·재연결마다)</summary>
++    public event EventHandler<InitRoutineResult>? InitCompleted;
++
++    public DeviceSessionOptions Options => _options;
++
+     /// <summary>어떤 응답·스트림 프로토콜에도 맞지 않은 프레임</summary>
+     public event EventHandler<Frame>? UnhandledFrame;
+ 
+@@ -124,7 +159,8 @@ public sealed class DeviceSession : IAsyncDisposable
+ 
+         _transport.Received += OnReceived;
+         _transport.StateChanged += OnTransportState;
+-        SetState(open ? DeviceSessionState.Ready : DeviceSessionState.Suspended);
++        if (open) BeginReady();
++        else SetState(DeviceSessionState.Suspended);
+         return Task.CompletedTask;
+     }
+ 
+@@ -138,6 +174,7 @@ public sealed class DeviceSession : IAsyncDisposable
+         }
+         _transport.Received -= OnReceived;
+         _transport.StateChanged -= OnTransportState;
++        CancelInit();
+         SetState(DeviceSessionState.Stopped);
+         if (scheduler is not null) await scheduler.DisposeAsync().ConfigureAwait(false);
+     }
+@@ -146,6 +183,22 @@ public sealed class DeviceSession : IAsyncDisposable
+ 
+     /// <summary>프로토콜 1개 실행. DATA 역할 + Parse 규칙이 있으면 응답을 논리 Data로 Values 에 낸다</summary>
+     public async Task<CommandResult> ExecuteAsync(string ptlCd, CancellationToken cancellationToken = default)
++    {
++        Task init;
++        lock (_initLock) init = _initTask;
++        if (!init.IsCompleted)
++        {
++            try { await init.WaitAsync(cancellationToken).ConfigureAwait(false); }
++            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++            {
++                return new(CommandStatus.Cancelled, null, 0);
++            }
++            catch { /* 루틴 실패는 아래 상태 검사로 */ }
++        }
++        return await ExecuteCoreAsync(ptlCd, cancellationToken).ConfigureAwait(false);
++    }
++
++    private async Task<CommandResult> ExecuteCoreAsync(string ptlCd, CancellationToken cancellationToken)
+     {
+         CommandScheduler? scheduler = _scheduler;
+         DeviceSessionState state = State;
+@@ -212,16 +265,72 @@ public sealed class DeviceSession : IAsyncDisposable
+             case TransportState.Open:
+                 lock (_framerLock) _framer.Reset();
+                 scheduler.OnLinkUp();
+-                SetState(DeviceSessionState.Ready);
++                BeginReady();
+                 break;
+             case TransportState.Faulted:
+             case TransportState.Closed:
++                CancelInit();
+                 scheduler.OnLinkDown();
+                 SetState(DeviceSessionState.Suspended);
+                 break;
+         }
+     }
+ 
++    /// <summary>Link 열림: 초기화 루틴이 있으면 Initializing → 루틴 → Ready, 없으면 바로 Ready</summary>
++    private void BeginReady()
++    {
++        IReadOnlyList<string> routine = _options.InitRoutine ?? [];
++        if (routine.Count == 0)
++        {
++            SetState(DeviceSessionState.Ready);
++            return;
++        }
++
++        var cts = new CancellationTokenSource();
++        lock (_initLock)
++        {
++            _initCts?.Cancel();
++            _initCts = cts;
++            SetState(DeviceSessionState.Initializing);
++            _initTask = Task.Run(() => RunInitAsync(routine, cts.Token));
++        }
++    }
++
++    private void CancelInit()
++    {
++        lock (_initLock)
++        {
++            _initCts?.Cancel();
++            _initCts = null;
++        }
++    }
++
++    private async Task RunInitAsync(IReadOnlyList<string> routine, CancellationToken ct)
++    {
++        var steps = new List<KeyValuePair<string, CommandResult>>();
++        bool completed = false;
++        try
++        {
++            if (_options.InitDelayMs > 0) await Task.Delay(_options.InitDelayMs, ct).ConfigureAwait(false);
++            foreach (string ptlCd in routine)
++            {
++                ct.ThrowIfCancellationRequested();
++                CommandResult r = await ExecuteCoreAsync(ptlCd, ct).ConfigureAwait(false);
++                steps.Add(new(ptlCd, r));
++                if (!r.Ok) Warning?.Invoke(this, $"{DevCd}: 초기화 루틴 {ptlCd} {r.Status} {r.Reason}");
++                if (r.Status is CommandStatus.LinkDown or CommandStatus.Cancelled) break;
++            }
++            completed = steps.Count == routine.Count && !ct.IsCancellationRequested;
++        }
++        catch (OperationCanceledException)
++        {
++            // 끊김·중지로 중단
++        }
++
++        if (completed) SetState(DeviceSessionState.Ready, onlyFrom: DeviceSessionState.Initializing);
++        InitCompleted?.Invoke(this, new InitRoutineResult(completed, steps));
++    }
++
+     private void HandleStream(Frame frame)
+     {
+         foreach (ProtocolDefinition def in _streams)
+diff --git a/desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs b/desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs
+new file mode 100644
+index 0000000..c92241d
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs
+@@ -0,0 +1,148 @@
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Scheduling;
++using JuProvider.Lib.Protocol.Session;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Lib.Protocol.Sync;
++
++/// <summary>DeviceSession 생성에 필요한 것 전부 (서버 정의 + 수집 설정 결합 결과)</summary>
++public sealed record CollectionPlan(
++    string DevCd,
++    string PtlGrpCd,
++    FrameRule Frame,
++    IReadOnlyList<ProtocolDefinition> Protocols,
++    SchedulerOptions Scheduler,
++    DeviceSessionOptions Session,
++    IReadOnlyList<ChannelMapEntry> MapEntries,
++    IReadOnlyList<string> Warnings)
++{
++    public IDataMapper CreateMapper() => new DataMapper(MapEntries);
++
++    public DeviceSession CreateSession(ITransport transport) =>
++        new(DevCd, transport, Frame, Protocols, CreateMapper(), Scheduler, Session);
++}
++
++/// <summary>
++/// 서버 내려받기(ProtocolGroupSync·DataTagSync) + 그룹별 CollectionProfile → CollectionPlan (C4).
++/// <list type="bullet">
++/// <item>프로토콜 목록은 서버가 기준. 수집 설정에만 있는 PTL_CD 는 경고 후 무시</item>
++/// <item>송신: 설정 tx → TX 패킷 PACKET_EXPR → PTL_VAL</item>
++/// <item>교환 방식: 설정 pattern → PTL_TYPE(PROT 코드)</item>
++/// <item>해석 규칙: 설정 parse → RX 패킷 PARSE_RULE(JSON 만, 그 외는 경고 후 무시)</item>
++/// <item>타임아웃: 설정 → 그룹 TIMEOUT_MS, 재시도: 그룹 RETRY_CNT (Idempotent 명령만 적용됨)</item>
++/// <item>매핑: 장치의 데이터 태그 TAG_ID=CH&lt;n&gt; 임시 변환 (매핑 테이블은 C5)</item>
++/// </list>
++/// </summary>
++public static class CollectionPlanBuilder
++{
++    public static CollectionPlan Build(string devCd, ProtocolGroupSync group, IEnumerable<DataTagSync> tags, CollectionProfile? profile = null)
++    {
++        ArgumentException.ThrowIfNullOrEmpty(devCd);
++        ArgumentNullException.ThrowIfNull(group);
++        ArgumentNullException.ThrowIfNull(tags);
++        profile ??= BuiltInCollectionProfiles.Get(group.PtlGrpCd) ?? CollectionProfile.Empty(group.PtlGrpCd);
++        if (profile.PtlGrpCd != group.PtlGrpCd)
++            throw new ArgumentException($"수집 설정 그룹({profile.PtlGrpCd})과 서버 그룹({group.PtlGrpCd})이 다름", nameof(profile));
++
++        var warnings = new List<string>();
++        var protocols = new List<ProtocolDefinition>();
++        var known = new HashSet<string>(StringComparer.Ordinal);
++
++        foreach (ProtocolSync p in group.Protocols ?? [])
++        {
++            known.Add(p.PtlCd);
++            profile.Protocols.TryGetValue(p.PtlCd, out ProtocolOverlay? o);
++
++            ExchangePattern pattern;
++            if (o?.Pattern is { } op) pattern = op;
++            else
++            {
++                try { pattern = ProtocolModel.FromPtlType(p.PtlType); }
++                catch (ArgumentException)
++                {
++                    warnings.Add($"{p.PtlCd}: PTL_TYPE '{p.PtlType}' 해석 불가 → 제외");
++                    continue;
++                }
++            }
++
++            string? tx = pattern == ExchangePattern.RxStream ? null : FirstNonEmpty(
++                o?.Tx,
++                (p.Packets ?? []).Where(k => string.Equals(k.Direction, "TX", StringComparison.OrdinalIgnoreCase))
++                    .OrderBy(k => k.PacketSeq).Select(k => k.PacketExpr).FirstOrDefault(x => !string.IsNullOrEmpty(x)),
++                p.PtlVal);
++            if (pattern != ExchangePattern.RxStream && tx is null)
++            {
++                warnings.Add($"{p.PtlCd}: 송신 표현식 없음 → 제외");
++                continue;
++            }
++
++            ParseRule? parse = o?.Parse;
++            if (parse is null)
++            {
++                string? text = (p.Packets ?? []).Where(k => string.Equals(k.Direction, "RX", StringComparison.OrdinalIgnoreCase))
++                    .OrderBy(k => k.PacketSeq).Select(k => k.ParseRule).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
++                if (text is not null)
++                {
++                    if (text.TrimStart().StartsWith('{'))
++                    {
++                        try { parse = RuleReader.ReadParseRule(text); }
++                        catch (RuleFormatException ex) { warnings.Add($"{p.PtlCd}: PARSE_RULE 오류 → 무시 ({ex.Message})"); }
++                    }
++                    else warnings.Add($"{p.PtlCd}: PARSE_RULE 이 JSON 규칙이 아님 → 무시");
++                }
++            }
++
++            if (pattern == ExchangePattern.RxStream && parse is null)
++                warnings.Add($"{p.PtlCd}: RX_STREAM 인데 해석 규칙 없음 → 수신만");
++
++            if (o is null && p.PtlType == "PROT0000")
++                warnings.Add($"{p.PtlCd}: 수집 설정 없음, PTL_TYPE POLLING 그대로 사용");
++
++            protocols.Add(new ProtocolDefinition
++            {
++                PtlCd = p.PtlCd,
++                Pattern = pattern,
++                Roles = o?.Roles ?? (pattern == ExchangePattern.RxStream ? ProtocolRole.Data : ProtocolRole.Info),
++                Action = o?.Action ?? CommandAction.None,
++                Tx = tx,
++                Expect = o?.Expect,
++                Parse = parse,
++                TimeoutMs = o?.TimeoutMs ?? group.TimeoutMs,
++                RetryCount = Math.Max(0, group.RetryCnt),
++                Idempotent = o?.Idempotent
++            });
++        }
++
++        foreach (string extra in profile.Protocols.Keys.Where(k => !known.Contains(k)).OrderBy(k => k, StringComparer.Ordinal))
++            warnings.Add($"{extra}: 수집 설정에만 있음(서버 정의 없음) → 무시");
++
++        var defined = protocols.ToDictionary(x => x.PtlCd, StringComparer.Ordinal);
++        var routine = new List<string>();
++        foreach (string step in profile.InitRoutine)
++        {
++            if (defined.TryGetValue(step, out ProtocolDefinition? d) && d.Pattern != ExchangePattern.RxStream) routine.Add(step);
++            else warnings.Add($"초기화 루틴 {step}: 사용할 수 있는 프로토콜 없음 → 제외");
++        }
++
++        var tagWarnings = new List<string>();
++        IReadOnlyList<ChannelMapEntry> map = LegacyTagIdMapping.ToEntries(
++            tags.Where(t => t.DevCd == devCd)
++                .Select(t => new LegacyDataTag(t.DevCd, t.DatGrCd, t.DatCd, t.DatIdx, t.TagId, NullIfEmpty(t.DatUnit),
++                    (double?)t.DatMin, (double?)t.DatMax)),
++            tagWarnings);
++        warnings.AddRange(tagWarnings);
++
++        var scheduler = new SchedulerOptions(
++            DefaultTimeoutMs: group.TimeoutMs > 0 ? group.TimeoutMs : 1000,
++            InterCommandGapMs: profile.InterCommandGapMs);
++        var session = new DeviceSessionOptions(routine, profile.InitDelayMs);
++
++        return new CollectionPlan(devCd, group.PtlGrpCd, profile.Frame, protocols, scheduler, session, map, warnings);
++    }
++
++    private static string? FirstNonEmpty(params string?[] values) => values.FirstOrDefault(v => !string.IsNullOrEmpty(v));
++
++    private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Sync/CollectionProfile.cs b/desktop/lib/juprovider.lib.protocol/Sync/CollectionProfile.cs
+new file mode 100644
+index 0000000..ef2c8d9
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Sync/CollectionProfile.cs
+@@ -0,0 +1,217 @@
++using System.Text.Json;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Scheduling;
++
++namespace JuProvider.Lib.Protocol.Sync;
++
++public sealed class CollectionProfileException(string message) : Exception(message);
++
++/// <summary>프로토콜 1개의 수집 보정 (서버 정의 위에 덮어씀)</summary>
++public sealed record ProtocolOverlay(
++    ExchangePattern? Pattern = null,
++    ProtocolRole? Roles = null,
++    CommandAction? Action = null,
++    string? Tx = null,
++    ResponseMatcher? Expect = null,
++    ParseRule? Parse = null,
++    int? TimeoutMs = null,
++    bool? Idempotent = null);
++
++/// <summary>
++/// 프로토콜 그룹별 수집 설정 (C4). DB 컬럼이 생기기 전(C5, 별도 승인)까지 Desktop 리소스로 둔다 (C0-Q6과 같은 방식).
++/// <list type="bullet">
++/// <item>Frame: Frame Rule (시작 문자·잡음 제거 포함)</item>
++/// <item>InterCommandGapMs: 명령 간격 (GTEC 200 ms)</item>
++/// <item>InitRoutine / InitDelayMs: 연결·재연결 초기화 루틴</item>
++/// <item>Protocols: PTL_CD 별 보정 (교환 방식·역할·응답 조건·해석 규칙). 현재 seed PTL_TYPE 은 모두 POLLING 이라 보정 필요</item>
++/// </list>
++/// JSON v1:
++/// <code>
++/// { "v":1, "ptlGrpCd":"GTEC", "frame":{"v":1,"kind":"DELIM","start":"{","end":"[CR][LF]"},
++///   "interCommandGapMs":200, "initDelayMs":500, "initRoutine":["GTEC0301","GTEC0001"],
++///   "protocols":{ "GTEC0001":{"pattern":"TX_RX","roles":["INFO"],"expect":{"regex":"^\\{[A-Za-z]"}} } }
++/// </code>
++/// </summary>
++public sealed record CollectionProfile(
++    string PtlGrpCd,
++    FrameRule Frame,
++    int InterCommandGapMs,
++    int InitDelayMs,
++    IReadOnlyList<string> InitRoutine,
++    IReadOnlyDictionary<string, ProtocolOverlay> Protocols)
++{
++    /// <summary>보정 없는 기본값 (CRLF, 간격 0, 루틴 없음)</summary>
++    public static CollectionProfile Empty(string ptlGrpCd) =>
++        new(ptlGrpCd, new FrameRule(), 0, 0, [], new Dictionary<string, ProtocolOverlay>(StringComparer.Ordinal));
++
++    public static CollectionProfile Parse(string json)
++    {
++        JsonElement root;
++        try
++        {
++            using JsonDocument doc = JsonDocument.Parse(json);
++            root = doc.RootElement.Clone();
++        }
++        catch (JsonException ex)
++        {
++            throw new CollectionProfileException("수집 설정 JSON 형식 오류: " + ex.Message);
++        }
++
++        if (root.ValueKind != JsonValueKind.Object) throw new CollectionProfileException("수집 설정은 JSON 객체여야 합니다.");
++        if (!(root.TryGetProperty("v", out JsonElement v) && v.TryGetInt32(out int ver) && ver == 1))
++            throw new CollectionProfileException("지원하지 않는 수집 설정 버전 (v=1 필요)");
++
++        string grp = Str(root, "ptlGrpCd") ?? throw new CollectionProfileException("ptlGrpCd 필요");
++
++        FrameRule frame = new();
++        if (root.TryGetProperty("frame", out JsonElement f) && f.ValueKind == JsonValueKind.Object)
++        {
++            try { frame = RuleReader.ReadFrameRule(f.GetRawText()) ?? new FrameRule(); }
++            catch (RuleFormatException ex) { throw new CollectionProfileException("frame: " + ex.Message); }
++        }
++
++        int gap = Int(root, "interCommandGapMs") ?? 0;
++        int delay = Int(root, "initDelayMs") ?? 500;
++        if (gap < 0 || delay < 0) throw new CollectionProfileException("interCommandGapMs, initDelayMs 는 0 이상");
++
++        var routine = new List<string>();
++        if (root.TryGetProperty("initRoutine", out JsonElement r))
++        {
++            if (r.ValueKind != JsonValueKind.Array) throw new CollectionProfileException("initRoutine 은 배열");
++            foreach (JsonElement x in r.EnumerateArray())
++            {
++                string? s = x.ValueKind == JsonValueKind.String ? x.GetString() : null;
++                if (string.IsNullOrEmpty(s)) throw new CollectionProfileException("initRoutine 항목은 PTL_CD 문자열");
++                routine.Add(s);
++            }
++        }
++
++        var protocols = new Dictionary<string, ProtocolOverlay>(StringComparer.Ordinal);
++        if (root.TryGetProperty("protocols", out JsonElement ps))
++        {
++            if (ps.ValueKind != JsonValueKind.Object) throw new CollectionProfileException("protocols 는 객체");
++            foreach (JsonProperty p in ps.EnumerateObject()) protocols[p.Name] = ReadOverlay(p.Name, p.Value);
++        }
++
++        return new CollectionProfile(grp, frame, gap, delay, routine, protocols);
++    }
++
++    private static ProtocolOverlay ReadOverlay(string ptlCd, JsonElement e)
++    {
++        if (e.ValueKind != JsonValueKind.Object) throw new CollectionProfileException($"{ptlCd}: 객체여야 함");
++        try
++        {
++            ExchangePattern? pattern = Str(e, "pattern")?.ToUpperInvariant() switch
++            {
++                null => null,
++                "TX_ONLY" => ExchangePattern.TxOnly,
++                "TX_RX" => ExchangePattern.TxRx,
++                "RX_STREAM" => ExchangePattern.RxStream,
++                "POLL" => ExchangePattern.Poll,
++                string x => throw new CollectionProfileException($"{ptlCd}: 알 수 없는 pattern {x}")
++            };
++
++            ProtocolRole? roles = null;
++            if (e.TryGetProperty("roles", out JsonElement re))
++            {
++                if (re.ValueKind != JsonValueKind.Array || re.GetArrayLength() == 0) throw new CollectionProfileException($"{ptlCd}: roles 는 1개 이상 배열");
++                ProtocolRole acc = ProtocolRole.None;
++                foreach (JsonElement x in re.EnumerateArray())
++                {
++                    acc |= (x.ValueKind == JsonValueKind.String ? x.GetString()!.ToUpperInvariant() : null) switch
++                    {
++                        "INFO" => ProtocolRole.Info,
++                        "CONTROL" => ProtocolRole.Control,
++                        "DATA" => ProtocolRole.Data,
++                        var y => throw new CollectionProfileException($"{ptlCd}: 알 수 없는 role {y}")
++                    };
++                }
++                roles = acc;
++            }
++
++            CommandAction? action = Str(e, "action")?.ToUpperInvariant() switch
++            {
++                null => null,
++                "NONE" => CommandAction.None,
++                "START" => CommandAction.Start,
++                "PAUSE" => CommandAction.Pause,
++                "STOP" => CommandAction.Stop,
++                string x => throw new CollectionProfileException($"{ptlCd}: 알 수 없는 action {x}")
++            };
++
++            ResponseMatcher? expect = null;
++            if (e.TryGetProperty("expect", out JsonElement ex) && ex.ValueKind == JsonValueKind.Object)
++            {
++                if (Str(ex, "startsWith") is { } sw) expect = ResponseMatcher.StartsWith(sw);
++                else if (Str(ex, "regex") is { } rx) expect = ResponseMatcher.Regex(rx);
++                else throw new CollectionProfileException($"{ptlCd}: expect 는 startsWith 또는 regex");
++            }
++
++            ParseRule? parse = null;
++            if (e.TryGetProperty("parse", out JsonElement pe) && pe.ValueKind == JsonValueKind.Object)
++                parse = RuleReader.ReadParseRule(pe.GetRawText());
++
++            int? timeout = Int(e, "timeoutMs");
++            if (timeout is < 0) throw new CollectionProfileException($"{ptlCd}: timeoutMs 는 0 이상");
++
++            bool? idem = e.TryGetProperty("idempotent", out JsonElement ie) && ie.ValueKind is JsonValueKind.True or JsonValueKind.False
++                ? ie.GetBoolean()
++                : null;
++
++            return new ProtocolOverlay(pattern, roles, action, Str(e, "tx"), expect, parse, timeout, idem);
++        }
++        catch (RuleFormatException rf)
++        {
++            throw new CollectionProfileException($"{ptlCd}: {rf.Message}");
++        }
++        catch (ArgumentException ae)
++        {
++            throw new CollectionProfileException($"{ptlCd}: {ae.Message}");
++        }
++    }
++
++    private static string? Str(JsonElement e, string name) =>
++        e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
++
++    private static int? Int(JsonElement e, string name)
++    {
++        if (!e.TryGetProperty(name, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return null;
++        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int n)) return n;
++        throw new CollectionProfileException($"{name}: 정수여야 합니다.");
++    }
++}
++
++/// <summary>내장 수집 설정 (실장비 COM6 검증값, 2026-10-30)</summary>
++public static class BuiltInCollectionProfiles
++{
++    /// <summary>
++    /// GTEC Science Cube: 측정 중엔 S{10,0} 외 명령을 무시하므로 STOP 먼저 → 장치확인 → 센서정보 → 모드.
++    /// TX_ONLY 연속 송신은 200 ms 간격 (0 ms 면 시작 명령 누락). 수신은 { … }[CR][LF], { 앞 잡음 제거.
++    /// </summary>
++    public const string GtecJson = """
++    {
++      "v": 1, "ptlGrpCd": "GTEC",
++      "frame": { "v": 1, "kind": "DELIM", "start": "{", "end": "[CR][LF]", "maxLen": 512 },
++      "interCommandGapMs": 200, "initDelayMs": 500,
++      "initRoutine": [ "GTEC0301", "GTEC0001", "GTEC0002", "GTEC0100" ],
++      "protocols": {
++        "GTEC0000": { "pattern": "TX_RX", "roles": ["INFO"], "expect": { "startsWith": "{OK" }, "tx": "S{TEST}[CR][LF]" },
++        "GTEC0001": { "pattern": "TX_RX", "roles": ["INFO"], "expect": { "regex": "^\\{[A-Za-z]" } },
++        "GTEC0002": { "pattern": "TX_RX", "roles": ["INFO"], "expect": { "regex": "^\\{\\d{3},\\d{3},\\d{3},\\d{3}\\}$" },
++                      "parse": { "v": 1, "kind": "INFO", "trim": "{}", "fields": ["CH1","CH2","CH3","CH4"], "absent": "000" } },
++        "GTEC0100": { "pattern": "TX_ONLY", "roles": ["CONTROL"], "idempotent": true },
++        "GTEC0300": { "pattern": "TX_ONLY", "roles": ["CONTROL"], "action": "START" },
++        "GTEC0301": { "pattern": "TX_ONLY", "roles": ["CONTROL"], "action": "STOP" },
++        "GTEC0400": { "pattern": "RX_STREAM", "roles": ["DATA"],
++                      "parse": { "v": 1, "kind": "TEXT", "trim": "{}", "sep": "SPACE", "count": 3 } }
++      }
++    }
++    """;
++
++    public static CollectionProfile? Get(string ptlGrpCd) => ptlGrpCd switch
++    {
++        "GTEC" => CollectionProfile.Parse(GtecJson),
++        _ => null
++    };
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs b/desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs
+new file mode 100644
+index 0000000..bac22b1
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs
+@@ -0,0 +1,53 @@
++namespace JuProvider.Lib.Protocol.Sync;
++
++/// <summary>
++/// 서버 내려받기 응답 (C4, SYNC-01 형식). Revision: 내용 해시(같으면 변경 없음). Removed: 삭제 추적 전까지 항상 빈 목록.
++/// JSON 은 camelCase (System.Text.Json Web 기본값으로 읽는다).
++/// </summary>
++public sealed record SyncResult<T>(string Revision, IReadOnlyList<T> Items, IReadOnlyList<string> Removed);
++
++/// <summary>GET /api/core/sync/protocols — ju_protocol_group + detail</summary>
++public sealed record ProtocolGroupSync(
++    string PtlGrpCd,
++    string? PtlGrpNm,
++    int PollingIntval,
++    int TimeoutMs,
++    int RetryCnt,
++    int SortOrd,
++    IReadOnlyList<ProtocolSync> Protocols);
++
++/// <summary>ju_protocol + detail</summary>
++public sealed record ProtocolSync(
++    string PtlCd,
++    string? PtlType,
++    int? PtlLen,
++    string? PtlVal,
++    string? PtlNm,
++    string? PtlDesc,
++    IReadOnlyList<ProtocolPacketSync> Packets);
++
++/// <summary>ju_protocol_packet</summary>
++public sealed record ProtocolPacketSync(
++    int PacketSeq,
++    string? PacketType,
++    string? Direction,
++    string? PacketExpr,
++    string? ResponsePtlCd,
++    string? ParseRule,
++    int DataCount,
++    string? DataType,
++    string? DataPosition);
++
++/// <summary>GET /api/core/sync/data-tags?devCd= — ju_data_group(DEV_CD) + ju_data_tag + detail</summary>
++public sealed record DataTagSync(
++    string DevCd,
++    string DatGrCd,
++    string DatCd,
++    int DatIdx,
++    string? DatType,
++    string? DatUnit,
++    string? TagId,
++    string? DatNm,
++    decimal? DatMin,
++    decimal? DatMax,
++    int SortOrd);
+diff --git a/desktop/tests/juprovider.tests.protocol/CollectionTests.cs b/desktop/tests/juprovider.tests.protocol/CollectionTests.cs
+new file mode 100644
+index 0000000..02621f3
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/CollectionTests.cs
+@@ -0,0 +1,395 @@
++using System.Collections.Concurrent;
++using System.Text;
++using System.Text.Json;
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Scheduling;
++using JuProvider.Lib.Protocol.Session;
++using JuProvider.Lib.Protocol.Simulation;
++using JuProvider.Lib.Protocol.Sync;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>
++/// 실장비(COM6 Science Cube) 동작을 흉내 내는 가상 장치 (2026-10-30 확인 내용):
++/// 측정 중엔 S{10,0} 외 명령 무시, 응답 없는 명령(모드·시작·중지) 직후 MinGapMs 안에 온 요청은 놓침, 연결이 끊겨도 측정 상태 유지.
++/// </summary>
++internal sealed class GtecLikeDevice : ISimulatedDevice
++{
++    private readonly object _lock = new();
++    private ISimulatorSink? _sink;
++    private long _lastSilent = long.MinValue / 2;
++
++    public int MinGapMs { get; init; } = 150;
++    public volatile bool Running;
++    public ConcurrentQueue<string> Accepted { get; } = new();
++    public ConcurrentQueue<string> Ignored { get; } = new();
++    public string ProfileId => "GTEC_LIKE";
++
++    public void Open(ISimulatorSink sink, CancellationToken lifetime)
++    {
++        lock (_lock) _sink = sink;
++        _ = Task.Run(async () =>
++        {
++            int n = 0;
++            while (!lifetime.IsCancellationRequested)
++            {
++                try { await Task.Delay(20, lifetime); } catch (OperationCanceledException) { break; }
++                if (Running) Send($"{{ +{++n}.0E+0 -0.00000E+0 -0.00000E+0}}\r\n");
++            }
++        });
++    }
++
++    public void OnRequest(byte[] request)
++    {
++        string s = Encoding.ASCII.GetString(request).TrimEnd('\r', '\n');
++        long now = Environment.TickCount64;
++        bool tooFast;
++        lock (_lock) tooFast = now - _lastSilent < MinGapMs;
++        if (tooFast || (Running && s != "S{10,0}"))
++        {
++            Ignored.Enqueue(s);
++            return;
++        }
++
++        Accepted.Enqueue(s);
++        switch (s)
++        {
++            case "S{10,3}": Send("{Science Cube Lite II Memory}\r\n"); return;
++            case "S{20}": Send("{008,000,000,000}\r\n"); return;
++            case "S{10,0}": Running = false; break;
++            case "S{10,1}": Running = true; break;
++        }
++        lock (_lock) _lastSilent = now;
++    }
++
++    public void Close()
++    {
++        lock (_lock) _sink = null;
++    }
++
++    /// <summary>임의 바이트 주입 (잘린 프레임 등)</summary>
++    public void Inject(string text) => Send(text);
++
++    private void Send(string text)
++    {
++        ISimulatorSink? sink;
++        lock (_lock) sink = _sink;
++        sink?.Send(Encoding.ASCII.GetBytes(text));
++    }
++}
++
++public class CollectionTests
++{
++    private const string Dev = "SDEV_GTEC01";
++
++    /// <summary>서버 GET /api/core/sync/protocols/GTEC 응답 형태 (seed 기준 일부)</summary>
++    internal const string ProtocolsJson = """
++    { "revision": "r1", "removed": [], "items": [ {
++        "ptlGrpCd": "GTEC", "ptlGrpNm": "그린테크", "pollingIntval": 1000, "timeoutMs": 3000, "retryCnt": 3, "sortOrd": 0,
++        "protocols": [
++          { "ptlCd": "GTEC0000", "ptlType": "PROT0000", "ptlLen": null, "ptlVal": "S{TEST}[CR][LF]", "ptlNm": "장치확인(가상)", "ptlDesc": null,
++            "packets": [
++              { "packetSeq": 1, "packetType": "TX_PACKET", "direction": "TX", "packetExpr": "S{TEST}[CR][LF]", "responsePtlCd": null, "parseRule": "", "dataCount": 0, "dataType": null, "dataPosition": null },
++              { "packetSeq": 2, "packetType": "RX_PACKET", "direction": "RX", "packetExpr": "{OK}[CR][LF]", "responsePtlCd": null, "parseRule": "패킷길이|STX DLE|ETX|ETX DLE", "dataCount": 0, "dataType": null, "dataPosition": null } ] },
++          { "ptlCd": "GTEC0001", "ptlType": "PROT0000", "ptlVal": "S{10,3}", "ptlNm": "장치확인", "packets": [
++              { "packetSeq": 1, "packetType": "TX_PACKET", "direction": "TX", "packetExpr": "S{10,3}", "parseRule": "", "dataCount": 0 } ] },
++          { "ptlCd": "GTEC0002", "ptlType": "PROT0000", "ptlVal": "S{20}", "ptlNm": "센서정보", "packets": [] },
++          { "ptlCd": "GTEC0100", "ptlType": "PROT0000", "ptlVal": "S{11,1}", "ptlNm": "모드", "packets": [] },
++          { "ptlCd": "GTEC0300", "ptlType": "PROT0000", "ptlVal": "S{10,1}", "ptlNm": "시작", "packets": [] },
++          { "ptlCd": "GTEC0301", "ptlType": "PROT0000", "ptlVal": "S{10,0}", "ptlNm": "중지", "packets": [] },
++          { "ptlCd": "GTEC0400", "ptlType": "PROT0000", "ptlVal": "", "ptlNm": "저속 데이터", "packets": [] },
++          { "ptlCd": "GTEC0401", "ptlType": "PROT0000", "ptlVal": "", "ptlNm": "고속 데이터", "packets": [] }
++        ] } ] }
++    """;
++
++    /// <summary>서버 GET /api/core/sync/data-tags 응답 형태</summary>
++    internal const string TagsJson = """
++    { "revision": "t1", "removed": [], "items": [
++      { "devCd": "SDEV_GTEC01", "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-01", "datIdx": 1, "datType": "DATA0001", "datUnit": "", "tagId": "CH1", "datNm": "GTEC Analog CH1", "datMin": null, "datMax": null, "sortOrd": 1 },
++      { "devCd": "SDEV_GTEC01", "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-02", "datIdx": 2, "datType": "DATA0001", "datUnit": "", "tagId": "CH2", "sortOrd": 2 },
++      { "devCd": "SDEV_GTEC01", "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-03", "datIdx": 3, "datType": "DATA0001", "datUnit": "", "tagId": "CH3", "sortOrd": 3 },
++      { "devCd": "SDEV_GTEC01", "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-04", "datIdx": 4, "datType": "DATA0001", "datUnit": "", "tagId": "CH4", "datMin": 0.0000000000, "datMax": 1.0000000000, "sortOrd": 4 },
++      { "devCd": "VDEV_GTEC01", "datGrCd": "DG_GTECV01", "datCd": "VGTEC-DATA-01", "datIdx": 1, "datType": "DATA0001", "datUnit": "%", "tagId": "CH1", "sortOrd": 1 }
++    ] }
++    """;
++
++    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
++
++    internal static ProtocolGroupSync Group() => JsonSerializer.Deserialize<SyncResult<ProtocolGroupSync>>(ProtocolsJson, Web)!.Items[0];
++
++    internal static IReadOnlyList<DataTagSync> Tags() => JsonSerializer.Deserialize<SyncResult<DataTagSync>>(TagsJson, Web)!.Items;
++
++    private static CollectionPlan GtecPlan(Func<CollectionProfile, CollectionProfile>? tweak = null)
++    {
++        CollectionProfile p = BuiltInCollectionProfiles.Get("GTEC")!;
++        p = p with { InitDelayMs = 50 };
++        return CollectionPlanBuilder.Build(Dev, Group(), Tags(), tweak is null ? p : tweak(p));
++    }
++
++    private sealed record Rig(DeviceSession Session, VirtualTransport Transport, GtecLikeDevice Device,
++        ConcurrentQueue<LogicalValue> Values, ConcurrentQueue<InitRoutineResult> Inits, ConcurrentQueue<string> Warnings) : IAsyncDisposable
++    {
++        public async ValueTask DisposeAsync()
++        {
++            await Session.DisposeAsync();
++            await Transport.DisposeAsync();
++        }
++    }
++
++    private static async Task<Rig> StartAsync(CollectionPlan plan, GtecLikeDevice device)
++    {
++        var t = new VirtualTransport(device);
++        await t.OpenAsync();
++        DeviceSession s = plan.CreateSession(t);
++        var values = new ConcurrentQueue<LogicalValue>();
++        var inits = new ConcurrentQueue<InitRoutineResult>();
++        var warnings = new ConcurrentQueue<string>();
++        s.Values += (_, e) => { foreach (LogicalValue v in e.Values) values.Enqueue(v); };
++        s.InitCompleted += (_, r) => inits.Enqueue(r);
++        s.Warning += (_, w) => warnings.Enqueue(w);
++        await s.StartAsync();
++        return new Rig(s, t, device, values, inits, warnings);
++    }
++
++    // ---------- 서버 응답 + 수집 설정 → 계획 ----------
++
++    [Fact]
++    public void Server_Json_Deserializes()
++    {
++        ProtocolGroupSync g = Group();
++        Assert.Equal("GTEC", g.PtlGrpCd);
++        Assert.Equal(3000, g.TimeoutMs);
++        Assert.Equal(8, g.Protocols.Count);
++        Assert.Equal("RX", g.Protocols[0].Packets[1].Direction);
++        Assert.Equal(5, Tags().Count);
++        Assert.Equal(1.0m, Tags()[3].DatMax);
++    }
++
++    [Fact]
++    public void Plan_Combines_Server_Definitions_With_Gtec_Profile()
++    {
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, Group(), Tags());
++        var byCd = plan.Protocols.ToDictionary(p => p.PtlCd);
++
++        Assert.Equal(ExchangePattern.TxRx, byCd["GTEC0001"].Pattern);
++        Assert.Equal("S{10,3}", byCd["GTEC0001"].Tx);
++        Assert.NotNull(byCd["GTEC0001"].Expect);
++        Assert.Equal(3000, byCd["GTEC0001"].TimeoutMs);
++        Assert.Equal(3, byCd["GTEC0001"].RetryCount);
++        Assert.Equal(CommandAction.Start, byCd["GTEC0300"].Action);
++        Assert.Equal(CommandAction.Stop, byCd["GTEC0301"].Action);
++        Assert.Equal(ExchangePattern.RxStream, byCd["GTEC0400"].Pattern);
++        Assert.Equal(ParseKind.Text, byCd["GTEC0400"].Parse!.Kind);
++        Assert.Equal(ParseKind.Info, byCd["GTEC0002"].Parse!.Kind);
++        Assert.False(byCd.ContainsKey("GTEC0401")); // 수집 설정 없음 + 송신 표현식 없음 → 제외
++
++        Assert.Equal(200, plan.Scheduler.InterCommandGapMs);
++        Assert.Equal(3000, plan.Scheduler.DefaultTimeoutMs);
++        Assert.Equal(new[] { "GTEC0301", "GTEC0001", "GTEC0002", "GTEC0100" }, plan.Session.InitRoutine);
++        Assert.Equal(new byte[] { (byte)'{' }, plan.Frame.Start);
++
++        Assert.Equal(4, plan.MapEntries.Count); // 다른 장치(VDEV) 태그 제외
++        Assert.Equal(new LogicalDataRef("DG_GTEC01", "GTEC-DATA-01", 1), plan.MapEntries.Single(e => e.ChannelKey == "1").Target);
++        Assert.Equal(1.0, plan.MapEntries.Single(e => e.ChannelKey == "4").Max);
++        Assert.Null(plan.MapEntries[0].Unit); // 빈 단위 → null
++
++        Assert.Contains(plan.Warnings, w => w.Contains("GTEC0000") && w.Contains("JSON"));
++        Assert.Contains(plan.Warnings, w => w.Contains("GTEC0401"));
++    }
++
++    [Fact]
++    public void Plan_Without_Profile_Uses_Server_Values_Only()
++    {
++        ProtocolGroupSync g = Group() with { PtlGrpCd = "OTHER" };
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, g, Tags());
++
++        Assert.Equal(0, plan.Scheduler.InterCommandGapMs);
++        Assert.Empty(plan.Session.InitRoutine!);
++        Assert.Null(plan.Frame.Start);
++        Assert.All(plan.Protocols, p => Assert.Equal(ExchangePattern.Poll, p.Pattern));
++        Assert.Contains(plan.Warnings, w => w.Contains("POLLING"));
++    }
++
++    [Fact]
++    public void Plan_Drops_Unknown_Routine_Steps_And_Profile_Only_Protocols()
++    {
++        CollectionProfile p = CollectionProfile.Parse("""
++            { "v":1, "ptlGrpCd":"GTEC", "initRoutine":["GTEC0301","NOPE","GTEC0400"],
++              "protocols": { "GTEC0301": { "pattern":"TX_ONLY", "action":"STOP" }, "ONLY_LOCAL": { "pattern":"TX_ONLY" } } }
++            """);
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, Group(), Tags(), p);
++
++        Assert.Equal(new[] { "GTEC0301" }, plan.Session.InitRoutine);
++        Assert.Contains(plan.Warnings, w => w.Contains("NOPE"));
++        Assert.Contains(plan.Warnings, w => w.Contains("ONLY_LOCAL"));
++        Assert.Throws<ArgumentException>(() => CollectionPlanBuilder.Build(Dev, Group() with { PtlGrpCd = "X" }, Tags(), p));
++    }
++
++    [Theory]
++    [InlineData("""{ "v":2, "ptlGrpCd":"G" }""")]
++    [InlineData("""{ "v":1 }""")]
++    [InlineData("""{ "v":1, "ptlGrpCd":"G", "initRoutine":"GTEC0301" }""")]
++    [InlineData("""{ "v":1, "ptlGrpCd":"G", "interCommandGapMs":-1 }""")]
++    [InlineData("""{ "v":1, "ptlGrpCd":"G", "protocols": { "P": { "pattern":"FAST" } } }""")]
++    [InlineData("""{ "v":1, "ptlGrpCd":"G", "protocols": { "P": { "roles":["BOSS"] } } }""")]
++    [InlineData("""{ "v":1, "ptlGrpCd":"G", "protocols": { "P": { "expect": { "contains":"x" } } } }""")]
++    [InlineData("""{ "v":1, "ptlGrpCd":"G", "protocols": { "P": { "parse": { "v":1, "kind":"NOPE" } } } }""")]
++    [InlineData("""{ "v":1, "ptlGrpCd":"G", "frame": { "v":1, "kind":"DELIM", "start":"" } }""")]
++    [InlineData("""not json""")]
++    public void Profile_Rejects_Invalid(string json)
++    {
++        Assert.Throws<CollectionProfileException>(() => CollectionProfile.Parse(json));
++    }
++
++    // ---------- 초기화 루틴 · 명령 간격 (가상 실장비) ----------
++
++    [Fact] // 측정 중인 장비: STOP 먼저 루틴이면 확인·센서정보 성공
++    public async Task Init_Routine_Stops_Measuring_Device_First()
++    {
++        var device = new GtecLikeDevice { Running = true };
++        await using Rig rig = await StartAsync(GtecPlan(), device);
++
++        Assert.True(await Wait.UntilAsync(() => rig.Inits.Count == 1, 5000));
++        Assert.True(rig.Inits.Single().AllOk, string.Join(",", rig.Inits.Single().Steps.Select(s => $"{s.Key}:{s.Value.Status}")));
++        Assert.Equal(DeviceSessionState.Ready, rig.Session.State);
++        Assert.False(device.Running);
++        Assert.Equal(new[] { "S{10,0}", "S{10,3}", "S{20}", "S{11,1}" }, device.Accepted.ToArray());
++    }
++
++    [Fact] // 대조: STOP 없는 루틴이면 측정 중 장비가 확인 명령을 무시 → 타임아웃
++    public async Task Without_Stop_First_Measuring_Device_Ignores_Commands()
++    {
++        var device = new GtecLikeDevice { Running = true };
++        CollectionPlan plan = GtecPlan(p => p with { InitRoutine = ["GTEC0001"] });
++        plan = plan with
++        {
++            Protocols = plan.Protocols.Select(x => x.PtlCd == "GTEC0001" ? x with { TimeoutMs = 300, RetryCount = 0 } : x).ToList()
++        };
++        await using Rig rig = await StartAsync(plan, device);
++
++        Assert.True(await Wait.UntilAsync(() => rig.Inits.Count == 1, 5000));
++        Assert.False(rig.Inits.Single().AllOk);
++        Assert.Equal(CommandStatus.Timeout, rig.Inits.Single().Steps.Single().Value.Status);
++        Assert.Contains("S{10,3}", device.Ignored);
++    }
++
++    [Fact] // 명령 간격 200 ms: 모드 → 시작 연속 송신 후 데이터 수신·매핑
++    public async Task Gap_200_Mode_Then_Start_Receives_Mapped_Data()
++    {
++        var device = new GtecLikeDevice();
++        await using Rig rig = await StartAsync(GtecPlan(), device);
++
++        CommandResult mode = await rig.Session.ExecuteAsync("GTEC0100");
++        CommandResult start = await rig.Session.ExecuteAsync("GTEC0300");
++        Assert.True(mode.Ok && start.Ok);
++        Assert.True(await Wait.UntilAsync(() => rig.Values.Count >= 9, 3000), $"values {rig.Values.Count}");
++
++        LogicalValue[] v = rig.Values.ToArray();
++        Assert.All(v, x => Assert.Equal(DataQuality.Good, x.Quality));
++        Assert.Equal(
++            new[] { "DG_GTEC01/GTEC-DATA-01/1", "DG_GTEC01/GTEC-DATA-02/2", "DG_GTEC01/GTEC-DATA-03/3" },
++            v.Select(x => x.Data!.Key).Distinct().OrderBy(x => x, StringComparer.Ordinal));
++        await rig.Session.ExecuteAsync("GTEC0301");
++    }
++
++    [Fact] // 대조: 간격 0 ms 면 시작 명령을 놓쳐 데이터 없음 (실장비 11:05 재현)
++    public async Task Gap_0_Start_Is_Missed()
++    {
++        var device = new GtecLikeDevice();
++        CollectionPlan plan = GtecPlan(p => p with { InterCommandGapMs = 0, InitRoutine = [] });
++        await using Rig rig = await StartAsync(plan, device);
++
++        await rig.Session.ExecuteAsync("GTEC0100");
++        await rig.Session.ExecuteAsync("GTEC0300");
++        await Task.Delay(400);
++        Assert.Empty(rig.Values);
++        Assert.Contains("S{10,1}", device.Ignored);
++    }
++
++    [Fact] // 재연결 회귀: 측정 중 끊김 → 다시 열면 루틴 자동(STOP 먼저) → 시작 → 데이터
++    public async Task Reconnect_Runs_Routine_Again_Then_Data_Flows()
++    {
++        var device = new GtecLikeDevice();
++        await using Rig rig = await StartAsync(GtecPlan(), device);
++        Assert.True(await Wait.UntilAsync(() => rig.Inits.Count == 1, 5000));
++
++        await rig.Session.ExecuteAsync("GTEC0300");
++        Assert.True(await Wait.UntilAsync(() => rig.Values.Count >= 3, 3000));
++
++        rig.Transport.ForceDisconnect();
++        Assert.True(await Wait.UntilAsync(() => rig.Session.State == DeviceSessionState.Suspended, 2000));
++        Assert.True(device.Running, "장비는 측정 상태 유지");
++
++        await rig.Transport.OpenAsync();
++        // 루틴이 끝나기 전에 요청해도 루틴 뒤에 실행
++        CommandResult check = await rig.Session.ExecuteAsync("GTEC0001");
++        Assert.Equal(CommandStatus.Completed, check.Status);
++        Assert.Equal(2, rig.Inits.Count);
++        Assert.True(rig.Inits.Last().AllOk);
++        Assert.Equal(DeviceSessionState.Ready, rig.Session.State);
++
++        while (rig.Values.TryDequeue(out _)) { }
++        Assert.True((await rig.Session.ExecuteAsync("GTEC0300")).Ok);
++        Assert.True(await Wait.UntilAsync(() => rig.Values.Count >= 6, 3000), "재연결 후 데이터");
++        await rig.Session.ExecuteAsync("GTEC0301");
++    }
++
++    [Fact] // 재연결 직후 잘린 프레임: 시작 문자 규칙으로 버려져 해석 경고 없음
++    public async Task Truncated_Frame_On_Open_Is_Dropped_By_Start_Rule()
++    {
++        var device = new GtecLikeDevice();
++        await using Rig rig = await StartAsync(GtecPlan(), device);
++        device.Inject(" -0.00000E+0 -0.00000E+0}\r\n");
++        var unhandled = new ConcurrentQueue<string>();
++        rig.Session.UnhandledFrame += (_, f) => unhandled.Enqueue(Encoding.ASCII.GetString(f.Body));
++
++        Assert.True(await Wait.UntilAsync(() => rig.Inits.Count == 1, 5000));
++        Assert.True(rig.Inits.Single().AllOk);
++        Assert.Empty(rig.Warnings);
++        Assert.Empty(unhandled);
++    }
++
++    [Fact] // 대조: 시작 문자 규칙이 없으면 잘린 프레임이 해석 실패 경고로 남음
++    public async Task Without_Start_Rule_Truncated_Frame_Warns()
++    {
++        var device = new GtecLikeDevice();
++        CollectionPlan plan = GtecPlan(p => p with { Frame = new FrameRule() });
++        await using Rig rig = await StartAsync(plan, device);
++        device.Inject(" -0.00000E+0 -0.00000E+0}\r\n");
++
++        Assert.True(await Wait.UntilAsync(() => rig.Inits.Count == 1, 5000));
++        Assert.Contains(rig.Warnings, w => w.Contains("해석 실패"));
++    }
++
++    [Fact] // 루틴 진행 중 상태 = Initializing, 끝나면 Ready
++    public async Task State_Goes_Initializing_Then_Ready()
++    {
++        var device = new GtecLikeDevice();
++        var t = new VirtualTransport(device);
++        await using var _t = t;
++        await t.OpenAsync();
++        DeviceSession s = GtecPlan(p => p with { InitDelayMs = 200 }).CreateSession(t);
++        await using var _s = s;
++        var states = new ConcurrentQueue<DeviceSessionState>();
++        s.StateChanged += (_, st) => states.Enqueue(st);
++
++        await s.StartAsync();
++        Assert.Equal(DeviceSessionState.Initializing, s.State);
++        Assert.True(await Wait.UntilAsync(() => s.State == DeviceSessionState.Ready, 5000));
++        Assert.Equal(new[] { DeviceSessionState.Initializing, DeviceSessionState.Ready }, states.ToArray());
++    }
++
++    [Fact]
++    public void Session_Rejects_Unknown_Routine_Step()
++    {
++        var t = new VirtualTransport(new GtecLikeDevice());
++        CollectionPlan plan = GtecPlan();
++        Assert.Throws<ArgumentException>(() => new DeviceSession(Dev, t, plan.Frame, plan.Protocols, plan.CreateMapper(), plan.Scheduler,
++            new DeviceSessionOptions(["NOPE"])));
++        Assert.Throws<ArgumentException>(() => new DeviceSession(Dev, t, plan.Frame, plan.Protocols, plan.CreateMapper(), plan.Scheduler,
++            new DeviceSessionOptions(["GTEC0400"])));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/FrameStartTests.cs b/desktop/tests/juprovider.tests.protocol/FrameStartTests.cs
+new file mode 100644
+index 0000000..58760e3
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/FrameStartTests.cs
+@@ -0,0 +1,85 @@
++using System.Text;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Rules;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>C4 Frame Rule 시작 문자 + 잡음 제거 ({ … }[CR][LF])</summary>
++public class FrameStartTests
++{
++    private static IFramer Gtec() => FramerFactory.Create(new FrameRule { Kind = FrameKind.Delim, Start = "{"u8.ToArray(), End = [0x0D, 0x0A] });
++
++    private static List<string> Push(IFramer f, params string[] chunks)
++    {
++        var bodies = new List<string>();
++        foreach (string c in chunks)
++            foreach (Frame fr in f.Push(Encoding.ASCII.GetBytes(c))) bodies.Add(Encoding.ASCII.GetString(fr.Body));
++        return bodies;
++    }
++
++    [Fact]
++    public void Noise_Before_Start_Is_Dropped()
++    {
++        IFramer f = Gtec();
++        Assert.Equal(new[] { "{1 2 3}" }, Push(f, "xxÿ{1 2 3}\r\n"));
++        Assert.Contains(f.Rejections, r => r.Reason.Contains("잡음"));
++        Assert.Equal(0, f.Pending);
++    }
++
++    [Fact] // 재연결 직후 앞부분이 잘린 프레임은 버리고 다음 정상 프레임부터
++    public void Truncated_Frame_After_Reconnect_Is_Dropped()
++    {
++        IFramer f = Gtec();
++        Assert.Equal(new[] { "{ +4.7E+1 0 0}" }, Push(f, " -0.00000E+0 -0.00000E+0}\r\n{ +4.7E+1 0 0}\r\n"));
++    }
++
++    [Fact] // 끝 없이 다음 { 가 오면 앞의 깨진 조각 제거
++    public void Broken_Frame_Without_End_Is_Dropped()
++    {
++        IFramer f = Gtec();
++        Assert.Equal(new[] { "{3 4 5}" }, Push(f, "{1 2", "{3 4 5}\r\n"));
++        Assert.Contains(f.Rejections, r => r.Reason.Contains("깨진"));
++    }
++
++    [Fact]
++    public void Fragmented_Frames_And_Several_In_One_Chunk()
++    {
++        IFramer f = Gtec();
++        Assert.Empty(Push(f, "{1 2", " 3}\r"));
++        Assert.Equal(new[] { "{1 2 3}", "{4 5 6}" }, Push(f, "\n{4 5 6}\r\n{7"));
++        Assert.Equal(2, f.Pending);
++    }
++
++    [Fact] // 시작 문자 없는 쓰레기만 오면 버퍼에 쌓지 않는다
++    public void Garbage_Only_Is_Not_Buffered()
++    {
++        IFramer f = Gtec();
++        Assert.Empty(Push(f, "garbage without start"));
++        Assert.Equal(0, f.Pending);
++    }
++
++    [Fact] // 여러 바이트 시작 문자: 끝에 걸친 앞부분은 남긴다
++    public void Multi_Byte_Start_Keeps_Partial_Suffix()
++    {
++        IFramer f = FramerFactory.Create(new FrameRule { Kind = FrameKind.Delim, Start = "AB"u8.ToArray(), End = [0x0D, 0x0A] });
++        Assert.Empty(Push(f, "xxA"));
++        Assert.Equal(1, f.Pending);
++        Assert.Equal(new[] { "AB1" }, Push(f, "B1\r\n"));
++    }
++
++    [Fact] // 시작 문자 없으면 기존 동작 그대로
++    public void Without_Start_Behaviour_Unchanged()
++    {
++        IFramer f = FramerFactory.Create(new FrameRule { Kind = FrameKind.Delim, End = [0x0D, 0x0A] });
++        Assert.Equal(new[] { "xx{1}" }, Push(f, "xx{1}\r\n"));
++    }
++
++    [Fact]
++    public void RuleReader_Reads_Start()
++    {
++        FrameRule r = RuleReader.ReadFrameRule("""{"v":1,"kind":"DELIM","start":"{","end":"[CR][LF]"}""")!;
++        Assert.Equal(new byte[] { 0x7B }, r.Start);
++        Assert.Null(RuleReader.ReadFrameRule("""{"v":1,"kind":"DELIM"}""")!.Start);
++        Assert.Throws<RuleFormatException>(() => RuleReader.ReadFrameRule("""{"v":1,"kind":"DELIM","start":""}"""));
++    }
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+index 502471b..35b53af 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+@@ -14,7 +14,8 @@ import org.springframework.boot.web.servlet.support.SpringBootServletInitializer
+     "com.asdp.juprovider.core.systemcode.dao",
+     "com.asdp.juprovider.core.language.dao",
+     "com.asdp.juprovider.core.security.dao",
+-    "com.asdp.juprovider.core.client.dao"
++    "com.asdp.juprovider.core.client.dao",
++    "com.asdp.juprovider.core.protocolsync.dao"
+ })
+ public class JuProviderApplication extends SpringBootServletInitializer {
+ 
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java
+new file mode 100644
+index 0000000..4330638
+--- /dev/null
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java
+@@ -0,0 +1,53 @@
++package com.asdp.juprovider.controller;
++
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.PathVariable;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RequestParam;
++import org.springframework.web.bind.annotation.RestController;
++
++import com.asdp.juprovider.core.protocolsync.dto.DataTagSync;
++import com.asdp.juprovider.core.protocolsync.dto.ProtocolGroupSync;
++import com.asdp.juprovider.core.protocolsync.dto.SyncResult;
++import com.asdp.juprovider.core.protocolsync.service.ProtocolSyncService;
++
++/**
++ * C4 프로토콜·데이터 태그 내려받기 (Client 체인: X-JU-Client-Id / X-JU-Client-Key, GET 만).
++ *
++ * 응답: { revision, items, removed }
++ */
++@RestController
++@RequestMapping("/api/core/sync")
++public class ProtocolSyncController {
++
++    private final ProtocolSyncService protocolSyncService;
++
++    public ProtocolSyncController(ProtocolSyncService protocolSyncService) {
++        this.protocolSyncService = protocolSyncService;
++    }
++
++    /** 사용 중인 전체 프로토콜 그룹 (프로토콜·패킷 포함) */
++    @GetMapping("/protocols")
++    public ResponseEntity<SyncResult<ProtocolGroupSync>> getProtocolGroups() {
++        return ResponseEntity.ok(protocolSyncService.getProtocolGroups(null));
++    }
++
++    /** 프로토콜 그룹 1개. 없거나 미사용이면 404 */
++    @GetMapping("/protocols/{ptlGrpCd}")
++    public ResponseEntity<SyncResult<ProtocolGroupSync>> getProtocolGroup(@PathVariable String ptlGrpCd) {
++        SyncResult<ProtocolGroupSync> result = protocolSyncService.getProtocolGroups(ptlGrpCd);
++        if (result.items().isEmpty()) {
++            return ResponseEntity.notFound().build();
++        }
++        return ResponseEntity.ok(result);
++    }
++
++    /** 장치의 데이터 태그 (devCd 없으면 전체) */
++    @GetMapping("/data-tags")
++    public ResponseEntity<SyncResult<DataTagSync>> getDataTags(
++            @RequestParam(name = "devCd", required = false) String devCd) {
++        String dev = devCd == null || devCd.isBlank() ? null : devCd.trim();
++        return ResponseEntity.ok(protocolSyncService.getDataTags(dev));
++    }
++}
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java
+new file mode 100644
+index 0000000..1d7021b
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java
+@@ -0,0 +1,142 @@
++package com.asdp.juprovider.core.protocolsync;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotEquals;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import org.junit.jupiter.api.Test;
++
++import com.asdp.juprovider.core.protocolsync.dao.ProtocolSyncDao;
++import com.asdp.juprovider.core.protocolsync.dto.DataTagSync;
++import com.asdp.juprovider.core.protocolsync.dto.ProtocolGroupSync;
++import com.asdp.juprovider.core.protocolsync.dto.SyncResult;
++import com.asdp.juprovider.core.protocolsync.service.ProtocolSyncService;
++
++/** C4 내려받기 조립·revision (DB 없이 가짜 DAO) */
++class ProtocolSyncServiceTest {
++
++    private static Map<String, Object> row(Object... kv) {
++        Map<String, Object> m = new HashMap<>();
++        for (int i = 0; i < kv.length; i += 2) {
++            m.put((String) kv[i], kv[i + 1]);
++        }
++        return m;
++    }
++
++    private static final class FakeDao implements ProtocolSyncDao {
++        final List<Map<String, Object>> groups = new ArrayList<>();
++        final List<Map<String, Object>> protocols = new ArrayList<>();
++        final List<Map<String, Object>> packets = new ArrayList<>();
++        final List<Map<String, Object>> tags = new ArrayList<>();
++        String lastGroupArg = "unset";
++        String lastDevArg = "unset";
++
++        @Override
++        public List<Map<String, Object>> selectSyncGroups(String ptlGrpCd) {
++            lastGroupArg = ptlGrpCd;
++            return groups.stream().filter(r -> ptlGrpCd == null || ptlGrpCd.equals(r.get("ptlGrpCd"))).toList();
++        }
++
++        @Override
++        public List<Map<String, Object>> selectSyncProtocols(String ptlGrpCd) {
++            return protocols.stream().filter(r -> ptlGrpCd == null || ptlGrpCd.equals(r.get("ptlGrpCd"))).toList();
++        }
++
++        @Override
++        public List<Map<String, Object>> selectSyncPackets(String ptlGrpCd) {
++            return packets.stream().filter(r -> ptlGrpCd == null || ptlGrpCd.equals(r.get("ptlGrpCd"))).toList();
++        }
++
++        @Override
++        public List<Map<String, Object>> selectSyncDataTags(String devCd) {
++            lastDevArg = devCd;
++            return tags.stream().filter(r -> devCd == null || devCd.equals(r.get("devCd"))).toList();
++        }
++    }
++
++    private static FakeDao gtec() {
++        FakeDao dao = new FakeDao();
++        dao.groups.add(row("ptlGrpCd", "GTEC", "ptlGrpNm", "그린테크", "pollingIntval", 1000, "timeoutMs", 3000, "retryCnt", 3, "sortOrd", 0));
++        dao.groups.add(row("ptlGrpCd", "OTHER", "pollingIntval", 500, "timeoutMs", 1000, "retryCnt", 1, "sortOrd", 1));
++        dao.protocols.add(row("ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "ptlType", "PROT0000", "ptlVal", "S{TEST}[CR][LF]", "ptlNm", "장치확인"));
++        dao.protocols.add(row("ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "ptlType", "PROT0000", "ptlVal", "S{10,3}", "ptlLen", 7L));
++        dao.packets.add(row("ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "packetSeq", 1, "direction", "TX", "packetExpr", "S{TEST}[CR][LF]", "dataCount", 0));
++        dao.packets.add(row("ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "packetSeq", 2, "direction", "RX", "packetExpr", "{OK}[CR][LF]", "dataCount", 0));
++        dao.tags.add(row("devCd", "SDEV_GTEC01", "datGrCd", "DG_GTEC01", "datCd", "GTEC-DATA-01", "datIdx", 1, "datType", "DATA0001",
++                "datUnit", "", "tagId", "CH1", "datNm", "GTEC Analog CH1", "datMin", new BigDecimal("0.0000000000"), "sortOrd", 1));
++        dao.tags.add(row("devCd", "VDEV_GTEC01", "datGrCd", "DG_GTECV01", "datCd", "VGTEC-DATA-01", "datIdx", 1, "tagId", "CH1"));
++        return dao;
++    }
++
++    @Test
++    void groupsNestProtocolsAndPacketsInOrder() {
++        SyncResult<ProtocolGroupSync> r = new ProtocolSyncService(gtec()).getProtocolGroups(null);
++
++        assertEquals(2, r.items().size());
++        ProtocolGroupSync g = r.items().get(0);
++        assertEquals("GTEC", g.ptlGrpCd());
++        assertEquals(3000, g.timeoutMs());
++        assertEquals(2, g.protocols().size());
++        assertEquals("GTEC0000", g.protocols().get(0).ptlCd());
++        assertEquals(2, g.protocols().get(0).packets().size());
++        assertEquals("TX", g.protocols().get(0).packets().get(0).direction());
++        assertEquals(7, g.protocols().get(1).ptlLen());
++        assertTrue(g.protocols().get(1).packets().isEmpty());
++        assertTrue(r.items().get(1).protocols().isEmpty());
++        assertTrue(r.removed().isEmpty());
++        assertEquals(64, r.revision().length());
++    }
++
++    @Test
++    void singleGroupFilterAndUnknownGroupIsEmpty() {
++        FakeDao dao = gtec();
++        ProtocolSyncService service = new ProtocolSyncService(dao);
++
++        assertEquals(1, service.getProtocolGroups("GTEC").items().size());
++        assertEquals("GTEC", dao.lastGroupArg);
++        assertTrue(service.getProtocolGroups("NONE").items().isEmpty());
++    }
++
++    @Test
++    void revisionIsStableAndChangesWithContent() {
++        FakeDao dao = gtec();
++        ProtocolSyncService service = new ProtocolSyncService(dao);
++        String first = service.getProtocolGroups(null).revision();
++
++        assertEquals(first, service.getProtocolGroups(null).revision());
++        dao.groups.get(0).put("timeoutMs", 2000);
++        assertNotEquals(first, service.getProtocolGroups(null).revision());
++    }
++
++    @Test
++    void dataTagsByDevice() {
++        FakeDao dao = gtec();
++        SyncResult<DataTagSync> r = new ProtocolSyncService(dao).getDataTags("SDEV_GTEC01");
++
++        assertEquals("SDEV_GTEC01", dao.lastDevArg);
++        assertEquals(1, r.items().size());
++        DataTagSync t = r.items().get(0);
++        assertEquals("CH1", t.tagId());
++        assertEquals(1, t.datIdx());
++        assertEquals(0, BigDecimal.ZERO.compareTo(t.datMin()));
++        assertNull(t.datMax());
++        assertEquals(2, new ProtocolSyncService(dao).getDataTags(null).items().size());
++    }
++
++    @Test
++    void upperCaseAliasesFromDriverAreRead() {
++        FakeDao dao = new FakeDao();
++        dao.groups.add(row("PTLGRPCD", "GTEC", "TIMEOUTMS", 1500));
++        ProtocolGroupSync g = new ProtocolSyncService(dao).getProtocolGroups(null).items().get(0);
++        assertEquals("GTEC", g.ptlGrpCd());
++        assertEquals(1500, g.timeoutMs());
++        assertEquals(3, g.retryCnt());
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java
+new file mode 100644
+index 0000000..83b3b8e
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java
+@@ -0,0 +1,23 @@
++package com.asdp.juprovider.core.protocolsync.dao;
++
++import java.util.List;
++import java.util.Map;
++
++import org.apache.ibatis.annotations.Mapper;
++import org.apache.ibatis.annotations.Param;
++
++/**
++ * C4 내려받기 조회 (읽기 전용). 결과 키는 camelCase 별칭.
++ * ptlGrpCd / devCd 가 null 이면 전체.
++ */
++@Mapper
++public interface ProtocolSyncDao {
++
++    List<Map<String, Object>> selectSyncGroups(@Param("ptlGrpCd") String ptlGrpCd);
++
++    List<Map<String, Object>> selectSyncProtocols(@Param("ptlGrpCd") String ptlGrpCd);
++
++    List<Map<String, Object>> selectSyncPackets(@Param("ptlGrpCd") String ptlGrpCd);
++
++    List<Map<String, Object>> selectSyncDataTags(@Param("devCd") String devCd);
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataTagSync.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataTagSync.java
+new file mode 100644
+index 0000000..2ac277d
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataTagSync.java
+@@ -0,0 +1,18 @@
++package com.asdp.juprovider.core.protocolsync.dto;
++
++import java.math.BigDecimal;
++
++/** ju_data_group(DEV_CD) + ju_data_tag + ju_data_tag_detail (사용 중인 것만) */
++public record DataTagSync(
++        String devCd,
++        String datGrCd,
++        String datCd,
++        int datIdx,
++        String datType,
++        String datUnit,
++        String tagId,
++        String datNm,
++        BigDecimal datMin,
++        BigDecimal datMax,
++        int sortOrd) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java
+new file mode 100644
+index 0000000..408f4a7
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocolsync.dto;
++
++import java.util.List;
++
++/** ju_protocol_group + ju_protocol_group_detail (사용 중인 것만) */
++public record ProtocolGroupSync(
++        String ptlGrpCd,
++        String ptlGrpNm,
++        int pollingIntval,
++        int timeoutMs,
++        int retryCnt,
++        int sortOrd,
++        List<ProtocolSync> protocols) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolPacketSync.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolPacketSync.java
+new file mode 100644
+index 0000000..e95d563
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolPacketSync.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocolsync.dto;
++
++/** ju_protocol_packet (사용 중인 것만) */
++public record ProtocolPacketSync(
++        int packetSeq,
++        String packetType,
++        String direction,
++        String packetExpr,
++        String responsePtlCd,
++        String parseRule,
++        int dataCount,
++        String dataType,
++        String dataPosition) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java
+new file mode 100644
+index 0000000..2ca1917
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java
+@@ -0,0 +1,14 @@
++package com.asdp.juprovider.core.protocolsync.dto;
++
++import java.util.List;
++
++/** ju_protocol + ju_protocol_detail (사용 중인 것만) */
++public record ProtocolSync(
++        String ptlCd,
++        String ptlType,
++        Integer ptlLen,
++        String ptlVal,
++        String ptlNm,
++        String ptlDesc,
++        List<ProtocolPacketSync> packets) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/SyncResult.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/SyncResult.java
+new file mode 100644
+index 0000000..4961828
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/SyncResult.java
+@@ -0,0 +1,12 @@
++package com.asdp.juprovider.core.protocolsync.dto;
++
++import java.util.List;
++
++/**
++ * 내려받기 응답 (C4, SYNC-01 형식).
++ *
++ * revision: items 내용의 SHA-256 (같으면 변경 없음).
++ * removed: 삭제 추적이 생기기 전까지 항상 빈 목록.
++ */
++public record SyncResult<T>(String revision, List<T> items, List<String> removed) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java
+new file mode 100644
+index 0000000..bd291c2
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java
+@@ -0,0 +1,170 @@
++package com.asdp.juprovider.core.protocolsync.service;
++
++import java.math.BigDecimal;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.ArrayList;
++import java.util.HexFormat;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++import org.springframework.stereotype.Service;
++
++import com.asdp.juprovider.core.protocolsync.dao.ProtocolSyncDao;
++import com.asdp.juprovider.core.protocolsync.dto.DataTagSync;
++import com.asdp.juprovider.core.protocolsync.dto.ProtocolGroupSync;
++import com.asdp.juprovider.core.protocolsync.dto.ProtocolPacketSync;
++import com.asdp.juprovider.core.protocolsync.dto.ProtocolSync;
++import com.asdp.juprovider.core.protocolsync.dto.SyncResult;
++
++/**
++ * C4 프로토콜·데이터 태그 내려받기 (읽기 전용, DB 변경 없음).
++ *
++ * 그룹 → 프로토콜 → 패킷을 조회 순서(정렬된 SQL) 그대로 묶는다.
++ * revision 은 결과 내용의 SHA-256 이라 같은 데이터면 항상 같다.
++ */
++@Service
++public class ProtocolSyncService {
++
++    private final ProtocolSyncDao dao;
++
++    public ProtocolSyncService(ProtocolSyncDao dao) {
++        this.dao = dao;
++    }
++
++    /** ptlGrpCd 가 null 이면 사용 중인 전체 그룹 */
++    public SyncResult<ProtocolGroupSync> getProtocolGroups(String ptlGrpCd) {
++
++        Map<String, List<ProtocolPacketSync>> packets = new LinkedHashMap<>();
++        for (Map<String, Object> r : nullSafe(dao.selectSyncPackets(ptlGrpCd))) {
++            String key = str(r, "ptlGrpCd") + "\u0000" + str(r, "ptlCd");
++            packets.computeIfAbsent(key, k -> new ArrayList<>()).add(new ProtocolPacketSync(
++                    integer(r, "packetSeq", 0),
++                    str(r, "packetType"),
++                    str(r, "direction"),
++                    str(r, "packetExpr"),
++                    str(r, "responsePtlCd"),
++                    str(r, "parseRule"),
++                    integer(r, "dataCount", 0),
++                    str(r, "dataType"),
++                    str(r, "dataPosition")));
++        }
++
++        Map<String, List<ProtocolSync>> protocols = new LinkedHashMap<>();
++        for (Map<String, Object> r : nullSafe(dao.selectSyncProtocols(ptlGrpCd))) {
++            String grp = str(r, "ptlGrpCd");
++            String ptl = str(r, "ptlCd");
++            protocols.computeIfAbsent(grp, k -> new ArrayList<>()).add(new ProtocolSync(
++                    ptl,
++                    str(r, "ptlType"),
++                    nullableInteger(r, "ptlLen"),
++                    str(r, "ptlVal"),
++                    str(r, "ptlNm"),
++                    str(r, "ptlDesc"),
++                    List.copyOf(packets.getOrDefault(grp + "\u0000" + ptl, List.of()))));
++        }
++
++        List<ProtocolGroupSync> groups = new ArrayList<>();
++        for (Map<String, Object> r : nullSafe(dao.selectSyncGroups(ptlGrpCd))) {
++            String grp = str(r, "ptlGrpCd");
++            groups.add(new ProtocolGroupSync(
++                    grp,
++                    str(r, "ptlGrpNm"),
++                    integer(r, "pollingIntval", 1000),
++                    integer(r, "timeoutMs", 3000),
++                    integer(r, "retryCnt", 3),
++                    integer(r, "sortOrd", 0),
++                    List.copyOf(protocols.getOrDefault(grp, List.of()))));
++        }
++
++        return result(groups);
++    }
++
++    /** devCd 가 null 이면 사용 중인 전체 장치 */
++    public SyncResult<DataTagSync> getDataTags(String devCd) {
++
++        List<DataTagSync> tags = new ArrayList<>();
++        for (Map<String, Object> r : nullSafe(dao.selectSyncDataTags(devCd))) {
++            tags.add(new DataTagSync(
++                    str(r, "devCd"),
++                    str(r, "datGrCd"),
++                    str(r, "datCd"),
++                    integer(r, "datIdx", 0),
++                    str(r, "datType"),
++                    str(r, "datUnit"),
++                    str(r, "tagId"),
++                    str(r, "datNm"),
++                    decimal(r, "datMin"),
++                    decimal(r, "datMax"),
++                    integer(r, "sortOrd", 0)));
++        }
++        return result(tags);
++    }
++
++    static <T> SyncResult<T> result(List<T> items) {
++        List<T> copy = List.copyOf(items);
++        return new SyncResult<>(revisionOf(copy), copy, List.of());
++    }
++
++    /** record toString 은 필드 순서·값이 같으면 같다 → 내용 해시 */
++    static String revisionOf(List<?> items) {
++        try {
++            MessageDigest md = MessageDigest.getInstance("SHA-256");
++            byte[] hash = md.digest(items.toString().getBytes(StandardCharsets.UTF_8));
++            return HexFormat.of().formatHex(hash);
++        } catch (NoSuchAlgorithmException e) {
++            throw new IllegalStateException("SHA-256 사용 불가", e);
++        }
++    }
++
++    private static List<Map<String, Object>> nullSafe(List<Map<String, Object>> rows) {
++        return rows == null ? List.of() : rows;
++    }
++
++    private static Object value(Map<String, Object> r, String key) {
++        if (r.containsKey(key)) {
++            return r.get(key);
++        }
++        // DB 드라이버가 별칭 대소문자를 바꾼 경우 대비
++        for (Map.Entry<String, Object> e : r.entrySet()) {
++            if (e.getKey() != null && e.getKey().equalsIgnoreCase(key)) {
++                return e.getValue();
++            }
++        }
++        return null;
++    }
++
++    private static String str(Map<String, Object> r, String key) {
++        Object v = value(r, key);
++        return v == null ? null : v.toString();
++    }
++
++    private static Integer nullableInteger(Map<String, Object> r, String key) {
++        Object v = value(r, key);
++        if (v == null) {
++            return null;
++        }
++        if (v instanceof Number n) {
++            return n.intValue();
++        }
++        return Integer.valueOf(v.toString().trim());
++    }
++
++    private static int integer(Map<String, Object> r, String key, int fallback) {
++        Integer v = nullableInteger(r, key);
++        return v == null ? fallback : v;
++    }
++
++    private static BigDecimal decimal(Map<String, Object> r, String key) {
++        Object v = value(r, key);
++        if (v == null) {
++            return null;
++        }
++        if (v instanceof BigDecimal d) {
++            return d;
++        }
++        return new BigDecimal(v.toString().trim());
++    }
++}
+diff --git a/juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml b/juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml
+new file mode 100644
+index 0000000..447ab98
+--- /dev/null
++++ b/juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml
+@@ -0,0 +1,98 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
++        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
++
++<!-- C4 프로토콜·데이터 태그 내려받기 (읽기 전용). 사용여부 YENO0001 만. -->
++<mapper namespace="com.asdp.juprovider.core.protocolsync.dao.ProtocolSyncDao">
++
++    <select id="selectSyncGroups" resultType="map">
++        SELECT G.PTL_GRP_CD      AS ptlGrpCd,
++               GD.PTL_GRP_NM     AS ptlGrpNm,
++               G.POLLING_INTVAL  AS pollingIntval,
++               G.TIMEOUT_MS      AS timeoutMs,
++               G.RETRY_CNT       AS retryCnt,
++               G.SORT_ORD        AS sortOrd
++          FROM ju_protocol_group G
++          LEFT JOIN ju_protocol_group_detail GD
++            ON GD.PTL_GRP_CD = G.PTL_GRP_CD
++         WHERE G.USE_YN = 'YENO0001'
++        <if test="ptlGrpCd != null">
++           AND G.PTL_GRP_CD = #{ptlGrpCd}
++        </if>
++         ORDER BY G.SORT_ORD, G.PTL_GRP_CD
++    </select>
++
++    <select id="selectSyncProtocols" resultType="map">
++        SELECT P.PTL_GRP_CD  AS ptlGrpCd,
++               P.PTL_CD      AS ptlCd,
++               P.PTL_TYPE    AS ptlType,
++               P.PTL_LEN     AS ptlLen,
++               P.PTL_VAL     AS ptlVal,
++               PD.PTL_NM     AS ptlNm,
++               PD.PTL_DESC   AS ptlDesc
++          FROM ju_protocol P
++          JOIN ju_protocol_group G
++            ON G.PTL_GRP_CD = P.PTL_GRP_CD
++           AND G.USE_YN = 'YENO0001'
++          LEFT JOIN ju_protocol_detail PD
++            ON PD.PTL_GRP_CD = P.PTL_GRP_CD
++           AND PD.PTL_CD = P.PTL_CD
++         WHERE P.USE_YN = 'YENO0001'
++        <if test="ptlGrpCd != null">
++           AND P.PTL_GRP_CD = #{ptlGrpCd}
++        </if>
++         ORDER BY P.PTL_GRP_CD, P.PTL_CD
++    </select>
++
++    <select id="selectSyncPackets" resultType="map">
++        SELECT K.PTL_GRP_CD       AS ptlGrpCd,
++               K.PTL_CD           AS ptlCd,
++               K.PACKET_SEQ       AS packetSeq,
++               K.PACKET_TYPE      AS packetType,
++               K.DIRECTION        AS direction,
++               K.PACKET_EXPR      AS packetExpr,
++               K.RESPONSE_PTL_CD  AS responsePtlCd,
++               K.PARSE_RULE       AS parseRule,
++               K.DATA_COUNT       AS dataCount,
++               K.DATA_TYPE        AS dataType,
++               K.DATA_POSITION    AS dataPosition
++          FROM ju_protocol_packet K
++          JOIN ju_protocol P
++            ON P.PTL_GRP_CD = K.PTL_GRP_CD
++           AND P.PTL_CD = K.PTL_CD
++           AND P.USE_YN = 'YENO0001'
++         WHERE K.USE_YN = 'YENO0001'
++        <if test="ptlGrpCd != null">
++           AND K.PTL_GRP_CD = #{ptlGrpCd}
++        </if>
++         ORDER BY K.PTL_GRP_CD, K.PTL_CD, K.PACKET_SEQ
++    </select>
++
++    <select id="selectSyncDataTags" resultType="map">
++        SELECT DG.DEV_CD       AS devCd,
++               T.DAT_GR_CD     AS datGrCd,
++               T.DAT_CD        AS datCd,
++               T.DAT_IDX       AS datIdx,
++               T.DAT_TYPE      AS datType,
++               T.DAT_UNIT      AS datUnit,
++               T.TAG_ID        AS tagId,
++               TD.DAT_NM       AS datNm,
++               TD.DAT_MIN      AS datMin,
++               TD.DAT_MAX      AS datMax,
++               T.SORT_ORD      AS sortOrd
++          FROM ju_data_tag T
++          JOIN ju_data_group DG
++            ON DG.DAT_GR_CD = T.DAT_GR_CD
++           AND DG.USE_YN = 'YENO0001'
++          LEFT JOIN ju_data_tag_detail TD
++            ON TD.DAT_GR_CD = T.DAT_GR_CD
++           AND TD.DAT_CD = T.DAT_CD
++           AND TD.DAT_IDX = T.DAT_IDX
++         WHERE T.USE_YN = 'YENO0001'
++        <if test="devCd != null">
++           AND DG.DEV_CD = #{devCd}
++        </if>
++         ORDER BY DG.DEV_CD, DG.SORT_ORD, T.DAT_GR_CD, T.SORT_ORD, T.DAT_CD, T.DAT_IDX
++    </select>
++
++</mapper>
+-- 
+2.43.0
+

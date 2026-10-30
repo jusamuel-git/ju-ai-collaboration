@@ -1,0 +1,17 @@
+feat(collect): protocol/data-tag sync API, init routine, command gap, frame start (C4)
+
+Server (read-only, no DB change)
+- GET /api/core/sync/protocols[/{ptlGrpCd}], GET /api/core/sync/data-tags?devCd= (client key chain)
+- Response {revision (content SHA-256), items, removed}; groups -> protocols -> packets, data tags by device
+
+Desktop
+- Sync models + JuProviderApiClient.GetProtocolGroupsAsync / GetDataTagsAsync
+- CollectionProfile (per protocol group, desktop resource until DB columns): frame rule, command gap,
+  init routine, protocol overlays; built-in GTEC (STOP -> check -> sensor info -> mode, 200 ms gap, '{' start)
+- CollectionPlanBuilder: server definitions + profile -> DeviceSession config, TAG_ID=CH<n> mapping
+- DeviceSession: init routine on connect/reconnect (Initializing state, external commands wait)
+- Frame rule start option: drop noise before start, drop broken frame when next start arrives before end
+- Tests: frame start/noise, profile/plan, init routine, gap, reconnect regression on GTEC-like device; server service test
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
