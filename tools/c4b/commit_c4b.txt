@@ -1,0 +1,8 @@
+fix(api): return 405 for unsupported HTTP method (C4b)
+
+- GlobalExceptionHandler: HttpRequestMethodNotSupportedException -> 405 + Allow header
+  (was caught by the generic handler as 500; found in C4 live server check 3-7)
+- Unit test for the handler
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

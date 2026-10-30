@@ -1,10 +1,11 @@
 ﻿# C4 실서버 검증: feature/collect-c4 WAR + 테스트 DB(실제 DB 덤프 사본) 18081. 실제 DB는 mysqldump(읽기)만, 변경 검증은 테스트 DB의 테스트 데이터로.
 # 비밀 값(DB 비밀번호·JWT·Client Key·사용자 비밀번호)은 로그에 쓰지 않는다. 제품 저장소 변경 없음.
+param([switch]$Fix)
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ws  = 'C:\MyData\MyDev\workspace'
 $src = Join-Path $ws 'ai_changes\c4srv'
-$log = Join-Path $ws ("ai_c4srv_{0}.log" -f $env:COMPUTERNAME)
+$log = Join-Path $ws ($(if ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
 $enc = New-Object System.Text.UTF8Encoding($false)
 New-Item -ItemType Directory -Force -Path $src | Out-Null
 [IO.File]::WriteAllText($log, '', $enc)
@@ -21,11 +22,17 @@ Log ("C4 SERVER " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Log ''; Log '===== 1. 브랜치 / WAR ====='
 $b = (& git -C $jp rev-parse --abbrev-ref HEAD); $h = (& git -C $jp log -1 --format=%h)
 Log "  branch $b @ $h"
+$war = Join-Path $jp 'juprovider.backend\target\juprovider.war'
+if ($Fix) {
+    if ($b -ne 'feature/collect-c4') { Stop 'feature/collect-c4 아님' }
+    if (-not (Test-Path $war) -or (Get-Item $war).LastWriteTime -lt (Get-Date).AddMinutes(-30)) { Stop '방금 빌드한 WAR 없음' }
+    $ct = (Get-Item $war).LastWriteTime
+} else {
 if ($b -ne 'feature/collect-c4' -or $h -ne 'd3a560a') { Stop 'feature/collect-c4 @ d3a560a 아님' }
 if (@(& git -C $jp status --porcelain).Count -ne 0) { Stop '작업 폴더 변경 있음' }
-$war = Join-Path $jp 'juprovider.backend\target\juprovider.war'
 $ct = [DateTime]::Parse((& git -C $jp log -1 --format=%cI))
 if (-not (Test-Path $war) -or (Get-Item $war).LastWriteTime -lt $ct.AddMinutes(-10)) { Stop 'C4 WAR 없음 또는 오래됨' }
+}
 Log ("  WAR " + (Get-Item $war).LastWriteTime.ToString('HH:mm:ss') + " (commit " + $ct.ToLocalTime().ToString('HH:mm:ss') + ")")
 if ((Test-NetConnection localhost -Port 18081 -WarningAction SilentlyContinue).TcpTestSucceeded) { Stop '18081 사용 중' }
 
@@ -127,7 +134,8 @@ if ($ready) {
         Check $case[0] ("인증 " + $case[1]) (@($codes | Where-Object { $_ -ne $case[5] }).Count -eq 0) ("HTTP " + ($codes -join '/') + " (기대 " + $case[5] + ")")
     }
     $r = C 'POST' '/api/core/sync/protocols' $CID $ck '' '{}'
-    Check '3-7' '쓰기 메서드 POST /sync/protocols' ($r.code -in '403', '404', '405') ("HTTP " + $r.code + " (조회 전용, 처리 안 됨)")
+    if ($Fix) { Check '3-7' 'POST /sync/protocols (조회 전용)' (($r.code -eq '405') -and ($r.json.success -eq $false)) ("HTTP " + $r.code + ", " + $r.json.message) }
+    else { Check '3-7' '쓰기 메서드 POST /sync/protocols' ($r.code -in '403', '404', '405') ("HTTP " + $r.code + " (조회 전용, 처리 안 됨)") }
 
     # --- 4. USE_YN 필터·순서 (테스트 DB 테스트 데이터) ---
     $sql = @(
@@ -180,6 +188,22 @@ if ($ready) {
         $passN = @($po | Where-Object { $_ -match '^\[PASS\]' }).Count; $failN = @($po | Where-Object { $_ -match '^\[FAIL\]' }).Count
         Check '6-1' '실제 응답 → Desktop 역직렬화 → CollectionPlan' ($pc6 -eq 0) ("하위 확인 PASS $passN / FAIL $failN")
     } else { Check '6-1' '실제 응답 → Desktop 역직렬화 → CollectionPlan' $false '도구 빌드 실패' }
+
+    if ($Fix) {
+        Log '  --- 9. 기존 API 회귀 ---'
+        $r = C 'GET' '/api/health' '' '' '' ''; Check '9-1' 'GET /api/health' ($r.code -eq '200') ("HTTP " + $r.code)
+        $r = C 'POST' '/api/auth/login' '' '' '' '{"loginId":"smoke_c4","password":"wrong-pw-000"}'; Check '9-2' '로그인 잘못된 비밀번호' ($r.code -eq '401') ("HTTP " + $r.code)
+        $r = C 'POST' '/api/auth/login' '' '' '' '{"loginId":'; Check '9-3' '로그인 JSON 형식 오류' ($r.code -eq '400') ("HTTP " + $r.code)
+        $r = C 'GET' '/api/auth/me' '' '' $ta ''; Check '9-4' 'GET /api/auth/me (JWT)' ($r.code -eq '200') ("HTTP " + $r.code)
+        $r = C 'GET' '/api/admin/clients' '' '' $ta ''; Check '9-5' 'GET /api/admin/clients (관리자)' ($r.code -eq '200') ("HTTP " + $r.code)
+        $r = C 'GET' '/api/core/languages' '' '' $ta ''; Check '9-6' 'GET /api/core/languages' ($r.code -eq '200') ("HTTP " + $r.code)
+        $r = C 'GET' '/api/core/sync/devices' $CID $ck '' ''; Check '9-7' 'GET /api/core/sync/devices (Client 키)' (($r.code -eq '200') -and (@($r.json).Count -gt 0)) ("HTTP " + $r.code + ", 장치 " + @($r.json).Count)
+        $r = C 'GET' '/api/core/sync/devices/SDEV_GTEC01' $CID $ck '' ''; Check '9-8' 'GET /api/core/sync/devices/{dev}' (($r.code -eq '200') -and ($r.body -match 'SDEV_GTEC01')) ("HTTP " + $r.code)
+        $r = C 'DELETE' '/api/core/sync/devices' $CID $ck '' ''; Check '9-9' 'DELETE /api/core/sync/devices (미지원)' ($r.code -eq '405') ("HTTP " + $r.code)
+        $r = C 'GET' '/api/core/sync/devices' '' '' '' ''; Check '9-10' 'GET /sync/devices 무헤더' ($r.code -eq '401') ("HTTP " + $r.code)
+        $r = C 'POST' '/api/action/15/SEARCH' '' '' $ta '{"parameters":{}}'; Check '9-11' 'Action 실행 POST /api/action/15/SEARCH (장치 조회)' ($r.code -eq '200') ("HTTP " + $r.code)
+        $r = C 'GET' '/api/action/15/SEARCH' '' '' $ta ''; Check '9-12' 'GET /api/action/15/SEARCH (미지원 메서드)' ($r.code -eq '405') ("HTTP " + $r.code)
+    }
 
     Log ''; Log '===== 6. 서버 로그 오류 ====='
     $err = @(Get-Content "$src\app_out.txt","$src\app_err.txt" -ErrorAction SilentlyContinue | Select-String -Pattern 'ERROR|Exception' | Select-Object -First 10)

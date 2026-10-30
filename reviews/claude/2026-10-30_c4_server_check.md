@@ -32,3 +32,10 @@
 ## 참고
 - 1·2차 실행(15:00, 15:03)은 검증 도구 오류(PowerShell 5.1이 curl 인자의 JSON 따옴표를 제거 → 로그인 400)로 무효. 요청 본문을 파일로 넘기도록 도구만 고친 뒤 3차(15:05) 결과가 위 표.
 - 계획 경고: seed의 GTEC0101~0105·0200·0201은 수집 설정이 없어 PTL_TYPE(POLLING) 그대로, GTEC0003·0401·0402는 송신 표현식 없음으로 제외 — C5에서 PTL_TYPE·역할 정정 시 해소.
+
+## C4b 405 수정 (15:20) — PASS
+- `feature/collect-c4` @ `66e9255` (← `d3a560a`), 별도 로컬 commit. `GlobalExceptionHandler` 에 `HttpRequestMethodNotSupportedException` → 405 + `Allow` 헤더, 단위 테스트 2. 2 files +52. 패치: [2026-10-30_c4b_result.patch](2026-10-30_c4b_result.patch)
+- 빌드 5종 PASS, 서버 테스트 15/15, Desktop 175/175
+- 실서버(테스트 DB) 재검증 **31/31 PASS**: 위 1~8 항목 전부 + **3-7 `POST /api/core/sync/protocols` → 405** + 기존 API 회귀 9-1~9-12(health 200, 로그인 오류 401·형식 오류 400, me 200, admin/clients 200, languages 200, sync/devices 200·단건 200·무헤더 401·DELETE 405, `POST /api/action/15/SEARCH` 200, 같은 경로 GET 405). 실제 DB 무변경, 로그 비밀 값 없음
+- 참고(수정 안 함): 숫자 자리에 문자를 넣은 경로(`/api/action/M02010100/...`, 이 브랜치는 menuId 숫자)는 `MethodArgumentTypeMismatchException` 이 여전히 공통 처리로 500 — 400 이 맞음. 같은 방식의 최소 수정 가능, 승인 시 진행
+- 1차 실행(15:15)은 검증 도구가 이 브랜치에 없는 메뉴 코드 경로를 써서 9-11 실패(제품 문제 아님) → 도구만 숫자 경로로 수정 후 재실행

@@ -1,0 +1,96 @@
+From c329b7ba8456d9ac957b2174054e9bfdb1a5b1f4 Mon Sep 17 00:00:00 2001
+From: JU <jusamuel@gmail.com>
+Date: Fri, 30 Oct 2026 15:25:42 +0900
+Subject: [PATCH] fix(api): return 405 for unsupported HTTP method (C4b)
+
+- GlobalExceptionHandler: HttpRequestMethodNotSupportedException -> 405 + Allow header
+  (was caught by the generic handler as 500; found in C4 live server check 3-7)
+- Unit test for the handler
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../exception/GlobalExceptionHandler.java     | 12 ++++++
+ .../exception/GlobalExceptionHandlerTest.java | 40 +++++++++++++++++++
+ 2 files changed, 52 insertions(+)
+ create mode 100644 juprovider.backend/src/test/java/com/asdp/juprovider/exception/GlobalExceptionHandlerTest.java
+
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+index 7712dbf..1fcf452 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+@@ -6,6 +6,7 @@ import org.springframework.http.HttpStatus;
+ import org.springframework.http.ResponseEntity;
+ import org.springframework.http.converter.HttpMessageNotReadableException;
+ import org.springframework.validation.FieldError;
++import org.springframework.web.HttpRequestMethodNotSupportedException;
+ import org.springframework.web.bind.MethodArgumentNotValidException;
+ import org.springframework.web.bind.annotation.ExceptionHandler;
+ import org.springframework.web.bind.annotation.ResponseStatus;
+@@ -57,6 +58,17 @@ public class GlobalExceptionHandler {
+                 .body(new ApiResponse<>(false, null, "요청 형식이 올바르지 않습니다."));
+     }
+ 
++    /** 지원하지 않는 HTTP 메서드 → 405 + Allow (C4 실서버 검증 3-7) */
++    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
++    public ResponseEntity<ApiResponse<Void>> handleMethodNotSupported(
++            HttpRequestMethodNotSupportedException exception) {
++        ResponseEntity.BodyBuilder builder = ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED);
++        if (exception.getSupportedHttpMethods() != null) {
++            builder.allow(exception.getSupportedHttpMethods().toArray(new org.springframework.http.HttpMethod[0]));
++        }
++        return builder.body(new ApiResponse<>(false, null, "지원하지 않는 요청 방식입니다."));
++    }
++
+     @ExceptionHandler(Exception.class)
+     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+     public ApiResponse<Void> handleException(Exception e) {
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/exception/GlobalExceptionHandlerTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/exception/GlobalExceptionHandlerTest.java
+new file mode 100644
+index 0000000..f839cba
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/exception/GlobalExceptionHandlerTest.java
+@@ -0,0 +1,40 @@
++package com.asdp.juprovider.exception;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.util.List;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.http.HttpMethod;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.HttpRequestMethodNotSupportedException;
++
++import com.asdp.juprovider.dto.ApiResponse;
++
++/** 지원하지 않는 HTTP 메서드 → 405 (C4 실서버 검증 3-7) */
++class GlobalExceptionHandlerTest {
++
++    private final GlobalExceptionHandler handler = new GlobalExceptionHandler();
++
++    @Test
++    void methodNotSupportedIs405WithAllow() {
++        ResponseEntity<ApiResponse<Void>> r = handler.handleMethodNotSupported(
++                new HttpRequestMethodNotSupportedException("POST", List.of("GET")));
++
++        assertEquals(HttpStatus.METHOD_NOT_ALLOWED, r.getStatusCode());
++        assertTrue(r.getHeaders().getAllow().contains(HttpMethod.GET));
++        assertFalse(r.getBody().success());
++    }
++
++    @Test
++    void methodNotSupportedWithoutSupportedMethodsIs405() {
++        ResponseEntity<ApiResponse<Void>> r = handler.handleMethodNotSupported(
++                new HttpRequestMethodNotSupportedException("PATCH"));
++
++        assertEquals(HttpStatus.METHOD_NOT_ALLOWED, r.getStatusCode());
++        assertTrue(r.getHeaders().getAllow().isEmpty());
++    }
++}
+-- 
+2.43.0
+
