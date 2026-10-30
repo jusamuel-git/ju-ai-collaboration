@@ -1,11 +1,12 @@
 ﻿# C4 실서버 검증: feature/collect-c4 WAR + 테스트 DB(실제 DB 덤프 사본) 18081. 실제 DB는 mysqldump(읽기)만, 변경 검증은 테스트 DB의 테스트 데이터로.
 # 비밀 값(DB 비밀번호·JWT·Client Key·사용자 비밀번호)은 로그에 쓰지 않는다. 제품 저장소 변경 없음.
-param([switch]$Fix)
+param([switch]$Fix, [switch]$Merge)
+if ($Merge) { $Fix = $true }
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ws  = 'C:\MyData\MyDev\workspace'
 $src = Join-Path $ws 'ai_changes\c4srv'
-$log = Join-Path $ws ($(if ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
+$log = Join-Path $ws ($(if ($Merge) {'ai_c5a_srv_{0}.log'} elseif ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
 $enc = New-Object System.Text.UTF8Encoding($false)
 New-Item -ItemType Directory -Force -Path $src | Out-Null
 [IO.File]::WriteAllText($log, '', $enc)
@@ -24,7 +25,7 @@ $b = (& git -C $jp rev-parse --abbrev-ref HEAD); $h = (& git -C $jp log -1 --for
 Log "  branch $b @ $h"
 $war = Join-Path $jp 'juprovider.backend\target\juprovider.war'
 if ($Fix) {
-    if ($b -ne 'feature/collect-c4') { Stop 'feature/collect-c4 아님' }
+    if ($b -ne $(if ($Merge) {'feature/collect-c5'} else {'feature/collect-c4'})) { Stop "예상 브랜치 아님: $b" }
     if (-not (Test-Path $war) -or (Get-Item $war).LastWriteTime -lt (Get-Date).AddMinutes(-30)) { Stop '방금 빌드한 WAR 없음' }
     $ct = (Get-Item $war).LastWriteTime
 } else {
@@ -51,6 +52,7 @@ $dump = Join-Path $src 'juprovider_dump.sql'
 cmd /c "`"$bin\mysqldump.exe`" -h localhost -u $($vars['JU_DB_USER']) --default-character-set=utf8mb4 --single-transaction --routines --triggers juprovider > `"$dump`" 2>&1"
 cmd /c "$base -e `"DROP DATABASE IF EXISTS $T; CREATE DATABASE $T CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`"" | Out-Null
 cmd /c "$base $T < `"$dump`""; Log ("  $T 적재 exit $LASTEXITCODE"); Remove-Item $dump -Force
+if ($Merge) { cmd /c "$base $T < `"$jp\database\migration\06_protocol_actions.sql`""; Log ("  06 적용(테스트 DB) exit $LASTEXITCODE") }
 
 Log ''; Log '===== 3. 서버 기동 (18081, 테스트 DB) ====='
 $java = Join-Path $env:JAVA_HOME 'bin\java.exe'
@@ -134,7 +136,8 @@ if ($ready) {
         Check $case[0] ("인증 " + $case[1]) (@($codes | Where-Object { $_ -ne $case[5] }).Count -eq 0) ("HTTP " + ($codes -join '/') + " (기대 " + $case[5] + ")")
     }
     $r = C 'POST' '/api/core/sync/protocols' $CID $ck '' '{}'
-    if ($Fix) { Check '3-7' 'POST /sync/protocols (조회 전용)' (($r.code -eq '405') -and ($r.json.success -eq $false)) ("HTTP " + $r.code + ", " + $r.json.message) }
+    if ($Merge) { Check '3-7' 'POST /sync/protocols (SEC-S1: Client 체인 GET만)' (($r.code -eq '403') -and ($r.json.success -eq $false)) ("HTTP " + $r.code + ", " + $r.json.code + " " + $r.json.message) }
+    elseif ($Fix) { Check '3-7' 'POST /sync/protocols (조회 전용)' (($r.code -eq '405') -and ($r.json.success -eq $false)) ("HTTP " + $r.code + ", " + $r.json.message) }
     else { Check '3-7' '쓰기 메서드 POST /sync/protocols' ($r.code -in '403', '404', '405') ("HTTP " + $r.code + " (조회 전용, 처리 안 됨)") }
 
     # --- 4. USE_YN 필터·순서 (테스트 DB 테스트 데이터) ---
@@ -199,10 +202,35 @@ if ($ready) {
         $r = C 'GET' '/api/core/languages' '' '' $ta ''; Check '9-6' 'GET /api/core/languages' ($r.code -eq '200') ("HTTP " + $r.code)
         $r = C 'GET' '/api/core/sync/devices' $CID $ck '' ''; Check '9-7' 'GET /api/core/sync/devices (Client 키)' (($r.code -eq '200') -and (@($r.json).Count -gt 0)) ("HTTP " + $r.code + ", 장치 " + @($r.json).Count)
         $r = C 'GET' '/api/core/sync/devices/SDEV_GTEC01' $CID $ck '' ''; Check '9-8' 'GET /api/core/sync/devices/{dev}' (($r.code -eq '200') -and ($r.body -match 'SDEV_GTEC01')) ("HTTP " + $r.code)
-        $r = C 'DELETE' '/api/core/sync/devices' $CID $ck '' ''; Check '9-9' 'DELETE /api/core/sync/devices (미지원)' ($r.code -eq '405') ("HTTP " + $r.code)
+        $r = C 'DELETE' '/api/core/sync/devices' $CID $ck '' ''; Check '9-9' 'DELETE /api/core/sync/devices' ($r.code -eq $(if ($Merge) {'403'} else {'405'})) ("HTTP " + $r.code + $(if ($Merge) {' (SEC-S1)'} else {''}))
         $r = C 'GET' '/api/core/sync/devices' '' '' '' ''; Check '9-10' 'GET /sync/devices 무헤더' ($r.code -eq '401') ("HTTP " + $r.code)
         $r = C 'POST' '/api/action/15/SEARCH' '' '' $ta '{"parameters":{}}'; Check '9-11' 'Action 실행 POST /api/action/15/SEARCH (장치 조회)' ($r.code -eq '200') ("HTTP " + $r.code)
         $r = C 'GET' '/api/action/15/SEARCH' '' '' $ta ''; Check '9-12' 'GET /api/action/15/SEARCH (미지원 메서드)' ($r.code -eq '405') ("HTTP " + $r.code)
+    }
+
+    if ($Merge) {
+        Log '  --- 10. 통합 회귀 (integration-1 기능 + C4) ---'
+        $r = C 'PUT' '/api/core/sync/devices/SDEV_GTEC01' $CID $ck '' '{"devCd":"SDEV_GTEC01","devNm":"x"}'
+        Check '10-1' 'PUT /sync/devices (SEC-S1 차단)' (($r.code -eq '403') -and ($r.body -match 'FORBIDDEN')) ("HTTP " + $r.code + ", " + $r.json.code)
+        $r = C 'GET' '/api/core/no-such-path' '' '' $ta ''; Check '10-2' '없는 경로 (NoResourceFound)' ($r.code -eq '404') ("HTTP " + $r.code + ", " + $r.json.code)
+        $r = C 'POST' '/api/action/M02010100/GRP_SEARCH' '' '' $ta '{"contractVersion":1,"parameters":{}}'
+        Check '10-3' 'Protocol Action GRP_SEARCH (메뉴 코드 경로, v1)' (($r.code -eq '200') -and ($r.body -match '"items"')) ("HTTP " + $r.code + ", 그룹 " + @($r.json.data.items).Count)
+        $r = C 'POST' '/api/action/M02010100/GET' '' '' $ta '{"contractVersion":1,"parameters":{"ptlGrpCd":"GTEC","ptlCd":"GTEC0001"}}'
+        Check '10-4' 'Protocol Action GET GTEC0001' ($r.code -eq '200') ("HTTP " + $r.code)
+        $rev0 = (C 'GET' '/api/core/sync/protocols' $CID $ck '' '').json.revision
+        $r = C 'POST' '/api/action/M02010100/GRP_CREATE' '' '' $ta '{"contractVersion":1,"parameters":{"ptlGrpCd":"C5A_G","ptlGrpNm":"c5a"}}'
+        $g1 = C 'GET' '/api/core/sync/protocols/C5A_G' $CID $ck '' ''
+        Check '10-5' 'CRUD 그룹 추가 → 내려받기 반영' (($r.code -eq '200') -and ($g1.code -eq '200') -and ($g1.json.revision -ne $rev0)) ("GRP_CREATE " + $r.code + ", sync " + $g1.code + ", 프로토콜 " + @($g1.json.items[0].protocols).Count)
+        $r = C 'POST' '/api/action/M02010100/CREATE' '' '' $ta '{"contractVersion":1,"parameters":{"ptlGrpCd":"C5A_G","ptlCd":"C5AP1","ptlType":"PROT0003","ptlNm":"c5a p1"}}'
+        $g2 = C 'GET' '/api/core/sync/protocols/C5A_G' $CID $ck '' ''
+        Check '10-6' 'CRUD 프로토콜 추가 → 내려받기 반영' (($r.code -eq '200') -and (@($g2.json.items[0].protocols | Where-Object { $_.ptlCd -eq 'C5AP1' }).Count -eq 1)) ("CREATE " + $r.code + ", sync 프로토콜 " + ((@($g2.json.items[0].protocols) | ForEach-Object { $_.ptlCd }) -join ','))
+        $r = C 'POST' '/api/action/M02010100/GRP_DELETE' '' '' $ta '{"contractVersion":1,"parameters":{"ptlGrpCd":"C5A_G"}}'
+        $g3 = C 'GET' '/api/core/sync/protocols/C5A_G' $CID $ck '' ''
+        $rev3 = (C 'GET' '/api/core/sync/protocols' $CID $ck '' '').json.revision
+        Check '10-7' 'CRUD 그룹 논리삭제 → 내려받기 제외, revision 원복' (($r.code -eq '200') -and ($g3.code -eq '404') -and ($rev3 -eq $rev0)) ("GRP_DELETE " + $r.code + ", sync " + $g3.code + ", revision 원복 " + ($rev3 -eq $rev0))
+        $r = C 'POST' '/api/action/M02010100/GRP_DELETE' '' '' $ta '{"contractVersion":1,"parameters":{"ptlGrpCd":"GTEC"}}'
+        Check '10-8' '참조 중 그룹(GTEC) 삭제 → 409 (PR-2 규칙 유지)' ($r.code -eq '409') ("HTTP " + $r.code)
+        $r = C 'GET' '/api/action/M02010100/GRP_SEARCH' '' '' $ta ''; Check '10-9' 'Action 경로 GET → 405 (C4b)' ($r.code -eq '405') ("HTTP " + $r.code + ", " + $r.json.code)
     }
 
     Log ''; Log '===== 6. 서버 로그 오류 ====='

@@ -1,0 +1,3 @@
+desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java

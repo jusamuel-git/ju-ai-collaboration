@@ -1,0 +1,109 @@
+89fe3bc49c20ea7e7baf16a446fb002502c9a305 merge: integrate collect-c4 (C1-C4b) into integration-1 for C5 (C5a)
+
+diff --git a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+remerge CONFLICT (content): Merge conflict in desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+index 9967ac8..42b6748 100644
+--- a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
++++ b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+@@ -137,8 +137,6 @@ public sealed class JuProviderApiClient : IDisposable
+     }
+ 
+     /*
+-<<<<<<< 748937b (fix(security): plain 403 message for client authentication (SEC-S1b))
+-=======
+      * Server -> Client (C4)
+      * 프로토콜 그룹·프로토콜·패킷 정의. ptlGrpCd 가 있으면 그 그룹만 (없으면 null).
+      */
+@@ -194,60 +192,6 @@ public sealed class JuProviderApiClient : IDisposable
+     }
+ 
+     /*
+-     * Client -> Server
+-     * Device 저장
+-     */
+-    public async Task<DeviceSyncModel> SaveDeviceAsync(
+-        DeviceSyncModel device,
+-        CancellationToken cancellationToken = default
+-    )
+-    {
+-        ArgumentNullException.ThrowIfNull(device);
+-
+-        if (string.IsNullOrWhiteSpace(device.DevCd))
+-        {
+-            throw new ArgumentException(
+-                "DEV_CD is required.",
+-                nameof(device)
+-            );
+-        }
+-
+-        string deviceCode =
+-            Uri.EscapeDataString(
+-                device.DevCd
+-                    .Trim()
+-                    .ToUpperInvariant()
+-            );
+-
+-        using HttpResponseMessage response =
+-            await _httpClient.PutAsJsonAsync(
+-                $"api/core/sync/devices/{deviceCode}",
+-                device,
+-                _jsonOptions,
+-                cancellationToken
+-            );
+-
+-        response.EnsureSuccessStatusCode();
+-
+-        DeviceSyncModel? saved =
+-            await response.Content
+-                .ReadFromJsonAsync<DeviceSyncModel>(
+-                    _jsonOptions,
+-                    cancellationToken
+-                );
+-
+-        if (saved == null)
+-        {
+-            throw new InvalidOperationException(
+-                $"Device save response is empty: {device.DevCd}"
+-            );
+-        }
+-
+-        return saved;
+-    }
+-
+-    /*
+->>>>>>> c329b7b (fix(api): return 405 for unsupported HTTP method (C4b))
+      * User 로그인 (JU-1c)
+      * POST api/auth/login
+      *
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+remerge CONFLICT (content): Merge conflict in juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+index f1e39a2..3d918e7 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/JuProviderApplication.java
+@@ -15,12 +15,9 @@ import org.springframework.boot.web.servlet.support.SpringBootServletInitializer
+     "com.asdp.juprovider.core.language.dao",
+     "com.asdp.juprovider.core.security.dao",
+     "com.asdp.juprovider.core.client.dao",
+-<<<<<<< 748937b (fix(security): plain 403 message for client authentication (SEC-S1b))
+     "com.asdp.juprovider.core.action.dao",
+-    "com.asdp.juprovider.core.protocol.dao"
+-=======
++    "com.asdp.juprovider.core.protocol.dao",
+     "com.asdp.juprovider.core.protocolsync.dao"
+->>>>>>> c329b7b (fix(api): return 405 for unsupported HTTP method (C4b))
+ })
+ public class JuProviderApplication extends SpringBootServletInitializer {
+ 
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+index c394ce9..498d55d 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/exception/GlobalExceptionHandler.java
+@@ -87,7 +87,7 @@ public class GlobalExceptionHandler {
+         if (exception.getSupportedHttpMethods() != null) {
+             builder.allow(exception.getSupportedHttpMethods().toArray(new org.springframework.http.HttpMethod[0]));
+         }
+-        return builder.body(new ApiResponse<>(false, null, "지원하지 않는 요청 방식입니다."));
++        return builder.body(ApiResponse.error("METHOD_NOT_ALLOWED", "지원하지 않는 요청 방식입니다.", null));
+     }
+ 
+     @ExceptionHandler(Exception.class)
