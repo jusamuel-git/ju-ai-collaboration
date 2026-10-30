@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자 | **C1 구현 준비안 승인 대기**: [reviews/claude/2026-10-30_c1-prep.md](../reviews/claude/2026-10-30_c1-prep.md) — 순수 로직(표현식·Frame·Parse·Scheduler·Mapping), 수정 2 + lib.protocol 신규 + 테스트 프로젝트, 의존성은 테스트용 xUnit만, 테스트 매칭 충돌 M1~M6·STOP S1~S7·식별자 D1~D8 포함. C0 조건부 승인·Q1~Q8 채택(08:49) |
+| 사용자 | **C1 PASS** [결과](../reviews/claude/2026-10-30_c1_result.md) — `feature/collect-c1` @ `bcbd6f5` (← main), Desktop 테스트 63/63, push 없음 |
 | ChatGPT | **과거 소스 ZIP 조사 구조 검토**: [reviews/claude/2026-10-30_legacy-zip_survey.md](../reviews/claude/2026-10-30_legacy-zip_survey.md) — `backup\juprovider-backup.zip`(10-16, 823파일) 1개. 기능 7개 영역 비교, 재사용 후보 5개(모두 참조 후 재작성), 미사용 항목, 결정 L-Q1~Q5. 과거 기능은 모두 동작 미검증. 조사만(코드·DB 변경 없음) |
 | 사용자 | **INT-1 PASS 인정 (10/28 09:59), 배포 보류 — 금요일(10/30) 17시 이후 G4(실제 DB 06)·G5(main push·Jenkins) 승인 단계**: [결과](../reviews/claude/2026-10-28_int1_result.md) · [배포 체크리스트](../reviews/claude/2026-10-28_deploy_checklist.md). `feature/integration-1` @ `14d1ab9` 로컬 유지, 제품 코드 추가 수정 중단, 8081 기존 상태 유지 |
 | 사용자 | **WEB-02/03 결과 검토**: [reviews/claude/2026-10-28_web-02-03_result.md](../reviews/claude/2026-10-28_web-02-03_result.md) — `feature/web-01` 로컬 commit `60bc008` (← protocol-ref `1d1c1ab`, push 없음), 공개 홈 `/`·콘솔 `/console/**` 분리, 자동 54/54 + 브라우저(복귀 URL·로그아웃·조회자·비밀번호 변경 필수) PASS. clearable은 Action Contract v2 후속 과제 |
@@ -40,6 +40,7 @@
 
 ## 최근 확인
 - 2026-10-26 ENV-0 · JU-0A · JU-0B · SYS-01 · SEC-01 완료 (상세: [2026-10-26.md](2026-10-26.md))
+- 2026-10-30 09:30 C1 로컬 commit `bcbd6f5` (표현식·Framer·Parser, 테스트 63/63, 빌드 스크립트에 Desktop 테스트 추가)
 - 2026-10-30 08:49 사용자: C0 조건부 승인, C0-Q1~Q8 채택 → C1 구현 준비안 업로드 (코드·DB 변경 없음, 구현은 별도 승인)
 - 2026-10-30 08:45 사용자: 수집 경로 설계 조건부 승인·구현 보류, C0 공통 계약 보완 요청 → 09:10 C0 설계 업로드 (설계만)
 - 2026-10-30 08:50 수집 경로 설계 업로드 (설계만, 코드·DB 변경 없음). 사용자 방향: 현재 소스 기준, Protocol→Device→Data 우선, Experiment Data 별도, Viewer·Designer 선택형

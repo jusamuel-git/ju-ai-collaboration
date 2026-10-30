@@ -1,0 +1,15 @@
+# database/seed/02_ju_core_seed.sql 의 ju_protocol.PTL_VAL, ju_protocol_packet.PACKET_EXPR (빈 값 제외)
+S{10,0}
+S{10,0}[CR][LF]
+S{10,1}
+S{10,3}
+S{11,0}
+S{11,1}
+S{11,1}[CR][LF]
+S{11,2}
+S{12,0.020}
+S{12,0.100}
+S{12,10}[CR][LF]
+S{20}
+S{TEST}[CR][LF]
+{OK}[CR][LF]

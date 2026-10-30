@@ -1,0 +1,11 @@
+feat(desktop): protocol expression, framers and parsers (C1)
+
+- lib.protocol: ProtocolExpression (single implementation, round-trip safe)
+- Frame Rule / Parse Rule (JSON v1) + legacy GTEC rule text (read compatible)
+- Framers: DELIM, STXETX(+escape), FIXED, LENFIELD; checksum SUM8/XOR8/CRC16_MODBUS
+- Parsers: TEXT(CHANNELS/SAMPLES), INFO, BINARY
+- tests/juprovider.tests.protocol (xUnit), seed expressions round-trip
+- No server, DB, client, terminal or IPC change
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

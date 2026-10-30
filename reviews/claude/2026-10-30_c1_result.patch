@@ -1,0 +1,1688 @@
+From c809f9638291abb328bdc959c2a5f5c07f87fd3e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 30 Oct 2026 09:31:51 +0900
+Subject: [PATCH] feat(desktop): protocol expression, framers and parsers (C1)
+
+- lib.protocol: ProtocolExpression (single implementation, round-trip safe)
+- Frame Rule / Parse Rule (JSON v1) + legacy GTEC rule text (read compatible)
+- Framers: DELIM, STXETX(+escape), FIXED, LENFIELD; checksum SUM8/XOR8/CRC16_MODBUS
+- Parsers: TEXT(CHANNELS/SAMPLES), INFO, BINARY
+- tests/juprovider.tests.protocol (xUnit), seed expressions round-trip
+- No server, DB, client, terminal or IPC change
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ desktop/JuProvider.Desktop.slnx               |   1 +
+ desktop/lib/juprovider.lib.protocol/Class1.cs |   6 -
+ .../Expression/ProtocolExpression.cs          | 110 +++++++
+ .../Framing/Checksum.cs                       |  46 +++
+ .../juprovider.lib.protocol/Framing/Frame.cs  |  23 ++
+ .../Framing/FramerBase.cs                     |  79 +++++
+ .../Framing/Framers.cs                        | 139 +++++++++
+ .../Parsing/Parsers.cs                        | 171 +++++++++++
+ .../Rules/FrameRule.cs                        |  72 +++++
+ .../Rules/LegacyRuleText.cs                   |  79 +++++
+ .../Rules/ParseRule.cs                        |  63 ++++
+ .../Rules/RuleReader.cs                       | 281 ++++++++++++++++++
+ .../ExpressionTests.cs                        |  57 ++++
+ .../juprovider.tests.protocol/FramerTests.cs  | 123 ++++++++
+ .../juprovider.tests.protocol/ParserTests.cs  | 104 +++++++
+ .../juprovider.tests.protocol/RuleTests.cs    |  79 +++++
+ .../TestData/seed_expressions.txt             |  15 +
+ .../juprovider.tests.protocol/TestUtil.cs     |  30 ++
+ .../tests/juprovider.tests.protocol/Usings.cs |   1 +
+ .../juprovider.tests.protocol.csproj          |  26 ++
+ 20 files changed, 1499 insertions(+), 6 deletions(-)
+ delete mode 100644 desktop/lib/juprovider.lib.protocol/Class1.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Expression/ProtocolExpression.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Framing/Checksum.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Framing/Frame.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Framing/FramerBase.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Framing/Framers.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Parsing/Parsers.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Rules/LegacyRuleText.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Rules/ParseRule.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/ExpressionTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/FramerTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/ParserTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/RuleTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/TestData/seed_expressions.txt
+ create mode 100644 desktop/tests/juprovider.tests.protocol/TestUtil.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/Usings.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj
+
+diff --git a/desktop/JuProvider.Desktop.slnx b/desktop/JuProvider.Desktop.slnx
+index 83c0d5e..40f5234 100644
+--- a/desktop/JuProvider.Desktop.slnx
++++ b/desktop/JuProvider.Desktop.slnx
+@@ -9,5 +9,6 @@
+   <Project Path="lib/juprovider.lib.host/juprovider.lib.host.csproj" Id="192009d6-f1e9-4ad1-964a-9891f2cb879c" />
+   <Project Path="lib/juprovider.lib.ipc/juprovider.lib.ipc.csproj" Id="3c873514-d981-409c-87ae-82da5594a831" />
+   <Project Path="lib/juprovider.lib.protocol/juprovider.lib.protocol.csproj" Id="fe7d09a3-4044-496c-8ae3-f3b9bbeb81e9" />
++  <Project Path="tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj" Id="7c1f0d2e-3b4a-4c5d-9e6f-a1b2c3d4e5f6" />
+   <Project Path="service/juprovider.service.updater/juprovider.service.updater.csproj" Id="8b6ef892-f3b1-46f2-879e-c2845028b286" />
+ </Solution>
+diff --git a/desktop/lib/juprovider.lib.protocol/Class1.cs b/desktop/lib/juprovider.lib.protocol/Class1.cs
+deleted file mode 100644
+index d81935b..0000000
+--- a/desktop/lib/juprovider.lib.protocol/Class1.cs
++++ /dev/null
+@@ -1,6 +0,0 @@
+-﻿namespace juprovider.lib.protocol
+-{
+-    public class Class1
+-    {
+-    }
+-}
+diff --git a/desktop/lib/juprovider.lib.protocol/Expression/ProtocolExpression.cs b/desktop/lib/juprovider.lib.protocol/Expression/ProtocolExpression.cs
+new file mode 100644
+index 0000000..e3c78bf
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Expression/ProtocolExpression.cs
+@@ -0,0 +1,110 @@
++using System.Globalization;
++using System.Text;
++
++namespace JuProvider.Lib.Protocol.Expression;
++
++/// <summary>
++/// 패킷 표현식 ↔ 바이트 (C1, 과거 lib.protocol 로직 참조 재작성 — 단일 구현).
++///
++/// 문법: 대괄호 [ ] 만 제어 의미를 가진다.
++///  - 이름: [NUL] [STX] [ETX] [TAB] [LF] [CR] [DLE] [ACK] [NAK] [ESC]
++///  - 16진 1바이트: [0D], [ff]
++///  - 그 외 문자는 ASCII 그대로 ({ } , 공백 포함). ASCII 밖 문자는 오류.
++/// 예: S{10,1}[CR][LF], [STX]ABC[00][ETX]
++/// ToDisplay 결과는 ToBytes로 되돌리면 같은 바이트가 된다.
++/// </summary>
++public static class ProtocolExpression
++{
++    private static readonly Dictionary<string, byte> NameToByte = new(StringComparer.OrdinalIgnoreCase)
++    {
++        ["NUL"] = 0x00, ["STX"] = 0x02, ["ETX"] = 0x03, ["ACK"] = 0x06, ["TAB"] = 0x09,
++        ["LF"] = 0x0A, ["CR"] = 0x0D, ["DLE"] = 0x10, ["NAK"] = 0x15, ["ESC"] = 0x1B
++    };
++
++    private static readonly Dictionary<byte, string> ByteToName =
++        NameToByte.ToDictionary(p => p.Value, p => p.Key.ToUpperInvariant());
++
++    public static byte[] ToBytes(string? expression)
++    {
++        string s = expression ?? string.Empty;
++        var bytes = new List<byte>(s.Length);
++
++        for (int i = 0; i < s.Length;)
++        {
++            char c = s[i];
++
++            if (c == '[')
++            {
++                int end = s.IndexOf(']', i + 1);
++                if (end < 0)
++                {
++                    throw new FormatException($"닫는 ']'가 없습니다. 위치 {i}");
++                }
++
++                string token = s[(i + 1)..end].Trim();
++
++                if (NameToByte.TryGetValue(token, out byte named))
++                {
++                    bytes.Add(named);
++                }
++                else if (token.Length == 2
++                         && byte.TryParse(token, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte hex))
++                {
++                    bytes.Add(hex);
++                }
++                else
++                {
++                    throw new FormatException($"알 수 없는 바이트 표현입니다: [{token}] 위치 {i}");
++                }
++
++                i = end + 1;
++                continue;
++            }
++
++            if (c > 0x7F)
++            {
++                throw new FormatException($"ASCII 범위를 벗어난 문자입니다: '{c}' 위치 {i}");
++            }
++
++            bytes.Add((byte)c);
++            i++;
++        }
++
++        return bytes.ToArray();
++    }
++
++    public static string ToDisplay(ReadOnlySpan<byte> data)
++    {
++        var b = new StringBuilder(data.Length);
++
++        foreach (byte x in data)
++        {
++            if (ByteToName.TryGetValue(x, out string? name))
++            {
++                b.Append('[').Append(name).Append(']');
++            }
++            else if (x >= 0x20 && x <= 0x7E && x != (byte)'[')
++            {
++                b.Append((char)x);
++            }
++            else
++            {
++                // '[' 자체도 [5B]로 표기해야 다시 읽을 때 제어 표현으로 오해되지 않는다.
++                b.Append('[').Append(x.ToString("X2", CultureInfo.InvariantCulture)).Append(']');
++            }
++        }
++
++        return b.ToString();
++    }
++
++    public static string Hex(ReadOnlySpan<byte> data)
++    {
++        var b = new StringBuilder(data.Length * 3);
++        for (int i = 0; i < data.Length; i++)
++        {
++            if (i > 0) b.Append(' ');
++            b.Append(data[i].ToString("X2", CultureInfo.InvariantCulture));
++        }
++        return b.ToString();
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Framing/Checksum.cs b/desktop/lib/juprovider.lib.protocol/Framing/Checksum.cs
+new file mode 100644
+index 0000000..0a4ac4d
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Framing/Checksum.cs
+@@ -0,0 +1,46 @@
++using JuProvider.Lib.Protocol.Rules;
++
++namespace JuProvider.Lib.Protocol.Framing;
++
++public static class Checksum
++{
++    public static byte[] Compute(ChecksumType type, ReadOnlySpan<byte> data) => type switch
++    {
++        ChecksumType.None => [],
++        ChecksumType.Sum8 => [Sum8(data)],
++        ChecksumType.Xor8 => [Xor8(data)],
++        ChecksumType.Crc16Modbus => Crc16ModbusLittleEndian(data),
++        _ => throw new ArgumentOutOfRangeException(nameof(type))
++    };
++
++    public static bool Verify(ChecksumType type, ReadOnlySpan<byte> data, ReadOnlySpan<byte> expected) =>
++        Compute(type, data).AsSpan().SequenceEqual(expected);
++
++    private static byte Sum8(ReadOnlySpan<byte> data)
++    {
++        int s = 0;
++        foreach (byte b in data) s += b;
++        return (byte)(s & 0xFF);
++    }
++
++    private static byte Xor8(ReadOnlySpan<byte> data)
++    {
++        byte x = 0;
++        foreach (byte b in data) x ^= b;
++        return x;
++    }
++
++    private static byte[] Crc16ModbusLittleEndian(ReadOnlySpan<byte> data)
++    {
++        ushort crc = 0xFFFF;
++        foreach (byte b in data)
++        {
++            crc ^= b;
++            for (int i = 0; i < 8; i++)
++            {
++                crc = (crc & 1) != 0 ? (ushort)((crc >> 1) ^ 0xA001) : (ushort)(crc >> 1);
++            }
++        }
++        return [(byte)(crc & 0xFF), (byte)(crc >> 8)];
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Framing/Frame.cs b/desktop/lib/juprovider.lib.protocol/Framing/Frame.cs
+new file mode 100644
+index 0000000..105ba88
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Framing/Frame.cs
+@@ -0,0 +1,23 @@
++namespace JuProvider.Lib.Protocol.Framing;
++
++/// <summary>완성된 프레임. Raw = 받은 바이트 그대로, Body = 규칙에 따른 내용 (FrameRule 설명 참고)</summary>
++public sealed record Frame(byte[] Raw, byte[] Body);
++
++/// <summary>버린 바이트와 사유 (Traffic 로그용)</summary>
++public sealed record FrameRejection(string Reason, byte[] Data);
++
++/// <summary>바이트 조각 → 완성 프레임. 조각을 여러 번 나눠 넣어도 결과가 같아야 한다.</summary>
++public interface IFramer
++{
++    /// <summary>새 바이트를 넣고 완성된 프레임을 꺼낸다. 미완성 부분은 내부 버퍼에 남는다.</summary>
++    IReadOnlyList<Frame> Push(ReadOnlySpan<byte> chunk);
++
++    /// <summary>버린 데이터 (Push 호출마다 새로 채워짐)</summary>
++    IReadOnlyList<FrameRejection> Rejections { get; }
++
++    /// <summary>미완성 버퍼 비우기 (재연결 등)</summary>
++    void Reset();
++
++    /// <summary>현재 버퍼에 남은 바이트 수</summary>
++    int Pending { get; }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Framing/FramerBase.cs b/desktop/lib/juprovider.lib.protocol/Framing/FramerBase.cs
+new file mode 100644
+index 0000000..939abcc
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Framing/FramerBase.cs
+@@ -0,0 +1,79 @@
++using JuProvider.Lib.Protocol.Rules;
++
++namespace JuProvider.Lib.Protocol.Framing;
++
++/// <summary>버퍼·거부 목록·최대 길이·체크섬 공통 처리</summary>
++public abstract class FramerBase : IFramer
++{
++    protected readonly FrameRule Rule;
++    protected readonly List<byte> Buffer = new();
++    private readonly List<FrameRejection> _rejections = new();
++
++    protected FramerBase(FrameRule rule) => Rule = rule;
++
++    public IReadOnlyList<FrameRejection> Rejections => _rejections;
++    public int Pending => Buffer.Count;
++
++    public void Reset() => Buffer.Clear();
++
++    public IReadOnlyList<Frame> Push(ReadOnlySpan<byte> chunk)
++    {
++        _rejections.Clear();
++        foreach (byte b in chunk) Buffer.Add(b);
++
++        var frames = new List<Frame>();
++        while (TryTake(out Frame? frame))
++        {
++            if (frame is null) continue;
++            if (ApplyChecksum(frame, out Frame? ok)) frames.Add(ok!);
++        }
++
++        if (Buffer.Count > Rule.MaxLength)
++        {
++            Reject("최대 길이 초과", Buffer.ToArray());
++            Buffer.Clear();
++        }
++
++        return frames;
++    }
++
++    /// <summary>버퍼에서 프레임 1개를 꺼낸다. 더 꺼낼 게 없으면 false. 꺼냈지만 버린 경우 true + frame=null.</summary>
++    protected abstract bool TryTake(out Frame? frame);
++
++    protected void Reject(string reason, byte[] data) => _rejections.Add(new FrameRejection(reason, data));
++
++    protected byte[] TakeFront(int count)
++    {
++        byte[] taken = Buffer.GetRange(0, count).ToArray();
++        Buffer.RemoveRange(0, count);
++        return taken;
++    }
++
++    private bool ApplyChecksum(Frame frame, out Frame? result)
++    {
++        ChecksumRule c = Rule.Checksum;
++        result = frame;
++        if (c.Type == ChecksumType.None) return true;
++
++        byte[] body = frame.Body;
++        int size = c.Size;
++        if (body.Length < c.From + size)
++        {
++            Reject("체크섬 길이 부족", frame.Raw);
++            result = null;
++            return false;
++        }
++
++        ReadOnlySpan<byte> covered = body.AsSpan(c.From, body.Length - size - c.From);
++        ReadOnlySpan<byte> actual = body.AsSpan(body.Length - size, size);
++        if (!Checksum.Verify(c.Type, covered, actual))
++        {
++            Reject("체크섬 불일치", frame.Raw);
++            result = null;
++            return false;
++        }
++
++        result = frame with { Body = body[..^size] };
++        return true;
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Framing/Framers.cs b/desktop/lib/juprovider.lib.protocol/Framing/Framers.cs
+new file mode 100644
+index 0000000..75c2ae2
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Framing/Framers.cs
+@@ -0,0 +1,139 @@
++using JuProvider.Lib.Protocol.Rules;
++
++namespace JuProvider.Lib.Protocol.Framing;
++
++/// <summary>끝 구분자. Body = 구분자 앞부분. 빈 프레임은 건너뜀.</summary>
++public sealed class DelimiterFramer(FrameRule rule) : FramerBase(rule)
++{
++    protected override bool TryTake(out Frame? frame)
++    {
++        frame = null;
++        byte[] end = Rule.End;
++        int at = IndexOf(Buffer, end);
++        if (at < 0) return false;
++
++        byte[] raw = TakeFront(at + end.Length);
++        byte[] body = raw[..at];
++        if (body.Length > 0) frame = new Frame(raw, body);
++        return true;
++    }
++
++    private static int IndexOf(List<byte> buffer, byte[] pattern)
++    {
++        for (int i = 0; i <= buffer.Count - pattern.Length; i++)
++        {
++            int j = 0;
++            while (j < pattern.Length && buffer[i + j] == pattern[j]) j++;
++            if (j == pattern.Length) return i;
++        }
++        return -1;
++    }
++}
++
++/// <summary>
++/// 시작·끝 바이트. STX 앞의 바이트는 버림(거부 기록). Escape가 있으면 다음 1바이트를 그대로 내용으로 본다.
++/// Body = STX/ETX 제외, escape 해제된 내용.
++/// </summary>
++public sealed class StxEtxFramer(FrameRule rule) : FramerBase(rule)
++{
++    protected override bool TryTake(out Frame? frame)
++    {
++        frame = null;
++        if (Buffer.Count == 0) return false;
++
++        int start = Buffer.IndexOf(Rule.Stx);
++        if (start < 0)
++        {
++            Reject("STX 없음", TakeFront(Buffer.Count));
++            return false;
++        }
++        if (start > 0)
++        {
++            Reject("STX 앞 데이터", TakeFront(start));
++        }
++
++        var body = new List<byte>();
++        for (int i = 1; i < Buffer.Count; i++)
++        {
++            byte b = Buffer[i];
++            if (Rule.Escape is byte esc && b == esc)
++            {
++                if (i + 1 >= Buffer.Count) return false; // escape 다음 바이트 대기
++                body.Add(Buffer[++i]);
++                continue;
++            }
++            if (b == Rule.Etx)
++            {
++                byte[] raw = TakeFront(i + 1);
++                frame = new Frame(raw, body.ToArray());
++                return true;
++            }
++            if (b == Rule.Stx && Rule.Escape is null)
++            {
++                // ETX 없이 새 STX → 앞 프레임은 깨진 것으로 보고 버림
++                Reject("ETX 없이 새 STX", TakeFront(i));
++                return true;
++            }
++            body.Add(b);
++        }
++        return false;
++    }
++}
++
++/// <summary>고정 길이. Body = 프레임 전체.</summary>
++public sealed class FixedLengthFramer(FrameRule rule) : FramerBase(rule)
++{
++    protected override bool TryTake(out Frame? frame)
++    {
++        frame = null;
++        if (Buffer.Count < Rule.Length) return false;
++        byte[] raw = TakeFront(Rule.Length);
++        frame = new Frame(raw, raw);
++        return true;
++    }
++}
++
++/// <summary>
++/// 길이 필드. 전체 길이 = 헤더 포함이면 값+adjust, 아니면 (offset+size)+값+adjust.
++/// Body = 프레임 전체. 길이가 잘못되면(헤더보다 짧거나 MaxLength 초과) 1바이트 버리고 다시 찾는다.
++/// </summary>
++public sealed class LengthFieldFramer(FrameRule rule) : FramerBase(rule)
++{
++    protected override bool TryTake(out Frame? frame)
++    {
++        frame = null;
++        int header = Rule.LengthOffset + Rule.LengthSize;
++        if (Buffer.Count < header) return false;
++
++        long value = 0;
++        for (int k = 0; k < Rule.LengthSize; k++)
++        {
++            int idx = Rule.LengthBigEndian ? Rule.LengthOffset + k : Rule.LengthOffset + Rule.LengthSize - 1 - k;
++            value = (value << 8) | Buffer[idx];
++        }
++
++        long total = (Rule.LengthIncludesHeader ? value : header + value) + Rule.LengthAdjust;
++        if (total < header || total > Rule.MaxLength)
++        {
++            Reject("길이 필드 값 오류", TakeFront(1));
++            return true;
++        }
++        if (Buffer.Count < total) return false;
++
++        byte[] raw = TakeFront((int)total);
++        frame = new Frame(raw, raw);
++        return true;
++    }
++}
++
++public static class FramerFactory
++{
++    public static IFramer Create(FrameRule rule) => rule.Kind switch
++    {
++        FrameKind.Delim => new DelimiterFramer(rule),
++        FrameKind.StxEtx => new StxEtxFramer(rule),
++        FrameKind.Fixed => new FixedLengthFramer(rule),
++        FrameKind.LenField => new LengthFieldFramer(rule),
++        _ => throw new ArgumentOutOfRangeException(nameof(rule))
++    };
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Parsing/Parsers.cs b/desktop/lib/juprovider.lib.protocol/Parsing/Parsers.cs
+new file mode 100644
+index 0000000..67dbbc1
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Parsing/Parsers.cs
+@@ -0,0 +1,171 @@
++using System.Buffers.Binary;
++using System.Globalization;
++using System.Text;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Rules;
++
++namespace JuProvider.Lib.Protocol.Parsing;
++
++/// <summary>
++/// 파서 출력 1개.
++/// ChannelKey: TEXT=위치("1","2",…), SAMPLES=선택 채널 키, INFO/BINARY=필드 key. 문자열 그대로 비교한다("1" ≠ "01").
++/// Value: 숫자 값(INFO는 null), Text: 원래 토큰, Absent: INFO에서 '없음' 값과 같을 때 true.
++/// </summary>
++public sealed record RawValue(string ChannelKey, int SampleIndex, double? Value, string? Text, bool Absent = false);
++
++/// <summary>SAMPLES 모드의 선택 채널 등 실행 시점 값</summary>
++public sealed record ParseContext(string SelectedChannelKey = "1");
++
++public sealed record ParseResult(bool Ok, IReadOnlyList<RawValue> Values, string? Error)
++{
++    public static ParseResult Fail(string error) => new(false, [], error);
++    public static ParseResult Success(IReadOnlyList<RawValue> values) => new(true, values, null);
++}
++
++public interface IFrameParser
++{
++    ParseResult Parse(Frame frame, ParseContext? context = null);
++}
++
++public static class ParserFactory
++{
++    public static IFrameParser Create(ParseRule rule) => rule.Kind switch
++    {
++        ParseKind.Text => new TextFrameParser(rule),
++        ParseKind.Info => new InfoFrameParser(rule),
++        ParseKind.Binary => new BinaryFrameParser(rule),
++        _ => throw new ArgumentOutOfRangeException(nameof(rule))
++    };
++}
++
++internal static class TextTokens
++{
++    /// <summary>ASCII 본문 → (trim 확인 후) 토큰. 실패 시 null + 사유</summary>
++    public static string[]? Split(Frame frame, ParseRule rule, out string? error)
++    {
++        error = null;
++        foreach (byte b in frame.Body)
++        {
++            if (b > 0x7F)
++            {
++                error = "ASCII가 아닌 바이트";
++                return null;
++            }
++        }
++
++        string s = Encoding.ASCII.GetString(frame.Body).Trim();
++        if (rule.Trim is { Length: 2 } trim)
++        {
++            if (s.Length < 2 || s[0] != trim[0] || s[^1] != trim[1])
++            {
++                error = $"앞뒤 문자 불일치 (기대 {trim[0]}…{trim[1]})";
++                return null;
++            }
++            s = s[1..^1];
++        }
++
++        string[] tokens = rule.Separator switch
++        {
++            TextSeparator.Comma => s.Split(',', StringSplitOptions.TrimEntries),
++            TextSeparator.Tab => s.Split('\t', StringSplitOptions.TrimEntries),
++            _ => s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
++        };
++
++        if (tokens.Length == 1 && tokens[0].Length == 0) tokens = [];
++        if (rule.Count > 0 && tokens.Length != rule.Count)
++        {
++            error = $"항목 수 불일치 (기대 {rule.Count}, 실제 {tokens.Length})";
++            return null;
++        }
++        return tokens;
++    }
++}
++
++/// <summary>TEXT: 숫자 토큰 → CHANNELS("1".."n") 또는 SAMPLES(선택 채널, 샘플 0..n-1)</summary>
++public sealed class TextFrameParser(ParseRule rule) : IFrameParser
++{
++    public ParseResult Parse(Frame frame, ParseContext? context = null)
++    {
++        string[]? tokens = TextTokens.Split(frame, rule, out string? error);
++        if (tokens is null) return ParseResult.Fail(error!);
++        if (tokens.Length == 0) return ParseResult.Fail("항목 없음");
++
++        var values = new List<RawValue>(tokens.Length);
++        string selected = (context ?? new ParseContext()).SelectedChannelKey;
++
++        for (int i = 0; i < tokens.Length; i++)
++        {
++            if (!double.TryParse(tokens[i], NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
++            {
++                return ParseResult.Fail($"숫자가 아님: '{tokens[i]}' (항목 {i + 1})");
++            }
++            values.Add(rule.Map == ValueMap.Channels
++                ? new RawValue((i + 1).ToString(CultureInfo.InvariantCulture), 0, v, tokens[i])
++                : new RawValue(selected, i, v, tokens[i]));
++        }
++        return ParseResult.Success(values);
++    }
++}
++
++/// <summary>INFO: 토큰 i → Fields[i], 숫자 변환 없음. Absent 값이면 Absent=true</summary>
++public sealed class InfoFrameParser(ParseRule rule) : IFrameParser
++{
++    public ParseResult Parse(Frame frame, ParseContext? context = null)
++    {
++        string[]? tokens = TextTokens.Split(frame, rule with { Count = rule.Fields.Count }, out string? error);
++        if (tokens is null) return ParseResult.Fail(error!);
++
++        var values = new List<RawValue>(tokens.Length);
++        for (int i = 0; i < tokens.Length; i++)
++        {
++            if (tokens[i].Length == 0) return ParseResult.Fail($"빈 항목 (항목 {i + 1})");
++            bool absent = rule.Absent is not null && string.Equals(tokens[i], rule.Absent, StringComparison.Ordinal);
++            values.Add(new RawValue(rule.Fields[i], 0, null, tokens[i], absent));
++        }
++        return ParseResult.Success(values);
++    }
++}
++
++/// <summary>BINARY: Body 기준 offset의 값 × scale + valueOffset</summary>
++public sealed class BinaryFrameParser(ParseRule rule) : IFrameParser
++{
++    public ParseResult Parse(Frame frame, ParseContext? context = null)
++    {
++        ReadOnlySpan<byte> body = frame.Body;
++        var values = new List<RawValue>(rule.BinaryFields.Count);
++
++        foreach (BinaryField f in rule.BinaryFields)
++        {
++            int size = Size(f.Type);
++            if (f.Offset + size > body.Length)
++            {
++                return ParseResult.Fail($"{f.Key}: 프레임 길이 부족 (필요 {f.Offset + size}, 실제 {body.Length})");
++            }
++            double raw = Read(body.Slice(f.Offset, size), f.Type, f.BigEndian);
++            values.Add(new RawValue(f.Key, 0, raw * f.Scale + f.ValueOffset, null));
++        }
++        return ParseResult.Success(values);
++    }
++
++    private static int Size(BinaryType t) => t switch
++    {
++        BinaryType.U8 or BinaryType.I8 => 1,
++        BinaryType.U16 or BinaryType.I16 => 2,
++        BinaryType.U32 or BinaryType.I32 or BinaryType.F32 => 4,
++        BinaryType.F64 => 8,
++        _ => throw new ArgumentOutOfRangeException(nameof(t))
++    };
++
++    private static double Read(ReadOnlySpan<byte> s, BinaryType t, bool be) => t switch
++    {
++        BinaryType.U8 => s[0],
++        BinaryType.I8 => (sbyte)s[0],
++        BinaryType.U16 => be ? BinaryPrimitives.ReadUInt16BigEndian(s) : BinaryPrimitives.ReadUInt16LittleEndian(s),
++        BinaryType.I16 => be ? BinaryPrimitives.ReadInt16BigEndian(s) : BinaryPrimitives.ReadInt16LittleEndian(s),
++        BinaryType.U32 => be ? BinaryPrimitives.ReadUInt32BigEndian(s) : BinaryPrimitives.ReadUInt32LittleEndian(s),
++        BinaryType.I32 => be ? BinaryPrimitives.ReadInt32BigEndian(s) : BinaryPrimitives.ReadInt32LittleEndian(s),
++        BinaryType.F32 => be ? BinaryPrimitives.ReadSingleBigEndian(s) : BinaryPrimitives.ReadSingleLittleEndian(s),
++        BinaryType.F64 => be ? BinaryPrimitives.ReadDoubleBigEndian(s) : BinaryPrimitives.ReadDoubleLittleEndian(s),
++        _ => throw new ArgumentOutOfRangeException(nameof(t))
++    };
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs b/desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs
+new file mode 100644
+index 0000000..7ffdb11
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Rules/FrameRule.cs
+@@ -0,0 +1,72 @@
++namespace JuProvider.Lib.Protocol.Rules;
++
++/// <summary>프레임 구분 방식 (C0 §4)</summary>
++public enum FrameKind
++{
++    /// <summary>끝 구분자 (예: [CR][LF])</summary>
++    Delim,
++    /// <summary>시작·끝 바이트 + 선택 escape (예: [STX]…[ETX], DLE)</summary>
++    StxEtx,
++    /// <summary>고정 길이</summary>
++    Fixed,
++    /// <summary>헤더 안 길이 필드로 가변 길이</summary>
++    LenField
++}
++
++public enum ChecksumType
++{
++    None,
++    Sum8,
++    Xor8,
++    Crc16Modbus
++}
++
++/// <summary>
++/// 체크섬: 프레임 본문(Body)의 마지막 Size 바이트가 체크섬 값이다.
++/// 계산 범위 = Body[From .. Body.Length - Size). 검증 후 체크섬 바이트는 Body에서 제거한다.
++/// CRC16_MODBUS 값은 Little Endian.
++/// </summary>
++public sealed record ChecksumRule(ChecksumType Type, int From = 0)
++{
++    public int Size => Type switch
++    {
++        ChecksumType.None => 0,
++        ChecksumType.Crc16Modbus => 2,
++        _ => 1
++    };
++}
++
++/// <summary>
++/// 바이트 흐름 → 프레임 규칙. 바이트 값은 ProtocolExpression 문법으로 적고 여기서는 변환된 바이트를 가진다.
++/// Body 정의:
++///  - Delim  : 끝 구분자를 뺀 앞부분
++///  - StxEtx : STX·ETX를 빼고 escape를 푼 내용
++///  - Fixed / LenField : 프레임 전체 (바이너리 Parse Rule의 offset 기준)
++/// </summary>
++public sealed record FrameRule
++{
++    public FrameKind Kind { get; init; } = FrameKind.Delim;
++
++    public byte[] End { get; init; } = [0x0D, 0x0A];
++
++    public byte Stx { get; init; } = 0x02;
++    public byte Etx { get; init; } = 0x03;
++    public byte? Escape { get; init; }
++
++    /// <summary>Fixed 길이</summary>
++    public int Length { get; init; }
++
++    /// <summary>LenField: 길이 필드 위치·크기(1,2,4)·바이트 순서</summary>
++    public int LengthOffset { get; init; }
++    public int LengthSize { get; init; } = 1;
++    public bool LengthBigEndian { get; init; } = true;
++    /// <summary>LenField: 길이 값에 더할 보정값</summary>
++    public int LengthAdjust { get; init; }
++    /// <summary>LenField: 길이 값이 헤더(0..LengthOffset+LengthSize)까지 포함하는지</summary>
++    public bool LengthIncludesHeader { get; init; }
++
++    /// <summary>이 길이를 넘으면 버퍼를 비우고 거부한다 (쓰레기 데이터 보호)</summary>
++    public int MaxLength { get; init; } = 4096;
++
++    public ChecksumRule Checksum { get; init; } = new(ChecksumType.None);
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Rules/LegacyRuleText.cs b/desktop/lib/juprovider.lib.protocol/Rules/LegacyRuleText.cs
+new file mode 100644
+index 0000000..995534d
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Rules/LegacyRuleText.cs
+@@ -0,0 +1,79 @@
++namespace JuProvider.Lib.Protocol.Rules;
++
++/// <summary>
++/// 과거 GTEC 규칙 텍스트(읽기 호환):
++///   FRAME=CRLF;STX={;ETX=};MODE=DELIMITED|INFO|NONE;SEP=SPACE|COMMA;COUNT=3;MAP=CHANNELS|SAMPLES|NONE
++/// 과거 의미: 프레임은 CRLF로 끊고, STX/ETX 문자는 프레임 내용의 앞뒤 확인용이었다.
++/// 변환: Frame = DELIM [CR][LF], Parse = TEXT(trim = STX+ETX) 또는 INFO(CH1..CHn).
++/// 과거 INFO(센서정보)는 4항목 고정이었다 → COUNT가 없으면 4.
++/// </summary>
++public static class LegacyRuleText
++{
++    public static (FrameRule? Frame, ParseRule? Parse) ToRules(string text)
++    {
++        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
++        foreach (string item in text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
++        {
++            int p = item.IndexOf('=');
++            if (p <= 0) throw new RuleFormatException($"규칙 항목은 KEY=VALUE 형식이어야 합니다: {item}");
++            values[item[..p].Trim()] = item[(p + 1)..].Trim();
++        }
++        if (values.Count == 0) throw new RuleFormatException("규칙이 비어 있습니다.");
++
++        string V(string key, string fallback) => values.TryGetValue(key, out string? v) && v.Length > 0 ? v : fallback;
++
++        string frame = V("FRAME", "CRLF").ToUpperInvariant();
++        FrameRule frameRule = frame switch
++        {
++            "CRLF" => new FrameRule { Kind = FrameKind.Delim, End = [0x0D, 0x0A] },
++            "LF" => new FrameRule { Kind = FrameKind.Delim, End = [0x0A] },
++            "CR" => new FrameRule { Kind = FrameKind.Delim, End = [0x0D] },
++            _ => throw new RuleFormatException($"과거 규칙 FRAME 값을 알 수 없습니다: {frame}")
++        };
++
++        string stx = V("STX", "{");
++        string etx = V("ETX", "}");
++        if (stx.Length != 1 || etx.Length != 1) throw new RuleFormatException("과거 규칙 STX/ETX는 1글자입니다.");
++        string trim = stx + etx;
++
++        string mode = V("MODE", "DELIMITED").ToUpperInvariant();
++        string map = V("MAP", "CHANNELS").ToUpperInvariant();
++        int count = RuleReader.ParseIntInvariant(V("COUNT", "0"), "COUNT");
++        if (count < 0) throw new RuleFormatException("COUNT는 0 이상이어야 합니다.");
++
++        if (mode == "NONE" || map == "NONE")
++        {
++            return (frameRule, null);
++        }
++
++        if (mode == "INFO")
++        {
++            int n = count > 0 ? count : 4;
++            return (frameRule, new ParseRule
++            {
++                Kind = ParseKind.Info,
++                Trim = trim,
++                Separator = RuleReader.Sep(V("SEP", "COMMA")),
++                Fields = Enumerable.Range(1, n).Select(i => "CH" + i).ToArray(),
++                Count = n,
++                Absent = "000"
++            });
++        }
++
++        if (mode != "DELIMITED") throw new RuleFormatException($"과거 규칙 MODE 값을 알 수 없습니다: {mode}");
++
++        return (frameRule, new ParseRule
++        {
++            Kind = ParseKind.Text,
++            Trim = trim,
++            Separator = RuleReader.Sep(V("SEP", "SPACE")),
++            Count = count,
++            Map = map switch
++            {
++                "CHANNELS" => ValueMap.Channels,
++                "SAMPLES" => ValueMap.Samples,
++                _ => throw new RuleFormatException($"과거 규칙 MAP 값을 알 수 없습니다: {map}")
++            }
++        });
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Rules/ParseRule.cs b/desktop/lib/juprovider.lib.protocol/Rules/ParseRule.cs
+new file mode 100644
+index 0000000..3adbcfa
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Rules/ParseRule.cs
+@@ -0,0 +1,63 @@
++namespace JuProvider.Lib.Protocol.Rules;
++
++public enum ParseKind
++{
++    /// <summary>ASCII 텍스트 숫자 목록 (GTEC 저속·고속)</summary>
++    Text,
++    /// <summary>ASCII 텍스트 항목 목록 (센서정보 등, 숫자 변환 없음)</summary>
++    Info,
++    /// <summary>바이너리 필드</summary>
++    Binary
++}
++
++public enum TextSeparator
++{
++    /// <summary>공백·탭 연속 허용</summary>
++    Space,
++    Comma,
++    Tab
++}
++
++public enum ValueMap
++{
++    /// <summary>토큰 i → 채널 "i+1", 샘플 0</summary>
++    Channels,
++    /// <summary>토큰 i → 선택 채널, 샘플 i</summary>
++    Samples
++}
++
++public enum BinaryType
++{
++    U8, I8, U16, I16, U32, I32, F32, F64
++}
++
++/// <summary>BINARY 필드: Body 기준 Offset 위치의 값 → (raw × Scale + ValueOffset)</summary>
++public sealed record BinaryField(
++    string Key,
++    int Offset,
++    BinaryType Type,
++    bool BigEndian = false,
++    double Scale = 1,
++    double ValueOffset = 0);
++
++/// <summary>
++/// 프레임 → 원시값 규칙 (C0 §4).
++/// Trim: 앞뒤 감싸는 문자 2개(예: "{}"). 지정하면 프레임이 반드시 그 문자로 시작·끝나야 한다.
++/// Count: 0이면 토큰 수 검사 안 함.
++/// </summary>
++public sealed record ParseRule
++{
++    public ParseKind Kind { get; init; } = ParseKind.Text;
++
++    public string? Trim { get; init; }
++    public TextSeparator Separator { get; init; } = TextSeparator.Space;
++    public int Count { get; init; }
++    public ValueMap Map { get; init; } = ValueMap.Channels;
++
++    /// <summary>INFO: 항목 순서대로 붙일 채널 키 (예: CH1..CH4)</summary>
++    public IReadOnlyList<string> Fields { get; init; } = [];
++    /// <summary>INFO: 이 값이면 미연결/없음으로 표시 (예: "000")</summary>
++    public string? Absent { get; init; }
++
++    public IReadOnlyList<BinaryField> BinaryFields { get; init; } = [];
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs b/desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs
+new file mode 100644
+index 0000000..53bf10d
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Rules/RuleReader.cs
+@@ -0,0 +1,281 @@
++using System.Globalization;
++using System.Text.Json;
++using JuProvider.Lib.Protocol.Expression;
++
++namespace JuProvider.Lib.Protocol.Rules;
++
++public sealed class RuleFormatException(string message) : FormatException(message);
++
++/// <summary>
++/// Frame Rule / Parse Rule 읽기 (C0 §4.1).
++/// - JSON v1: {"v":1,"kind":"DELIM", ...}
++/// - 과거 GTEC 텍스트: FRAME=CRLF;STX={;ETX=};MODE=DELIMITED;SEP=SPACE;COUNT=3;MAP=CHANNELS (읽기 호환)
++/// 빈 값이면 null (규칙 없음).
++/// </summary>
++public static class RuleReader
++{
++    public static FrameRule? ReadFrameRule(string? text)
++    {
++        if (string.IsNullOrWhiteSpace(text)) return null;
++        string t = text.Trim();
++        return t.StartsWith('{') ? FrameFromJson(t) : LegacyRuleText.ToRules(t).Frame;
++    }
++
++    public static ParseRule? ReadParseRule(string? text)
++    {
++        if (string.IsNullOrWhiteSpace(text)) return null;
++        string t = text.Trim();
++        return t.StartsWith('{') ? ParseFromJson(t) : LegacyRuleText.ToRules(t).Parse;
++    }
++
++    // ----- JSON -----
++
++    private static JsonElement Root(string json)
++    {
++        JsonElement root;
++        try
++        {
++            using JsonDocument doc = JsonDocument.Parse(json);
++            root = doc.RootElement.Clone();
++        }
++        catch (JsonException ex)
++        {
++            throw new RuleFormatException("규칙 JSON 형식 오류: " + ex.Message);
++        }
++
++        if (root.ValueKind != JsonValueKind.Object) throw new RuleFormatException("규칙은 JSON 객체여야 합니다.");
++        int v = root.TryGetProperty("v", out JsonElement ve) && ve.TryGetInt32(out int n) ? n : 0;
++        if (v != 1) throw new RuleFormatException($"지원하지 않는 규칙 버전입니다: v={v}");
++        return root;
++    }
++
++    private static string Kind(JsonElement r) =>
++        Str(r, "kind") ?? throw new RuleFormatException("kind가 필요합니다.");
++
++    private static FrameRule FrameFromJson(string json)
++    {
++        JsonElement r = Root(json);
++        string kind = Kind(r).ToUpperInvariant();
++        int maxLen = Int(r, "maxLen") ?? 4096;
++        if (maxLen <= 0) throw new RuleFormatException("maxLen은 1 이상이어야 합니다.");
++        ChecksumRule checksum = ReadChecksum(r);
++
++        FrameRule rule = kind switch
++        {
++            "DELIM" => new FrameRule
++            {
++                Kind = FrameKind.Delim,
++                End = Bytes(Str(r, "end") ?? "[CR][LF]", "end", minLength: 1)
++            },
++            "STXETX" => new FrameRule
++            {
++                Kind = FrameKind.StxEtx,
++                Stx = OneByte(Str(r, "stx") ?? "[STX]", "stx"),
++                Etx = OneByte(Str(r, "etx") ?? "[ETX]", "etx"),
++                Escape = Str(r, "escape") is { } esc ? OneByte(esc, "escape") : null
++            },
++            "FIXED" => new FrameRule
++            {
++                Kind = FrameKind.Fixed,
++                Length = Int(r, "len") is int len && len > 0 ? len : throw new RuleFormatException("FIXED는 len(1 이상)이 필요합니다.")
++            },
++            "LENFIELD" => ReadLenField(r),
++            _ => throw new RuleFormatException($"알 수 없는 frame kind: {kind}")
++        };
++
++        return rule with { MaxLength = maxLen, Checksum = checksum };
++    }
++
++    private static FrameRule ReadLenField(JsonElement r)
++    {
++        int offset = Int(r, "offset") ?? throw new RuleFormatException("LENFIELD는 offset이 필요합니다.");
++        int size = Int(r, "size") ?? 1;
++        if (offset < 0) throw new RuleFormatException("offset은 0 이상이어야 합니다.");
++        if (size is not (1 or 2 or 4)) throw new RuleFormatException("size는 1, 2, 4 중 하나여야 합니다.");
++        string endian = (Str(r, "endian") ?? "BE").ToUpperInvariant();
++        if (endian is not ("BE" or "LE")) throw new RuleFormatException("endian은 BE 또는 LE입니다.");
++
++        return new FrameRule
++        {
++            Kind = FrameKind.LenField,
++            LengthOffset = offset,
++            LengthSize = size,
++            LengthBigEndian = endian == "BE",
++            LengthAdjust = Int(r, "adjust") ?? 0,
++            LengthIncludesHeader = Bool(r, "includesHeader") ?? false
++        };
++    }
++
++    private static ChecksumRule ReadChecksum(JsonElement r)
++    {
++        if (!r.TryGetProperty("checksum", out JsonElement c) || c.ValueKind == JsonValueKind.Null)
++        {
++            return new ChecksumRule(ChecksumType.None);
++        }
++
++        string type = (Str(c, "type") ?? "NONE").ToUpperInvariant();
++        ChecksumType t = type switch
++        {
++            "NONE" => ChecksumType.None,
++            "SUM8" => ChecksumType.Sum8,
++            "XOR8" => ChecksumType.Xor8,
++            "CRC16_MODBUS" => ChecksumType.Crc16Modbus,
++            _ => throw new RuleFormatException($"알 수 없는 checksum type: {type}")
++        };
++        int from = Int(c, "from") ?? 0;
++        if (from < 0) throw new RuleFormatException("checksum.from은 0 이상이어야 합니다.");
++        return new ChecksumRule(t, from);
++    }
++
++    private static ParseRule ParseFromJson(string json)
++    {
++        JsonElement r = Root(json);
++        string kind = Kind(r).ToUpperInvariant();
++        string? trim = Str(r, "trim");
++        if (trim is not null && trim.Length != 2) throw new RuleFormatException("trim은 앞·뒤 2글자입니다 (예: \"{}\").");
++
++        switch (kind)
++        {
++            case "TEXT":
++            {
++                int count = Int(r, "count") ?? 0;
++                if (count < 0) throw new RuleFormatException("count는 0 이상이어야 합니다.");
++                return new ParseRule
++                {
++                    Kind = ParseKind.Text,
++                    Trim = trim,
++                    Separator = Sep(Str(r, "sep")),
++                    Count = count,
++                    Map = (Str(r, "map") ?? "CHANNELS").ToUpperInvariant() switch
++                    {
++                        "CHANNELS" => ValueMap.Channels,
++                        "SAMPLES" => ValueMap.Samples,
++                        string m => throw new RuleFormatException($"알 수 없는 map: {m}")
++                    }
++                };
++            }
++            case "INFO":
++            {
++                IReadOnlyList<string> fields = StrArray(r, "fields");
++                if (fields.Count == 0) throw new RuleFormatException("INFO는 fields가 필요합니다.");
++                return new ParseRule
++                {
++                    Kind = ParseKind.Info,
++                    Trim = trim,
++                    Separator = Sep(Str(r, "sep") ?? "COMMA"),
++                    Fields = fields,
++                    Count = fields.Count,
++                    Absent = Str(r, "absent")
++                };
++            }
++            case "BINARY":
++                return new ParseRule { Kind = ParseKind.Binary, BinaryFields = ReadBinaryFields(r) };
++            default:
++                throw new RuleFormatException($"알 수 없는 parse kind: {kind}");
++        }
++    }
++
++    private static IReadOnlyList<BinaryField> ReadBinaryFields(JsonElement r)
++    {
++        if (!r.TryGetProperty("fields", out JsonElement arr) || arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0)
++        {
++            throw new RuleFormatException("BINARY는 fields 배열이 필요합니다.");
++        }
++
++        var list = new List<BinaryField>();
++        var keys = new HashSet<string>(StringComparer.Ordinal);
++        foreach (JsonElement f in arr.EnumerateArray())
++        {
++            string key = Str(f, "key") ?? throw new RuleFormatException("BINARY 필드에 key가 필요합니다.");
++            if (!keys.Add(key)) throw new RuleFormatException($"BINARY 필드 key 중복: {key}");
++            int offset = Int(f, "offset") ?? throw new RuleFormatException($"{key}: offset이 필요합니다.");
++            if (offset < 0) throw new RuleFormatException($"{key}: offset은 0 이상이어야 합니다.");
++            string typeText = (Str(f, "type") ?? throw new RuleFormatException($"{key}: type이 필요합니다.")).ToUpperInvariant();
++            if (!Enum.TryParse(typeText, ignoreCase: true, out BinaryType type) || !Enum.IsDefined(type))
++            {
++                throw new RuleFormatException($"{key}: 알 수 없는 type {typeText}");
++            }
++            string endian = (Str(f, "endian") ?? "LE").ToUpperInvariant();
++            if (endian is not ("BE" or "LE")) throw new RuleFormatException($"{key}: endian은 BE 또는 LE입니다.");
++
++            list.Add(new BinaryField(key, offset, type, endian == "BE",
++                Dbl(f, "scale") ?? 1, Dbl(f, "valueOffset") ?? 0));
++        }
++        return list;
++    }
++
++    // ----- 공통 -----
++
++    internal static TextSeparator Sep(string? text) => (text ?? "SPACE").ToUpperInvariant() switch
++    {
++        "SPACE" => TextSeparator.Space,
++        "COMMA" => TextSeparator.Comma,
++        "TAB" => TextSeparator.Tab,
++        string s => throw new RuleFormatException($"알 수 없는 sep: {s}")
++    };
++
++    private static byte[] Bytes(string expr, string name, int minLength)
++    {
++        byte[] b;
++        try { b = ProtocolExpression.ToBytes(expr); }
++        catch (FormatException ex) { throw new RuleFormatException($"{name}: {ex.Message}"); }
++        if (b.Length < minLength) throw new RuleFormatException($"{name}: {minLength}바이트 이상이어야 합니다.");
++        return b;
++    }
++
++    internal static byte OneByte(string expr, string name)
++    {
++        byte[] b = Bytes(expr, name, 1);
++        if (b.Length != 1) throw new RuleFormatException($"{name}: 1바이트여야 합니다.");
++        return b[0];
++    }
++
++    private static string? Str(JsonElement e, string name) =>
++        e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
++
++    private static int? Int(JsonElement e, string name)
++    {
++        if (!e.TryGetProperty(name, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return null;
++        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int n)) return n;
++        throw new RuleFormatException($"{name}: 정수여야 합니다.");
++    }
++
++    private static double? Dbl(JsonElement e, string name)
++    {
++        if (!e.TryGetProperty(name, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return null;
++        if (v.ValueKind == JsonValueKind.Number) return v.GetDouble();
++        throw new RuleFormatException($"{name}: 숫자여야 합니다.");
++    }
++
++    private static bool? Bool(JsonElement e, string name)
++    {
++        if (!e.TryGetProperty(name, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return null;
++        return v.ValueKind switch
++        {
++            JsonValueKind.True => true,
++            JsonValueKind.False => false,
++            _ => throw new RuleFormatException($"{name}: true/false여야 합니다.")
++        };
++    }
++
++    private static IReadOnlyList<string> StrArray(JsonElement e, string name)
++    {
++        if (!e.TryGetProperty(name, out JsonElement v) || v.ValueKind != JsonValueKind.Array) return [];
++        var list = new List<string>();
++        foreach (JsonElement x in v.EnumerateArray())
++        {
++            if (x.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(x.GetString()))
++            {
++                throw new RuleFormatException($"{name}: 빈 값이 아닌 문자열 배열이어야 합니다.");
++            }
++            list.Add(x.GetString()!);
++        }
++        if (list.Distinct(StringComparer.Ordinal).Count() != list.Count) throw new RuleFormatException($"{name}: 중복 항목");
++        return list;
++    }
++
++    internal static int ParseIntInvariant(string s, string name) =>
++        int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)
++            ? n
++            : throw new RuleFormatException($"{name}: 정수여야 합니다 ({s}).");
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/ExpressionTests.cs b/desktop/tests/juprovider.tests.protocol/ExpressionTests.cs
+new file mode 100644
+index 0000000..bc628ea
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/ExpressionTests.cs
+@@ -0,0 +1,57 @@
++using JuProvider.Lib.Protocol.Expression;
++using static JuProvider.Tests.Protocol.TestUtil;
++
++namespace JuProvider.Tests.Protocol;
++
++public class ExpressionTests
++{
++    [Fact] // E1
++    public void SeedExpressions_RoundTrip()
++    {
++        List<string> list = SeedExpressions().ToList();
++        Assert.True(list.Count >= 10, "seed 표현식 목록이 비었습니다.");
++        foreach (string e in list)
++        {
++            byte[] bytes = ProtocolExpression.ToBytes(e);
++            string display = ProtocolExpression.ToDisplay(bytes);
++            Assert.Equal(bytes, ProtocolExpression.ToBytes(display));
++        }
++    }
++
++    [Fact]
++    public void Known_Bytes()
++    {
++        Assert.Equal(new byte[] { 0x53, 0x7B, 0x31, 0x30, 0x2C, 0x31, 0x7D, 0x0D, 0x0A }, B("S{10,1}[CR][LF]"));
++        Assert.Equal(new byte[] { 0x02, 0x41, 0x00, 0x03 }, B("[STX]A[00][ETX]"));
++        Assert.Equal(new byte[] { 0x10, 0xFF }, B("[dle][ff]"));
++        Assert.Empty(ProtocolExpression.ToBytes(null));
++        Assert.Equal("53 7B 0D", ProtocolExpression.Hex(new byte[] { 0x53, 0x7B, 0x0D }));
++    }
++
++    [Fact]
++    public void Display_Escapes_Bracket_And_NonPrintable_For_RoundTrip()
++    {
++        byte[] data = { (byte)'[', (byte)'A', (byte)']', 0x01, 0x0D, 0x7F };
++        string display = ProtocolExpression.ToDisplay(data);
++        Assert.Equal("[5B]A][01][CR][7F]", display);
++        Assert.Equal(data, ProtocolExpression.ToBytes(display));
++    }
++
++    [Theory] // E2
++    [InlineData("S{10,1}[CR")]
++    [InlineData("[XYZ]")]
++    [InlineData("[0G]")]
++    [InlineData("[123]")]
++    [InlineData("가")]
++    public void Invalid_Expression_Throws(string expr)
++    {
++        Assert.Throws<FormatException>(() => ProtocolExpression.ToBytes(expr));
++    }
++
++    [Fact]
++    public void AllBytes_RoundTrip()
++    {
++        byte[] all = Enumerable.Range(0, 256).Select(i => (byte)i).ToArray();
++        Assert.Equal(all, ProtocolExpression.ToBytes(ProtocolExpression.ToDisplay(all)));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/FramerTests.cs b/desktop/tests/juprovider.tests.protocol/FramerTests.cs
+new file mode 100644
+index 0000000..2c25aa0
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/FramerTests.cs
+@@ -0,0 +1,123 @@
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Rules;
++using static JuProvider.Tests.Protocol.TestUtil;
++
++namespace JuProvider.Tests.Protocol;
++
++public class FramerTests
++{
++    private static IFramer Delim() => FramerFactory.Create(RuleReader.ReadFrameRule("""{"v":1,"kind":"DELIM","end":"[CR][LF]"}""")!);
++
++    [Theory] // F1 조각 크기와 무관하게 같은 결과
++    [InlineData(1)]
++    [InlineData(2)]
++    [InlineData(3)]
++    [InlineData(7)]
++    [InlineData(1000)]
++    public void Delim_Fragmented_And_Multiple(int chunk)
++    {
++        byte[] data = B("{1.0 2.0 3.0}[CR][LF]{4 5 6}[CR][LF][CR][LF]{7 8");
++        IFramer f = Delim();
++        List<Frame> frames = PushInChunks(f, data, chunk);
++
++        Assert.Equal(2, frames.Count); // 빈 프레임은 건너뜀, 마지막 미완성은 버퍼에 남음
++        Assert.Equal(B("{1.0 2.0 3.0}"), frames[0].Body);
++        Assert.Equal(B("{4 5 6}[CR][LF]"), frames[1].Raw);
++        Assert.Equal(B("{7 8").Length, f.Pending);
++
++        frames = f.Push(B("}[CR][LF]")).ToList();
++        Assert.Single(frames);
++        Assert.Equal(B("{7 8}"), frames[0].Body);
++    }
++
++    [Fact] // F1 최대 길이 초과 → 버퍼 비움
++    public void Delim_MaxLength_Clears()
++    {
++        IFramer f = FramerFactory.Create(RuleReader.ReadFrameRule("""{"v":1,"kind":"DELIM","end":"[LF]","maxLen":8}""")!);
++        Assert.Empty(f.Push(B("0123456789")));
++        Assert.Single(f.Rejections);
++        Assert.Equal(0, f.Pending);
++        Assert.Single(f.Push(B("ok[LF]")));
++    }
++
++    [Fact] // F2 STX 앞 쓰레기, escape 된 ETX
++    public void StxEtx_Garbage_And_Escape()
++    {
++        IFramer f = FramerFactory.Create(RuleReader.ReadFrameRule("""{"v":1,"kind":"STXETX","stx":"[STX]","etx":"[ETX]","escape":"[DLE]"}""")!);
++        byte[] data = B("xx[STX]A[DLE][ETX]B[DLE][DLE][ETX][STX]C[ETX]");
++        List<Frame> frames = PushInChunks(f, data, 1);
++
++        Assert.Equal(2, frames.Count);
++        Assert.Equal(new byte[] { 0x41, 0x03, 0x42, 0x10 }, frames[0].Body);
++        Assert.Equal(B("C"), frames[1].Body);
++    }
++
++    [Fact]
++    public void StxEtx_Garbage_Is_Reported()
++    {
++        IFramer f = FramerFactory.Create(new FrameRule { Kind = FrameKind.StxEtx });
++        Assert.Single(f.Push(B("zz[STX]A[ETX]")));
++        Assert.Contains(f.Rejections, r => r.Reason == "STX 앞 데이터");
++    }
++
++    [Fact] // F3
++    public void Fixed_Length()
++    {
++        IFramer f = FramerFactory.Create(RuleReader.ReadFrameRule("""{"v":1,"kind":"FIXED","len":3}""")!);
++        List<Frame> frames = PushInChunks(f, B("ABCDEFG"), 2);
++        Assert.Equal(2, frames.Count);
++        Assert.Equal(B("DEF"), frames[1].Body);
++        Assert.Equal(1, f.Pending);
++    }
++
++    [Theory] // F3 BE/LE, 헤더 포함 여부, adjust
++    [InlineData("""{"v":1,"kind":"LENFIELD","offset":1,"size":2,"endian":"BE"}""", "[AA][00][02]XY[AA][00][01]Z")]
++    [InlineData("""{"v":1,"kind":"LENFIELD","offset":1,"size":2,"endian":"LE"}""", "[AA][02][00]XY[AA][01][00]Z")]
++    [InlineData("""{"v":1,"kind":"LENFIELD","offset":0,"size":1,"includesHeader":true,"adjust":0}""", "[03]XY[02]Z")]
++    [InlineData("""{"v":1,"kind":"LENFIELD","offset":0,"size":1,"adjust":1}""", "[01]XY[00]Z")]
++    public void LengthField(string rule, string data)
++    {
++        IFramer f = FramerFactory.Create(RuleReader.ReadFrameRule(rule)!);
++        List<Frame> frames = PushInChunks(f, B(data), 1);
++        Assert.Equal(2, frames.Count);
++        Assert.EndsWith("XY", System.Text.Encoding.ASCII.GetString(frames[0].Body));
++        Assert.EndsWith("Z", System.Text.Encoding.ASCII.GetString(frames[1].Body));
++    }
++
++    [Fact] // F3 잘못된 길이 → 1바이트씩 버리고 재동기화
++    public void LengthField_Invalid_Resyncs()
++    {
++        IFramer f = FramerFactory.Create(RuleReader.ReadFrameRule("""{"v":1,"kind":"LENFIELD","offset":0,"size":1,"includesHeader":true,"maxLen":4}""")!);
++        List<Frame> frames = f.Push(B("[00][09][02]A")).ToList();
++        Assert.Single(frames);
++        Assert.Equal(B("[02]A"), frames[0].Body);
++        Assert.Equal(2, f.Rejections.Count);
++    }
++
++    [Theory] // F4
++    [InlineData("SUM8")]
++    [InlineData("XOR8")]
++    [InlineData("CRC16_MODBUS")]
++    public void Checksum_Valid_Stripped_Invalid_Rejected(string type)
++    {
++        ChecksumType t = type switch { "SUM8" => ChecksumType.Sum8, "XOR8" => ChecksumType.Xor8, _ => ChecksumType.Crc16Modbus };
++        byte[] payload = B("12AB");
++        byte[] good = payload.Concat(Checksum.Compute(t, payload)).Concat(B("[CR][LF]")).ToArray();
++        byte[] bad = payload.Concat(Checksum.Compute(t, B("ZZZY"))).Concat(B("[CR][LF]")).ToArray();
++
++        IFramer f = FramerFactory.Create(RuleReader.ReadFrameRule($$$"""{"v":1,"kind":"DELIM","end":"[CR][LF]","checksum":{"type":"{{{type}}}"}}""")!);
++        List<Frame> frames = f.Push(good).ToList();
++        Assert.Single(frames);
++        Assert.Equal(payload, frames[0].Body);
++
++        Assert.Empty(f.Push(bad));
++        Assert.Contains(f.Rejections, r => r.Reason == "체크섬 불일치");
++    }
++
++    [Fact]
++    public void Crc16Modbus_KnownVector()
++    {
++        // 01 03 00 00 00 01 → CRC 84 0A (Little Endian)
++        Assert.Equal(new byte[] { 0x84, 0x0A }, Checksum.Compute(ChecksumType.Crc16Modbus, new byte[] { 0x01, 0x03, 0x00, 0x00, 0x00, 0x01 }));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/ParserTests.cs b/desktop/tests/juprovider.tests.protocol/ParserTests.cs
+new file mode 100644
+index 0000000..f2648f9
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/ParserTests.cs
+@@ -0,0 +1,104 @@
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Parsing;
++using JuProvider.Lib.Protocol.Rules;
++using static JuProvider.Tests.Protocol.TestUtil;
++
++namespace JuProvider.Tests.Protocol;
++
++public class ParserTests
++{
++    private static IFrameParser P(string rule) => ParserFactory.Create(RuleReader.ReadParseRule(rule)!);
++
++    [Fact] // P1 저속: 3채널
++    public void Text_Channels()
++    {
++        ParseResult r = P("FRAME=CRLF;STX={;ETX=};MODE=DELIMITED;SEP=SPACE;COUNT=3;MAP=CHANNELS")
++            .Parse(BodyFrame("{1.23 -4.5  7e-1}"));
++        Assert.True(r.Ok, r.Error);
++        Assert.Equal(new[] { "1", "2", "3" }, r.Values.Select(v => v.ChannelKey));
++        Assert.Equal(new double?[] { 1.23, -4.5, 0.7 }, r.Values.Select(v => v.Value));
++        Assert.All(r.Values, v => Assert.Equal(0, v.SampleIndex));
++    }
++
++    [Fact] // P1 고속: 선택 채널 6샘플
++    public void Text_Samples()
++    {
++        ParseResult r = P("""{"v":1,"kind":"TEXT","trim":"{}","count":6,"map":"SAMPLES"}""")
++            .Parse(BodyFrame("{1 2 3 4 5 6}"), new ParseContext("2"));
++        Assert.True(r.Ok, r.Error);
++        Assert.All(r.Values, v => Assert.Equal("2", v.ChannelKey));
++        Assert.Equal(Enumerable.Range(0, 6), r.Values.Select(v => v.SampleIndex));
++    }
++
++    [Theory] // P1 거부
++    [InlineData("{1 2}")]        // 개수 불일치
++    [InlineData("1 2 3")]        // 앞뒤 문자 없음
++    [InlineData("{1 x 3}")]      // 숫자 아님
++    [InlineData("{1,5 2 3}")]    // 지역 형식 쉼표 소수점 거부
++    public void Text_Rejects(string body)
++    {
++        ParseResult r = P("""{"v":1,"kind":"TEXT","trim":"{}","count":3}""").Parse(BodyFrame(body));
++        Assert.False(r.Ok);
++        Assert.NotNull(r.Error);
++        Assert.Empty(r.Values);
++    }
++
++    [Fact] // P2 센서정보
++    public void Info_SensorList()
++    {
++        ParseResult r = P("""{"v":1,"kind":"INFO","trim":"{}","fields":["CH1","CH2","CH3","CH4"],"absent":"000"}""")
++            .Parse(BodyFrame("{008,000,000,000}"));
++        Assert.True(r.Ok, r.Error);
++        Assert.Equal(new[] { "CH1", "CH2", "CH3", "CH4" }, r.Values.Select(v => v.ChannelKey));
++        Assert.Equal("008", r.Values[0].Text);
++        Assert.False(r.Values[0].Absent);
++        Assert.True(r.Values.Skip(1).All(v => v.Absent));
++        Assert.All(r.Values, v => Assert.Null(v.Value));
++    }
++
++    [Theory]
++    [InlineData("{008,000,000}")]
++    [InlineData("{008,,000,000}")]
++    public void Info_Rejects(string body)
++    {
++        Assert.False(P("""{"v":1,"kind":"INFO","trim":"{}","fields":["CH1","CH2","CH3","CH4"]}""").Parse(BodyFrame(body)).Ok);
++    }
++
++    [Fact] // P3
++    public void Binary_Fields()
++    {
++        // I16 LE = -2 (FE FF), F32 BE = 1.5 (3F C0 00 00), U8 = 200
++        byte[] body = { 0xAA, 0xFE, 0xFF, 0x3F, 0xC0, 0x00, 0x00, 0xC8 };
++        ParseResult r = P("""
++            {"v":1,"kind":"BINARY","fields":[
++              {"key":"T","offset":1,"type":"I16","endian":"LE","scale":0.5,"valueOffset":10},
++              {"key":"P","offset":3,"type":"F32","endian":"BE"},
++              {"key":"S","offset":7,"type":"U8"}]}
++            """).Parse(new Frame(body, body));
++        Assert.True(r.Ok, r.Error);
++        Assert.Equal(new double?[] { 9.0, 1.5, 200 }, r.Values.Select(v => v.Value));
++        Assert.Equal(new[] { "T", "P", "S" }, r.Values.Select(v => v.ChannelKey));
++    }
++
++    [Fact]
++    public void Binary_ShortFrame_Rejected()
++    {
++        byte[] body = { 0x01 };
++        Assert.False(P("""{"v":1,"kind":"BINARY","fields":[{"key":"A","offset":0,"type":"U16"}]}""").Parse(new Frame(body, body)).Ok);
++    }
++
++    [Fact] // Framer + Parser 연결: 조각 입력 GTEC 저속 스트림
++    public void Pipeline_Gtec_Stream()
++    {
++        const string legacy = "FRAME=CRLF;STX={;ETX=};MODE=DELIMITED;SEP=SPACE;COUNT=3;MAP=CHANNELS";
++        IFramer framer = FramerFactory.Create(RuleReader.ReadFrameRule(legacy)!);
++        IFrameParser parser = ParserFactory.Create(RuleReader.ReadParseRule(legacy)!);
++
++        List<Frame> frames = PushInChunks(framer, B("{1 2 3}[CR][LF]{4 5 6}[CR][LF]{bad}[CR][LF]{7 8 9}[CR][LF]"), 5);
++        List<ParseResult> results = frames.Select(f => parser.Parse(f)).ToList();
++
++        Assert.Equal(4, results.Count);
++        Assert.Equal(3, results.Count(r => r.Ok));
++        Assert.Equal(9.0, results[3].Values[2].Value);
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/RuleTests.cs b/desktop/tests/juprovider.tests.protocol/RuleTests.cs
+new file mode 100644
+index 0000000..b6f1fdc
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/RuleTests.cs
+@@ -0,0 +1,79 @@
++using JuProvider.Lib.Protocol.Rules;
++
++namespace JuProvider.Tests.Protocol;
++
++public class RuleTests
++{
++    [Fact] // F5 과거 GTEC 텍스트 → 같은 의미의 규칙
++    public void Legacy_Gtec_LowSpeed()
++    {
++        const string legacy = "FRAME=CRLF;STX={;ETX=};MODE=DELIMITED;SEP=SPACE;COUNT=3;MAP=CHANNELS";
++        FrameRule frame = RuleReader.ReadFrameRule(legacy)!;
++        ParseRule parse = RuleReader.ReadParseRule(legacy)!;
++
++        Assert.Equal(FrameKind.Delim, frame.Kind);
++        Assert.Equal(new byte[] { 0x0D, 0x0A }, frame.End);
++        Assert.Equal(ParseKind.Text, parse.Kind);
++        Assert.Equal("{}", parse.Trim);
++        Assert.Equal(3, parse.Count);
++        Assert.Equal(ValueMap.Channels, parse.Map);
++
++        ParseRule json = RuleReader.ReadParseRule("""{"v":1,"kind":"TEXT","trim":"{}","sep":"SPACE","count":3,"map":"CHANNELS"}""")!;
++        Assert.Equal(json with { Fields = parse.Fields, BinaryFields = parse.BinaryFields }, parse);
++    }
++
++    [Fact]
++    public void Legacy_Info_Defaults_To_4_Fields()
++    {
++        ParseRule p = RuleReader.ReadParseRule("MODE=INFO;SEP=COMMA")!;
++        Assert.Equal(ParseKind.Info, p.Kind);
++        Assert.Equal(new[] { "CH1", "CH2", "CH3", "CH4" }, p.Fields);
++        Assert.Equal("000", p.Absent);
++    }
++
++    [Fact]
++    public void Legacy_None_Has_No_Parse()
++    {
++        Assert.Null(RuleReader.ReadParseRule("MODE=NONE"));
++        Assert.NotNull(RuleReader.ReadFrameRule("MODE=NONE"));
++    }
++
++    [Fact]
++    public void Empty_Is_Null()
++    {
++        Assert.Null(RuleReader.ReadFrameRule(""));
++        Assert.Null(RuleReader.ReadParseRule("  "));
++    }
++
++    [Theory]
++    [InlineData("""{"kind":"DELIM"}""")]                              // 버전 없음
++    [InlineData("""{"v":2,"kind":"DELIM"}""")]                        // 버전 다름
++    [InlineData("""{"v":1}""")]                                       // kind 없음
++    [InlineData("""{"v":1,"kind":"NOPE"}""")]
++    [InlineData("""{"v":1,"kind":"FIXED"}""")]                        // len 없음
++    [InlineData("""{"v":1,"kind":"STXETX","stx":"[STX][ETX]"}""")]    // 1바이트 아님
++    [InlineData("""{"v":1,"kind":"LENFIELD","offset":0,"size":3}""")]
++    [InlineData("""{"v":1,"kind":"DELIM","checksum":{"type":"MD5"}}""")]
++    [InlineData("""{"v":1,"kind":"DELIM","end":"[XX]"}""")]
++    [InlineData("""not json""")]
++    public void Invalid_FrameRule(string text)
++    {
++        Assert.ThrowsAny<FormatException>(() => RuleReader.ReadFrameRule(text));
++    }
++
++    [Theory]
++    [InlineData("""{"v":1,"kind":"TEXT","map":"ROWS"}""")]
++    [InlineData("""{"v":1,"kind":"TEXT","trim":"{"}""")]
++    [InlineData("""{"v":1,"kind":"INFO"}""")]                          // fields 없음
++    [InlineData("""{"v":1,"kind":"INFO","fields":["A","A"]}""")]       // 중복
++    [InlineData("""{"v":1,"kind":"BINARY","fields":[]}""")]
++    [InlineData("""{"v":1,"kind":"BINARY","fields":[{"key":"A","offset":0,"type":"I24"}]}""")]
++    [InlineData("""{"v":1,"kind":"BINARY","fields":[{"key":"A","offset":0,"type":"U8"},{"key":"A","offset":1,"type":"U8"}]}""")]
++    [InlineData("FRAME=CRLF;MODE=STREAM")]
++    [InlineData("FRAME=CRLF;COUNT=x")]
++    [InlineData("패킷길이|STX DLE|ETX|ETX DLE")]                      // 현재 seed의 설명문 형식 → 규칙 아님
++    public void Invalid_ParseRule(string text)
++    {
++        Assert.ThrowsAny<FormatException>(() => RuleReader.ReadParseRule(text));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/TestData/seed_expressions.txt b/desktop/tests/juprovider.tests.protocol/TestData/seed_expressions.txt
+new file mode 100644
+index 0000000..d222e71
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/TestData/seed_expressions.txt
+@@ -0,0 +1,15 @@
++# database/seed/02_ju_core_seed.sql 의 ju_protocol.PTL_VAL, ju_protocol_packet.PACKET_EXPR (빈 값 제외)
++S{10,0}
++S{10,0}[CR][LF]
++S{10,1}
++S{10,3}
++S{11,0}
++S{11,1}
++S{11,1}[CR][LF]
++S{11,2}
++S{12,0.020}
++S{12,0.100}
++S{12,10}[CR][LF]
++S{20}
++S{TEST}[CR][LF]
++{OK}[CR][LF]
+diff --git a/desktop/tests/juprovider.tests.protocol/TestUtil.cs b/desktop/tests/juprovider.tests.protocol/TestUtil.cs
+new file mode 100644
+index 0000000..c50d763
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/TestUtil.cs
+@@ -0,0 +1,30 @@
++using JuProvider.Lib.Protocol.Expression;
++using JuProvider.Lib.Protocol.Framing;
++
++namespace JuProvider.Tests.Protocol;
++
++internal static class TestUtil
++{
++    public static byte[] B(string expression) => ProtocolExpression.ToBytes(expression);
++
++    public static Frame BodyFrame(string expression)
++    {
++        byte[] b = B(expression);
++        return new Frame(b, b);
++    }
++
++    /// <summary>입력을 지정 크기 조각으로 나눠 넣고 프레임을 모두 모은다</summary>
++    public static List<Frame> PushInChunks(IFramer framer, byte[] data, int chunkSize)
++    {
++        var frames = new List<Frame>();
++        for (int i = 0; i < data.Length; i += chunkSize)
++        {
++            frames.AddRange(framer.Push(data.AsSpan(i, Math.Min(chunkSize, data.Length - i))));
++        }
++        return frames;
++    }
++
++    public static IEnumerable<string> SeedExpressions() =>
++        File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "TestData", "seed_expressions.txt"))
++            .Where(l => l.Length > 0 && !l.StartsWith('#'));
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/Usings.cs b/desktop/tests/juprovider.tests.protocol/Usings.cs
+new file mode 100644
+index 0000000..c802f44
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/Usings.cs
+@@ -0,0 +1 @@
++global using Xunit;
+diff --git a/desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj b/desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj
+new file mode 100644
+index 0000000..ac36188
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj
+@@ -0,0 +1,26 @@
++<Project Sdk="Microsoft.NET.Sdk">
++
++  <!-- C1 단위 테스트. 이름이 juprovider.lib.* 가 아니므로 Directory.Build.props의 app\libs 출력 규칙에 걸리지 않는다. -->
++  <PropertyGroup>
++    <TargetFramework>net10.0-windows</TargetFramework>
++    <Nullable>enable</Nullable>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <IsPackable>false</IsPackable>
++    <IsTestProject>true</IsTestProject>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
++    <PackageReference Include="xunit" Version="2.9.3" />
++    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="..\..\lib\juprovider.lib.protocol\juprovider.lib.protocol.csproj" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <None Update="TestData\**\*" CopyToOutputDirectory="PreserveNewest" />
++  </ItemGroup>
++
++</Project>
+-- 
+2.43.0
+

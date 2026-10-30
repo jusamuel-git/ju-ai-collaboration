@@ -75,7 +75,17 @@ if ($coreOk) {
     [void]$Summary.Add([pscustomobject]@{ Step = 'juprovider.backend + Vue (WAR)'; Result = 'SKIP'; Seconds = 0; Note = 'core install 실패' })
 }
 if (-not $SkipDesktop) {
-    Step 'juprovider desktop' $jp 'dotnet build desktop\JuProvider.Desktop.slnx -c Debug' '' | Out-Null
+    $deskOk = Step 'juprovider desktop' $jp 'dotnet build desktop\JuProvider.Desktop.slnx -c Debug' ''
+    # Desktop 단위 테스트 (C1~): 테스트 프로젝트가 있는 브랜치에서만 실행
+    $deskTests = @(Get-ChildItem (Join-Path $jp 'desktop\tests') -Filter '*.csproj' -Recurse -ErrorAction SilentlyContinue)
+    foreach ($t in $deskTests) {
+        $rel = $t.FullName.Substring($jp.Length + 1)
+        if ($deskOk) {
+            Step ('juprovider desktop test ' + $t.BaseName) $jp ('dotnet test ' + $rel + ' -c Debug --no-build') '' | Out-Null
+        } else {
+            [void]$Summary.Add([pscustomobject]@{ Step = 'juprovider desktop test ' + $t.BaseName; Result = 'SKIP'; Seconds = 0; Note = 'desktop 빌드 실패' })
+        }
+    }
 }
 
 # juproject
