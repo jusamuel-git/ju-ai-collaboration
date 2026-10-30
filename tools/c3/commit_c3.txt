@@ -1,0 +1,15 @@
+feat(desktop): command scheduler, data mapper and device session (C3)
+
+- CommandScheduler: per-link serial queue (parallel only with full duplex + correlation key),
+  priority STOP > CONTROL > INFO > POLL, response matching (key, expect, late guard, legacy first frame),
+  timeout/retry for idempotent commands, in-flight cancel keeps link busy, STOP cancels pending START/PAUSE,
+  poll skip, link down/up, link-suspect after consecutive timeouts
+- DataMapper: DeviceRef/ChannelRef/LogicalDataRef, transform, range/unmapped/parse-error quality,
+  order-independent results; LegacyTagIdMapping (TAG_ID=CH<n>) isolated
+- DeviceSession: transport -> framer -> scheduler -> stream parser -> mapper -> values; follows link state
+- ExchangePattern/ProtocolRole/CommandAction model (PROT code mapping)
+- Tests: response-match conflicts M1-M6, STOP/cancel/timeout S1-S7, identifiers D1-D8, session end-to-end
+- No server, DB, client, terminal or IPC change
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

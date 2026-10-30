@@ -1,0 +1,1938 @@
+From 10bc50be46ed59c6f82b39d37a4e67c2a1cd1198 Mon Sep 17 00:00:00 2001
+From: JU <jusamuel@gmail.com>
+Date: Fri, 30 Oct 2026 10:55:16 +0900
+Subject: [PATCH] feat(desktop): command scheduler, data mapper and device
+ session (C3)
+
+- CommandScheduler: per-link serial queue (parallel only with full duplex + correlation key),
+  priority STOP > CONTROL > INFO > POLL, response matching (key, expect, late guard, legacy first frame),
+  timeout/retry for idempotent commands, in-flight cancel keeps link busy, STOP cancels pending START/PAUSE,
+  poll skip, link down/up, link-suspect after consecutive timeouts
+- DataMapper: DeviceRef/ChannelRef/LogicalDataRef, transform, range/unmapped/parse-error quality,
+  order-independent results; LegacyTagIdMapping (TAG_ID=CH<n>) isolated
+- DeviceSession: transport -> framer -> scheduler -> stream parser -> mapper -> values; follows link state
+- ExchangePattern/ProtocolRole/CommandAction model (PROT code mapping)
+- Tests: response-match conflicts M1-M6, STOP/cancel/timeout S1-S7, identifiers D1-D8, session end-to-end
+- No server, DB, client, terminal or IPC change
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../Mapping/DataMapping.cs                    | 196 ++++++++
+ .../Model/ProtocolModel.cs                    |  46 ++
+ .../Scheduling/CommandScheduler.cs            | 428 ++++++++++++++++++
+ .../Scheduling/Commands.cs                    | 129 ++++++
+ .../Session/DeviceSession.cs                  | 267 +++++++++++
+ .../DeviceSessionTests.cs                     | 209 +++++++++
+ .../juprovider.tests.protocol/MappingTests.cs | 167 +++++++
+ .../SchedulerTests.cs                         | 407 +++++++++++++++++
+ 8 files changed, 1849 insertions(+)
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Mapping/DataMapping.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Model/ProtocolModel.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Scheduling/CommandScheduler.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Scheduling/Commands.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/DeviceSessionTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/MappingTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/SchedulerTests.cs
+
+diff --git a/desktop/lib/juprovider.lib.protocol/Mapping/DataMapping.cs b/desktop/lib/juprovider.lib.protocol/Mapping/DataMapping.cs
+new file mode 100644
+index 0000000..c3660e2
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Mapping/DataMapping.cs
+@@ -0,0 +1,196 @@
++using System.Globalization;
++using System.Text.RegularExpressions;
++using JuProvider.Lib.Protocol.Parsing;
++
++namespace JuProvider.Lib.Protocol.Mapping;
++
++/// <summary>장치 = DEV_CD. Gateway 부모는 키에 넣지 않는다 (C0 §6, D7)</summary>
++public sealed record DeviceRef(string DevCd);
++
++/// <summary>채널 = DEV_CD + ChannelKey. ChannelKey는 대소문자 구분 문자열 그대로 비교("1" ≠ "01", "ch1" ≠ "CH1")</summary>
++public sealed record ChannelRef(string DevCd, string ChannelKey);
++
++/// <summary>논리 Data = DAT_GR_CD + DAT_CD + DAT_IDX (ju_data_tag)</summary>
++public sealed record LogicalDataRef(string DatGrCd, string DatCd, int DatIdx) : IComparable<LogicalDataRef>
++{
++    public string Key => $"{DatGrCd}/{DatCd}/{DatIdx.ToString(CultureInfo.InvariantCulture)}";
++
++    public int CompareTo(LogicalDataRef? other)
++    {
++        if (other is null) return 1;
++        int c = string.CompareOrdinal(DatGrCd, other.DatGrCd);
++        if (c != 0) return c;
++        c = string.CompareOrdinal(DatCd, other.DatCd);
++        return c != 0 ? c : DatIdx.CompareTo(other.DatIdx);
++    }
++
++    public override string ToString() => Key;
++}
++
++public enum DataQuality
++{
++    Good,
++    /// <summary>DAT_MIN/MAX 밖. 값은 유지</summary>
++    Range,
++    /// <summary>숫자 값 없음</summary>
++    ParseErr,
++    Stale,
++    /// <summary>매핑 없는 채널. 값을 버리지 않고 보고</summary>
++    Unmapped
++}
++
++public sealed record ValueTransform(double Scale = 1, double Offset = 0)
++{
++    public static ValueTransform Identity { get; } = new();
++
++    public double Apply(double value) => value * Scale + Offset;
++}
++
++/// <summary>
++/// 매핑 1행 (C0 §6, 이후 ju_data_channel_map). PtlCd 가 있으면 그 프로토콜 응답에서만 적용.
++/// Min/Max 는 변환 후 값 기준.
++/// </summary>
++public sealed record ChannelMapEntry(
++    string DevCd,
++    string ChannelKey,
++    LogicalDataRef Target,
++    string? PtlCd = null,
++    ValueTransform? Transform = null,
++    string? Unit = null,
++    double? Min = null,
++    double? Max = null,
++    bool Use = true);
++
++public sealed record LogicalValue(
++    DeviceRef Device,
++    ChannelRef Channel,
++    int SampleIndex,
++    LogicalDataRef? Data,
++    double? Value,
++    string? Text,
++    string? Unit,
++    DataQuality Quality,
++    DateTimeOffset ReceivedAt,
++    DateTimeOffset? DeviceTime = null);
++
++public interface IDataMapper
++{
++    IReadOnlyList<LogicalValue> Map(string devCd, string ptlCd, IReadOnlyList<RawValue> values, DateTimeOffset? receivedAt = null);
++}
++
++/// <summary>
++/// 원시값 → 논리 Data. 매핑 목록만 받는다 (CH&lt;n&gt; 규칙은 LegacyTagIdMapping 에 격리).
++/// 결과 순서: 입력 원시값 순서 → 한 채널의 여러 대상은 LogicalDataRef 정렬 순. 매핑 목록 순서와 무관 (D1).
++/// Absent(INFO 미연결) 값은 건너뛴다.
++/// </summary>
++public sealed class DataMapper : IDataMapper
++{
++    private readonly Dictionary<(string DevCd, string ChannelKey), ChannelMapEntry[]> _index;
++
++    public DataMapper(IEnumerable<ChannelMapEntry> entries)
++    {
++        ArgumentNullException.ThrowIfNull(entries);
++        var list = entries.ToList();
++        foreach (ChannelMapEntry e in list)
++        {
++            if (string.IsNullOrEmpty(e.DevCd) || string.IsNullOrEmpty(e.ChannelKey) || e.Target is null
++                || string.IsNullOrEmpty(e.Target.DatGrCd) || string.IsNullOrEmpty(e.Target.DatCd))
++            {
++                throw new ArgumentException($"매핑 항목 값 누락: {e}", nameof(entries));
++            }
++        }
++
++        _index = list
++            .Where(e => e.Use)
++            .GroupBy(e => (e.DevCd, e.ChannelKey))
++            .ToDictionary(
++                g => g.Key,
++                g => g
++                    .GroupBy(e => (e.PtlCd, e.Target))   // 같은 대상 중복 제거 (먼저 온 것)
++                    .Select(x => x.First())
++                    .OrderBy(e => e.Target)
++                    .ThenBy(e => e.PtlCd, StringComparer.Ordinal)
++                    .ToArray());
++    }
++
++    public int EntryCount => _index.Values.Sum(a => a.Length);
++
++    public IReadOnlyList<LogicalValue> Map(string devCd, string ptlCd, IReadOnlyList<RawValue> values, DateTimeOffset? receivedAt = null)
++    {
++        ArgumentNullException.ThrowIfNull(values);
++        DateTimeOffset at = receivedAt ?? DateTimeOffset.Now;
++        var device = new DeviceRef(devCd);
++        var result = new List<LogicalValue>(values.Count);
++
++        foreach (RawValue raw in values)
++        {
++            if (raw.Absent) continue;
++            var channel = new ChannelRef(devCd, raw.ChannelKey);
++
++            ChannelMapEntry[] targets = _index.TryGetValue((devCd, raw.ChannelKey), out var all)
++                ? all.Where(e => e.PtlCd is null || e.PtlCd == ptlCd).ToArray()
++                : [];
++
++            if (targets.Length == 0)
++            {
++                result.Add(new LogicalValue(device, channel, raw.SampleIndex, null, raw.Value, raw.Text, null, DataQuality.Unmapped, at));
++                continue;
++            }
++
++            foreach (ChannelMapEntry e in targets)
++            {
++                if (raw.Value is not { } v)
++                {
++                    result.Add(new LogicalValue(device, channel, raw.SampleIndex, e.Target, null, raw.Text, e.Unit, DataQuality.ParseErr, at));
++                    continue;
++                }
++
++                double value = (e.Transform ?? ValueTransform.Identity).Apply(v);
++                bool outOfRange = (e.Min is { } min && value < min) || (e.Max is { } max && value > max);
++                result.Add(new LogicalValue(device, channel, raw.SampleIndex, e.Target, value, raw.Text, e.Unit,
++                    outOfRange ? DataQuality.Range : DataQuality.Good, at));
++            }
++        }
++        return result;
++    }
++}
++
++/// <summary>과거 ju_data_tag 1행 (TAG_ID 관례 변환용)</summary>
++public sealed record LegacyDataTag(
++    string DevCd,
++    string DatGrCd,
++    string DatCd,
++    int DatIdx,
++    string? TagId,
++    string? Unit = null,
++    double? Min = null,
++    double? Max = null);
++
++/// <summary>
++/// 임시 변환 (C0-Q7): TAG_ID = "CH&lt;n&gt;" → ChannelKey "n" (앞의 0 제거, TEXT 파서의 위치 키와 같음).
++/// 매핑 테이블(ju_data_channel_map)이 생기면 이 클래스만 빼면 된다. 결과는 테이블 형식과 같은 ChannelMapEntry.
++/// </summary>
++public static partial class LegacyTagIdMapping
++{
++    [GeneratedRegex("^CH([0-9]{1,4})$", RegexOptions.CultureInvariant)]
++    private static partial Regex TagIdPattern();
++
++    public static IReadOnlyList<ChannelMapEntry> ToEntries(IEnumerable<LegacyDataTag> tags, ICollection<string>? warnings = null)
++    {
++        ArgumentNullException.ThrowIfNull(tags);
++        var result = new List<ChannelMapEntry>();
++        foreach (LegacyDataTag t in tags)
++        {
++            Match m = TagIdPattern().Match(t.TagId ?? string.Empty);
++            if (!m.Success)
++            {
++                warnings?.Add($"{t.DevCd} {t.DatGrCd}/{t.DatCd}/{t.DatIdx}: TAG_ID '{t.TagId}' 는 CH<n> 형식이 아님 → 제외");
++                continue;
++            }
++            string key = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture);
++            result.Add(new ChannelMapEntry(t.DevCd, key, new LogicalDataRef(t.DatGrCd, t.DatCd, t.DatIdx),
++                Unit: t.Unit, Min: t.Min, Max: t.Max));
++        }
++        return result;
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Model/ProtocolModel.cs b/desktop/lib/juprovider.lib.protocol/Model/ProtocolModel.cs
+new file mode 100644
+index 0000000..2546fce
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Model/ProtocolModel.cs
+@@ -0,0 +1,46 @@
++namespace JuProvider.Lib.Protocol.Model;
++
++/// <summary>프로토콜 교환 방식 (C0 §3). 프로토콜당 1개</summary>
++public enum ExchangePattern
++{
++    /// <summary>송신만. 쓰기 완료 = 완료</summary>
++    TxOnly,
++    /// <summary>송신 후 응답 1건</summary>
++    TxRx,
++    /// <summary>장비가 보내는 연속 수신. Scheduler를 거치지 않음</summary>
++    RxStream,
++    /// <summary>주기적 TX_RX</summary>
++    Poll
++}
++
++/// <summary>프로토콜 역할 (C0 §3). 복수 가능</summary>
++[Flags]
++public enum ProtocolRole
++{
++    None = 0,
++    Info = 1,
++    Control = 2,
++    Data = 4
++}
++
++/// <summary>상태 전이 명령 구분. STOP 우선순위·START/PAUSE 취소 규칙에 쓴다</summary>
++public enum CommandAction
++{
++    None,
++    Start,
++    Pause,
++    Stop
++}
++
++public static class ProtocolModel
++{
++    /// <summary>공통코드 PROT → ExchangePattern (C0 §3 확정 의미)</summary>
++    public static ExchangePattern FromPtlType(string? ptlType) => ptlType switch
++    {
++        "PROT0000" => ExchangePattern.Poll,
++        "PROT0001" => ExchangePattern.TxOnly,
++        "PROT0002" => ExchangePattern.RxStream,
++        "PROT0003" => ExchangePattern.TxRx,
++        _ => throw new ArgumentException($"알 수 없는 PTL_TYPE: {ptlType}", nameof(ptlType))
++    };
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Scheduling/CommandScheduler.cs b/desktop/lib/juprovider.lib.protocol/Scheduling/CommandScheduler.cs
+new file mode 100644
+index 0000000..c665b65
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Scheduling/CommandScheduler.cs
+@@ -0,0 +1,428 @@
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Model;
++
++namespace JuProvider.Lib.Protocol.Scheduling;
++
++/// <summary>
++/// Link 1개의 송신 순서·응답 매칭·타임아웃 (C0 §2). Link : Scheduler = 1 : 1.
++/// <list type="bullet">
++/// <item>기본 직렬(진행 중 1건). FullDuplex + CorrelationOf + 상관키 있는 명령끼리만 MaxInFlight 까지 병렬.</item>
++/// <item>다음 명령 선택: 우선순위(STOP &gt; CONTROL &gt; INFO &gt; POLL) → 등록 순서.</item>
++/// <item>수신 프레임 매칭 순서: 상관키 → 진행 중 명령의 Expect → (타임아웃 직후) LATE → Expect 없는 레거시 첫 프레임 → Unmatched(스트림).</item>
++/// <item>재시도는 Idempotent 명령만. 연속 타임아웃 K회면 LinkSuspect 1회 (재연결은 Link 소유자 판단).</item>
++/// <item>진행 중 취소: 호출자는 즉시 Cancelled, Link는 응답·타임아웃까지 점유.</item>
++/// </list>
++/// 수신 프레임은 OnFrame, Link 상태는 OnLinkDown/OnLinkUp 으로 알려 준다.
++/// </summary>
++public sealed class CommandScheduler : IAsyncDisposable
++{
++    private static readonly TimeSpan LateKeyLifetime = TimeSpan.FromSeconds(30);
++
++    private sealed class Entry(CommandRequest request)
++    {
++        public CommandRequest Request { get; } = request;
++        public TaskCompletionSource<CommandResult> Tcs { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
++        public long Seq;
++        public int Attempts;
++        public int SendNo;
++        public bool CallerCancelled;
++        public CancellationTokenRegistration Registration;
++        public CancellationTokenSource? TimeoutCts;
++    }
++
++    private readonly ILinkWriter _writer;
++    private readonly SchedulerOptions _options;
++    private readonly object _lock = new();
++    private readonly List<Entry> _queue = [];
++    private readonly List<Entry> _inFlight = [];
++    private readonly List<Entry> _guardEntries = [];
++    private readonly Dictionary<string, long> _lateKeys = new(StringComparer.Ordinal);
++    private readonly HashSet<string> _legacyWarned = new(StringComparer.Ordinal);
++    private readonly SemaphoreSlim _signal = new(0);
++    private readonly CancellationTokenSource _life = new();
++    private readonly Task _loop;
++    private long _seq;
++    private bool _linkUp;
++    private bool _disposed;
++    private int _consecutiveTimeouts;
++    private long _guardUntil;
++    private long _gapUntil;
++
++    public CommandScheduler(ILinkWriter writer, SchedulerOptions? options = null)
++    {
++        _writer = writer ?? throw new ArgumentNullException(nameof(writer));
++        _options = options ?? new SchedulerOptions();
++        if (_options.MaxInFlight < 1) throw new ArgumentOutOfRangeException(nameof(options), "MaxInFlight >= 1");
++        _linkUp = _options.StartLinkUp;
++        _loop = Task.Run(LoopAsync);
++    }
++
++    /// <summary>어떤 대기 명령에도 맞지 않는 프레임 (RX_STREAM 처리 대상)</summary>
++    public event EventHandler<Frame>? Unmatched;
++
++    /// <summary>타임아웃된 명령의 늦은 응답. 다음 명령에 연결하지 않고 버린다</summary>
++    public event EventHandler<Frame>? Late;
++
++    /// <summary>연속 타임아웃이 SuspectAfterTimeouts 에 도달 (값 = 연속 횟수)</summary>
++    public event EventHandler<int>? LinkSuspect;
++
++    public event EventHandler<string>? Warning;
++
++    public SchedulerOptions Options => _options;
++
++    public bool LinkUp { get { lock (_lock) return _linkUp; } }
++
++    public int PendingCount { get { lock (_lock) return _queue.Count; } }
++
++    public int InFlightCount { get { lock (_lock) return _inFlight.Count; } }
++
++    private static long Now => Environment.TickCount64;
++
++    public Task<CommandResult> EnqueueAsync(CommandRequest request, CancellationToken cancellationToken = default)
++    {
++        ArgumentNullException.ThrowIfNull(request);
++        var entry = new Entry(request);
++        List<Entry> stopped = [];
++        CommandResult? immediate = null;
++
++        lock (_lock)
++        {
++            if (_disposed) immediate = new(CommandStatus.Cancelled, null, 0, "Scheduler 종료됨");
++            else if (!_linkUp) immediate = new(CommandStatus.LinkDown, null, 0, "Link 끊김");
++            else if (cancellationToken.IsCancellationRequested) immediate = new(CommandStatus.Cancelled, null, 0);
++            else if (request.Pattern == ExchangePattern.RxStream) immediate = new(CommandStatus.Rejected, null, 0, "RX_STREAM 은 송신 대상이 아님");
++            else if (request.CorrelationKey is { } key && Active().Any(e => e.Request.CorrelationKey == key))
++                immediate = new(CommandStatus.Rejected, null, 0, $"같은 상관키 진행 중: {key}");
++            else if (request.Pattern == ExchangePattern.Poll && Active().Any(e =>
++                         e.Request.Pattern == ExchangePattern.Poll && e.Request.DevCd == request.DevCd && e.Request.PtlCd == request.PtlCd))
++                immediate = new(CommandStatus.Skipped, null, 0, "이전 폴링 미완료");
++            else
++            {
++                if (request.Action == CommandAction.Stop)
++                {
++                    stopped = _queue.Where(e => e.Request.DevCd == request.DevCd
++                                                && e.Request.Action is CommandAction.Start or CommandAction.Pause).ToList();
++                    foreach (Entry e in stopped) _queue.Remove(e);
++                }
++                entry.Seq = ++_seq;
++                _queue.Add(entry);
++            }
++        }
++
++        if (immediate is not null) return Task.FromResult(immediate);
++
++        foreach (Entry e in stopped) Finish(e, new(CommandStatus.Cancelled, null, e.Attempts, "STOP 우선: 대기 중 시작·일시정지 취소"));
++        if (cancellationToken.CanBeCanceled) entry.Registration = cancellationToken.Register(() => CancelEntry(entry));
++        Signal();
++        return entry.Tcs.Task;
++    }
++
++    /// <summary>장치의 대기 중 명령 취소 (진행 중은 제외). 취소한 개수</summary>
++    public int CancelDevice(string devCd, Func<CommandRequest, bool>? filter = null)
++    {
++        List<Entry> removed;
++        lock (_lock)
++        {
++            removed = _queue.Where(e => e.Request.DevCd == devCd && (filter?.Invoke(e.Request) ?? true)).ToList();
++            foreach (Entry e in removed) _queue.Remove(e);
++        }
++        foreach (Entry e in removed) Finish(e, new(CommandStatus.Cancelled, null, e.Attempts, "장치 명령 취소"));
++        return removed.Count;
++    }
++
++    /// <summary>Framer가 만든 수신 프레임 1개</summary>
++    public void OnFrame(Frame frame)
++    {
++        ArgumentNullException.ThrowIfNull(frame);
++        Entry? matched = null;
++        bool late = false;
++        string? warning = null;
++
++        lock (_lock)
++        {
++            string? key = _options.CorrelationOf?.Invoke(frame);
++            if (key is not null)
++            {
++                matched = _inFlight.FirstOrDefault(e => e.Request.CorrelationKey == key);
++                if (matched is null && _lateKeys.TryGetValue(key, out long until) && until > Now) late = true;
++            }
++            else
++            {
++                matched = _inFlight.FirstOrDefault(e => e.Request.Expect is { } x && x.IsMatch(frame));
++
++                if (matched is null && Now < _guardUntil && _guardEntries.Any(e => e.Request.Expect is { } x && x.IsMatch(frame)))
++                    late = true;
++
++                if (matched is null && !late)
++                {
++                    matched = _inFlight.FirstOrDefault(e => e.Request.Expect is null && e.Request.CorrelationKey is null);
++                    if (matched is not null && _legacyWarned.Add(matched.Request.PtlCd))
++                        warning = $"{matched.Request.DevCd}/{matched.Request.PtlCd}: 응답 조건(Expect) 없음 → 요청 후 첫 프레임으로 연결";
++                }
++            }
++
++            if (matched is not null)
++            {
++                _inFlight.Remove(matched);
++                _consecutiveTimeouts = 0;
++            }
++        }
++
++        if (warning is not null) Warning?.Invoke(this, warning);
++
++        if (matched is not null)
++        {
++            Finish(matched, new(CommandStatus.Completed, frame, matched.Attempts));
++            Signal();
++        }
++        else if (late)
++        {
++            Late?.Invoke(this, frame);
++        }
++        else
++        {
++            Unmatched?.Invoke(this, frame);
++        }
++    }
++
++    /// <summary>Link 끊김: 대기·진행 전부 LinkDown, 이후 등록도 LinkDown</summary>
++    public void OnLinkDown()
++    {
++        List<Entry> all;
++        lock (_lock)
++        {
++            _linkUp = false;
++            all = [.. _inFlight, .. _queue];
++            _inFlight.Clear();
++            _queue.Clear();
++            _guardEntries.Clear();
++            _guardUntil = 0;
++        }
++        foreach (Entry e in all) Finish(e, new(CommandStatus.LinkDown, null, e.Attempts, "Link 끊김"));
++    }
++
++    public void OnLinkUp()
++    {
++        lock (_lock)
++        {
++            _linkUp = true;
++            _consecutiveTimeouts = 0;
++        }
++        Signal();
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        List<Entry> all;
++        lock (_lock)
++        {
++            if (_disposed) return;
++            _disposed = true;
++            all = [.. _inFlight, .. _queue];
++            _inFlight.Clear();
++            _queue.Clear();
++        }
++        foreach (Entry e in all) Finish(e, new(CommandStatus.Cancelled, null, e.Attempts, "Scheduler 종료됨"));
++        _life.Cancel();
++        try { await _loop.ConfigureAwait(false); } catch { /* 종료 */ }
++        _life.Dispose();
++        _signal.Dispose();
++    }
++
++    private IEnumerable<Entry> Active() => _inFlight.Concat(_queue);
++
++    private void Signal()
++    {
++        try { _signal.Release(); } catch (ObjectDisposedException) { }
++    }
++
++    private async Task LoopAsync()
++    {
++        CancellationToken ct = _life.Token;
++        try
++        {
++            while (true)
++            {
++                await _signal.WaitAsync(ct).ConfigureAwait(false);
++                while (true)
++                {
++                    Entry? next;
++                    int waitMs;
++                    lock (_lock) next = TakeNext(out waitMs);
++
++                    if (next is not null)
++                    {
++                        await SendAsync(next, ct).ConfigureAwait(false);
++                        continue;
++                    }
++                    if (waitMs <= 0) break;
++                    await Task.Delay(waitMs, ct).ConfigureAwait(false);
++                }
++            }
++        }
++        catch (OperationCanceledException)
++        {
++            // 종료
++        }
++    }
++
++    /// <summary>lock 안에서 호출. 보낼 명령을 진행 중으로 옮겨 돌려준다. 기다려야 하면 waitMs &gt; 0</summary>
++    private Entry? TakeNext(out int waitMs)
++    {
++        waitMs = 0;
++        if (_disposed || !_linkUp || _queue.Count == 0) return null;
++
++        long now = Now;
++        if (now < _guardUntil)
++        {
++            waitMs = (int)Math.Max(1, _guardUntil - now);
++            return null;
++        }
++        _guardEntries.Clear();
++
++        if (now < _gapUntil)
++        {
++            waitMs = (int)Math.Max(1, _gapUntil - now);
++            return null;
++        }
++
++        Entry candidate = _queue
++            .OrderByDescending(e => e.Request.EffectivePriority)
++            .ThenBy(e => e.Seq)
++            .First();
++
++        if (_inFlight.Count > 0)
++        {
++            bool parallel = _options.FullDuplex
++                            && _options.CorrelationOf is not null
++                            && _inFlight.Count < _options.MaxInFlight
++                            && candidate.Request.CorrelationKey is not null
++                            && _inFlight.All(e => e.Request.CorrelationKey is not null);
++            if (!parallel) return null; // 진행 중 명령 완료 시 Signal
++        }
++
++        _queue.Remove(candidate);
++        _inFlight.Add(candidate);
++        candidate.Attempts++;
++        candidate.SendNo++;
++        return candidate;
++    }
++
++    private async Task SendAsync(Entry e, CancellationToken ct)
++    {
++        try
++        {
++            await _writer.WriteAsync(e.Request.Payload, ct).ConfigureAwait(false);
++        }
++        catch (OperationCanceledException) when (ct.IsCancellationRequested)
++        {
++            return;
++        }
++        catch (Exception ex)
++        {
++            bool removed;
++            lock (_lock) removed = _inFlight.Remove(e);
++            if (removed) Finish(e, new(CommandStatus.LinkDown, null, e.Attempts, "쓰기 실패: " + ex.Message));
++            Signal();
++            return;
++        }
++
++        if (!e.Request.ExpectsResponse)
++        {
++            bool removed;
++            lock (_lock)
++            {
++                removed = _inFlight.Remove(e);
++                if (_options.InterCommandGapMs > 0) _gapUntil = Now + _options.InterCommandGapMs;
++            }
++            if (removed) Finish(e, new(CommandStatus.Completed, null, e.Attempts));
++            Signal();
++            return;
++        }
++
++        int timeoutMs = e.Request.TimeoutMs > 0 ? e.Request.TimeoutMs : _options.DefaultTimeoutMs;
++        CancellationTokenSource cts;
++        int sendNo;
++        lock (_lock)
++        {
++            if (!_inFlight.Contains(e)) return; // 쓰는 동안 응답이 왔거나 Link 끊김
++            cts = new CancellationTokenSource();
++            e.TimeoutCts?.Dispose();
++            e.TimeoutCts = cts;
++            sendNo = e.SendNo;
++        }
++
++        _ = Task.Delay(timeoutMs, cts.Token).ContinueWith(
++            t => { if (!t.IsCanceled) OnTimeout(e, sendNo); },
++            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
++    }
++
++    private void OnTimeout(Entry e, int sendNo)
++    {
++        bool retry;
++        bool suspect = false;
++        int count;
++
++        lock (_lock)
++        {
++            if (e.SendNo != sendNo || !_inFlight.Remove(e)) return;
++
++            count = ++_consecutiveTimeouts;
++            if (count == _options.SuspectAfterTimeouts) suspect = true;
++
++            if (_options.LateGuardMs > 0)
++            {
++                _guardUntil = Now + _options.LateGuardMs;
++                _guardEntries.Add(e);
++            }
++
++            retry = !_disposed && _linkUp && !e.CallerCancelled
++                    && e.Request.Idempotent && e.Attempts <= e.Request.RetryCount;
++            if (retry)
++            {
++                _queue.Add(e); // Seq 유지 → 같은 우선순위에서 먼저
++            }
++            else if (e.Request.CorrelationKey is { } key)
++            {
++                _lateKeys[key] = Now + (long)LateKeyLifetime.TotalMilliseconds;
++                foreach (string k in _lateKeys.Where(p => p.Value <= Now).Select(p => p.Key).ToList()) _lateKeys.Remove(k);
++            }
++        }
++
++        // 의심 이벤트를 결과보다 먼저: 호출자가 Timeout 을 받았을 때 Link 의심은 이미 알려진 상태
++        if (suspect) LinkSuspect?.Invoke(this, count);
++        if (!retry) Finish(e, new(CommandStatus.Timeout, null, e.Attempts, "응답 없음"));
++        Signal();
++    }
++
++    private void CancelEntry(Entry e)
++    {
++        bool queued;
++        bool inFlight = false;
++        lock (_lock)
++        {
++            queued = _queue.Remove(e);
++            if (!queued && _inFlight.Contains(e))
++            {
++                e.CallerCancelled = true;
++                inFlight = true;
++            }
++        }
++
++        if (queued) Finish(e, new(CommandStatus.Cancelled, null, e.Attempts));
++        else if (inFlight) e.Tcs.TrySetResult(new(CommandStatus.Cancelled, null, e.Attempts, "진행 중 취소: 응답·타임아웃까지 Link 점유"));
++    }
++
++    private static void Finish(Entry e, CommandResult result)
++    {
++        e.Registration.Unregister();
++        CancellationTokenSource? cts = e.TimeoutCts;
++        e.TimeoutCts = null;
++        if (cts is not null)
++        {
++            try { cts.Cancel(); } catch (ObjectDisposedException) { }
++            cts.Dispose();
++        }
++        e.Tcs.TrySetResult(result);
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Scheduling/Commands.cs b/desktop/lib/juprovider.lib.protocol/Scheduling/Commands.cs
+new file mode 100644
+index 0000000..458059f
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Scheduling/Commands.cs
+@@ -0,0 +1,129 @@
++using System.Text;
++using System.Text.RegularExpressions;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Parsing;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Lib.Protocol.Scheduling;
++
++/// <summary>우선순위 (C0 §2.1): STOP &gt; CONTROL &gt; INFO &gt; POLL</summary>
++public enum CommandPriority
++{
++    Poll = 0,
++    Info = 1,
++    Control = 2,
++    Stop = 3
++}
++
++/// <summary>
++/// 명령 결과. Skipped = 같은 폴링이 아직 끝나지 않아 이번 회차를 건너뜀(C0 §2.5).
++/// </summary>
++public enum CommandStatus
++{
++    Completed,
++    Timeout,
++    Cancelled,
++    LinkDown,
++    Rejected,
++    Skipped
++}
++
++/// <summary>응답 판별 (C0 §2.3 의 Expect). 프레임 Body 기준</summary>
++public sealed class ResponseMatcher
++{
++    private readonly Func<Frame, bool> _predicate;
++
++    private ResponseMatcher(string description, Func<Frame, bool> predicate)
++    {
++        Description = description;
++        _predicate = predicate;
++    }
++
++    public string Description { get; }
++
++    public bool IsMatch(Frame frame)
++    {
++        try { return _predicate(frame); }
++        catch { return false; }
++    }
++
++    public override string ToString() => Description;
++
++    public static ResponseMatcher Any { get; } = new("any", _ => true);
++
++    public static ResponseMatcher StartsWith(string ascii)
++    {
++        byte[] prefix = Encoding.ASCII.GetBytes(ascii);
++        return new($"startsWith '{ascii}'", f => new ReadOnlySpan<byte>(f.Body).StartsWith(new ReadOnlySpan<byte>(prefix)));
++    }
++
++    public static ResponseMatcher Regex(string pattern)
++    {
++        var regex = new System.Text.RegularExpressions.Regex(pattern, RegexOptions.CultureInvariant);
++        return new($"regex {pattern}", f => regex.IsMatch(Encoding.ASCII.GetString(f.Body)));
++    }
++
++    /// <summary>응답 프로토콜의 Parse Rule로 해석 가능하면 맞음</summary>
++    public static ResponseMatcher Parses(IFrameParser parser, string description = "parses") =>
++        new(description, f => parser.Parse(f).Ok);
++
++    public static ResponseMatcher Custom(string description, Func<Frame, bool> predicate) => new(description, predicate);
++}
++
++/// <summary>
++/// 명령 1건 (C0 §2.1). Payload는 ProtocolExpression으로 만든 바이트.
++/// TimeoutMs 0 = Scheduler 기본값. Expect 없는 TX_RX/POLL = 레거시 "요청 후 첫 프레임"(경고).
++/// </summary>
++public sealed record CommandRequest
++{
++    public required string DevCd { get; init; }
++    public required string PtlCd { get; init; }
++    public required byte[] Payload { get; init; }
++    public ExchangePattern Pattern { get; init; } = ExchangePattern.TxRx;
++    public ProtocolRole Roles { get; init; } = ProtocolRole.Info;
++    public CommandAction Action { get; init; } = CommandAction.None;
++    public CommandPriority Priority { get; init; } = CommandPriority.Info;
++    public ResponseMatcher? Expect { get; init; }
++    public int TimeoutMs { get; init; }
++    public int RetryCount { get; init; }
++    public bool Idempotent { get; init; } = true;
++    public string? CorrelationKey { get; init; }
++
++    /// <summary>STOP 은 Priority 값과 관계없이 최우선</summary>
++    public CommandPriority EffectivePriority => Action == CommandAction.Stop ? CommandPriority.Stop : Priority;
++
++    public bool ExpectsResponse => Pattern is ExchangePattern.TxRx or ExchangePattern.Poll;
++}
++
++public sealed record CommandResult(CommandStatus Status, Frame? Response, int Attempts, string? Reason = null)
++{
++    public bool Ok => Status == CommandStatus.Completed;
++}
++
++/// <summary>Link 쓰기 추상 (Scheduler는 Transport를 직접 모른다)</summary>
++public interface ILinkWriter
++{
++    Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
++}
++
++public sealed class TransportLinkWriter(ITransport transport) : ILinkWriter
++{
++    public Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
++        transport.WriteAsync(data, cancellationToken);
++}
++
++/// <summary>
++/// FullDuplex + CorrelationOf 가 있을 때만 MaxInFlight 까지 병렬 (C0 §2.2).
++/// LateGuardMs: 타임아웃 뒤 다음 송신까지 기다리는 시간. 이 사이에 온, 타임아웃된 명령의 Expect에 맞는 프레임은 LATE.
++/// SuspectAfterTimeouts: 연속 타임아웃 K회면 LinkSuspect 1회.
++/// </summary>
++public sealed record SchedulerOptions(
++    bool FullDuplex = false,
++    int MaxInFlight = 1,
++    int DefaultTimeoutMs = 1000,
++    int InterCommandGapMs = 0,
++    int LateGuardMs = 200,
++    int SuspectAfterTimeouts = 3,
++    Func<Frame, string?>? CorrelationOf = null,
++    bool StartLinkUp = true);
+diff --git a/desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs b/desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs
+new file mode 100644
+index 0000000..be93f7e
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs
+@@ -0,0 +1,267 @@
++using JuProvider.Lib.Protocol.Expression;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Parsing;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Scheduling;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Lib.Protocol.Session;
++
++/// <summary>
++/// 세션이 실행할 프로토콜 1개 (서버 ju_protocol 정의의 Desktop 측 형태).
++/// Tx: 송신 표현식(ProtocolExpression). Parse: 응답·스트림 해석 규칙(DATA 역할일 때 논리 Data로).
++/// Idempotent 미지정 = Action 이 None 이고 CONTROL 역할이 아니면 true.
++/// </summary>
++public sealed record ProtocolDefinition
++{
++    public required string PtlCd { get; init; }
++    public required ExchangePattern Pattern { get; init; }
++    public ProtocolRole Roles { get; init; } = ProtocolRole.Info;
++    public CommandAction Action { get; init; } = CommandAction.None;
++    public string? Tx { get; init; }
++    public ResponseMatcher? Expect { get; init; }
++    public ParseRule? Parse { get; init; }
++    public ParseContext? ParseContext { get; init; }
++    public int TimeoutMs { get; init; }
++    public int RetryCount { get; init; }
++    public bool? Idempotent { get; init; }
++}
++
++public enum DeviceSessionState
++{
++    Created,
++    Ready,
++    /// <summary>연속 타임아웃으로 Link 의심. 재연결 판단은 Link 소유자</summary>
++    Degraded,
++    /// <summary>Link 끊김. 세션은 재연결하지 않음</summary>
++    Suspended,
++    Stopped
++}
++
++public sealed class ValuesEventArgs(string ptlCd, IReadOnlyList<LogicalValue> values) : EventArgs
++{
++    public string PtlCd { get; } = ptlCd;
++    public IReadOnlyList<LogicalValue> Values { get; } = values;
++}
++
++/// <summary>
++/// 장치 1대의 논리 통신 (C0 §0, §8). Transport 수신 → Framer → Scheduler(응답 매칭) → 남은 프레임은 RX_STREAM 프로토콜로
++/// → Parser → Mapper → Values 이벤트. 일반 장치는 Link : Session = 1 : 1 이므로 Framer·Scheduler를 세션이 가진다.
++/// Link 열기·재연결은 하지 않는다 (LinkSupervisor 책임). Transport 상태만 따라간다.
++/// </summary>
++public sealed class DeviceSession : IAsyncDisposable
++{
++    private readonly ITransport _transport;
++    private readonly IFramer _framer;
++    private readonly object _framerLock = new();
++    private readonly IDataMapper _mapper;
++    private readonly Dictionary<string, ProtocolDefinition> _protocols;
++    private readonly List<ProtocolDefinition> _streams;
++    private readonly Dictionary<string, IFrameParser> _parsers = new(StringComparer.Ordinal);
++    private readonly SchedulerOptions _schedulerOptions;
++    private readonly object _stateLock = new();
++    private CommandScheduler? _scheduler;
++    private DeviceSessionState _state = DeviceSessionState.Created;
++
++    public DeviceSession(string devCd, ITransport transport, FrameRule frameRule, IEnumerable<ProtocolDefinition> protocols,
++        IDataMapper mapper, SchedulerOptions? schedulerOptions = null)
++    {
++        if (string.IsNullOrEmpty(devCd)) throw new ArgumentException("DEV_CD 필요", nameof(devCd));
++        DevCd = devCd;
++        Device = new DeviceRef(devCd);
++        _transport = transport ?? throw new ArgumentNullException(nameof(transport));
++        _framer = FramerFactory.Create(frameRule ?? throw new ArgumentNullException(nameof(frameRule)));
++        _mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
++        _schedulerOptions = schedulerOptions ?? new SchedulerOptions();
++
++        _protocols = new Dictionary<string, ProtocolDefinition>(StringComparer.Ordinal);
++        _streams = [];
++        foreach (ProtocolDefinition p in protocols ?? throw new ArgumentNullException(nameof(protocols)))
++        {
++            if (!_protocols.TryAdd(p.PtlCd, p)) throw new ArgumentException($"PTL_CD 중복: {p.PtlCd}", nameof(protocols));
++            if (p.Parse is not null) _parsers[p.PtlCd] = ParserFactory.Create(p.Parse);
++            if (p.Pattern == ExchangePattern.RxStream) _streams.Add(p);
++        }
++    }
++
++    public string DevCd { get; }
++
++    public DeviceRef Device { get; }
++
++    public DeviceSessionState State { get { lock (_stateLock) return _state; } }
++
++    public CommandScheduler? Scheduler => _scheduler;
++
++    public event EventHandler<ValuesEventArgs>? Values;
++
++    public event EventHandler<DeviceSessionState>? StateChanged;
++
++    public event EventHandler<string>? Warning;
++
++    /// <summary>어떤 응답·스트림 프로토콜에도 맞지 않은 프레임</summary>
++    public event EventHandler<Frame>? UnhandledFrame;
++
++    public Task StartAsync()
++    {
++        lock (_stateLock)
++        {
++            if (_state != DeviceSessionState.Created) throw new InvalidOperationException($"이미 시작됨 ({_state})");
++        }
++
++        bool open = _transport.State == TransportState.Open;
++        var scheduler = new CommandScheduler(new TransportLinkWriter(_transport), _schedulerOptions with { StartLinkUp = open });
++        scheduler.Unmatched += (_, f) => HandleStream(f);
++        scheduler.Late += (_, f) => Warning?.Invoke(this, $"{DevCd}: 늦은 응답 버림 '{ProtocolExpression.ToDisplay(f.Raw)}'");
++        scheduler.Warning += (_, w) => Warning?.Invoke(this, w);
++        scheduler.LinkSuspect += (_, n) =>
++        {
++            Warning?.Invoke(this, $"{DevCd}: 연속 타임아웃 {n}회 → Link 의심");
++            SetState(DeviceSessionState.Degraded, onlyFrom: DeviceSessionState.Ready);
++        };
++        _scheduler = scheduler;
++
++        _transport.Received += OnReceived;
++        _transport.StateChanged += OnTransportState;
++        SetState(open ? DeviceSessionState.Ready : DeviceSessionState.Suspended);
++        return Task.CompletedTask;
++    }
++
++    public async Task StopAsync()
++    {
++        CommandScheduler? scheduler;
++        lock (_stateLock)
++        {
++            if (_state is DeviceSessionState.Stopped or DeviceSessionState.Created) { _state = DeviceSessionState.Stopped; return; }
++            scheduler = _scheduler;
++        }
++        _transport.Received -= OnReceived;
++        _transport.StateChanged -= OnTransportState;
++        SetState(DeviceSessionState.Stopped);
++        if (scheduler is not null) await scheduler.DisposeAsync().ConfigureAwait(false);
++    }
++
++    public ValueTask DisposeAsync() => new(StopAsync());
++
++    /// <summary>프로토콜 1개 실행. DATA 역할 + Parse 규칙이 있으면 응답을 논리 Data로 Values 에 낸다</summary>
++    public async Task<CommandResult> ExecuteAsync(string ptlCd, CancellationToken cancellationToken = default)
++    {
++        CommandScheduler? scheduler = _scheduler;
++        DeviceSessionState state = State;
++        if (scheduler is null || state is DeviceSessionState.Created or DeviceSessionState.Stopped)
++            return new(CommandStatus.Rejected, null, 0, $"세션 상태 {state}");
++        if (!_protocols.TryGetValue(ptlCd, out ProtocolDefinition? def))
++            return new(CommandStatus.Rejected, null, 0, $"알 수 없는 프로토콜: {ptlCd}");
++        if (def.Pattern == ExchangePattern.RxStream)
++            return new(CommandStatus.Rejected, null, 0, "RX_STREAM 은 실행 대상이 아님");
++        if (string.IsNullOrEmpty(def.Tx))
++            return new(CommandStatus.Rejected, null, 0, "송신 표현식 없음");
++
++        byte[] payload;
++        try { payload = ProtocolExpression.ToBytes(def.Tx); }
++        catch (FormatException ex) { return new(CommandStatus.Rejected, null, 0, "표현식 오류: " + ex.Message); }
++
++        var request = new CommandRequest
++        {
++            DevCd = DevCd,
++            PtlCd = def.PtlCd,
++            Payload = payload,
++            Pattern = def.Pattern,
++            Roles = def.Roles,
++            Action = def.Action,
++            Priority = PriorityOf(def),
++            Expect = def.Expect,
++            TimeoutMs = def.TimeoutMs,
++            RetryCount = def.RetryCount,
++            Idempotent = def.Idempotent ?? (def.Action == CommandAction.None && !def.Roles.HasFlag(ProtocolRole.Control))
++        };
++
++        CommandResult result = await scheduler.EnqueueAsync(request, cancellationToken).ConfigureAwait(false);
++        if (result.Ok && result.Response is { } frame && def.Roles.HasFlag(ProtocolRole.Data) && def.Parse is not null)
++        {
++            Publish(def, frame);
++        }
++        return result;
++    }
++
++    public static CommandPriority PriorityOf(ProtocolDefinition def)
++    {
++        if (def.Action == CommandAction.Stop) return CommandPriority.Stop;
++        if (def.Roles.HasFlag(ProtocolRole.Control) || def.Action != CommandAction.None) return CommandPriority.Control;
++        if (def.Pattern == ExchangePattern.Poll) return CommandPriority.Poll;
++        return CommandPriority.Info;
++    }
++
++    private void OnReceived(object? sender, byte[] data)
++    {
++        IReadOnlyList<Frame> frames;
++        lock (_framerLock) frames = _framer.Push(data);
++        CommandScheduler? scheduler = _scheduler;
++        if (scheduler is null) return;
++        foreach (Frame f in frames) scheduler.OnFrame(f);
++    }
++
++    private void OnTransportState(object? sender, TransportStateChangedEventArgs e)
++    {
++        CommandScheduler? scheduler = _scheduler;
++        if (scheduler is null || State == DeviceSessionState.Stopped) return;
++
++        switch (e.State)
++        {
++            case TransportState.Open:
++                lock (_framerLock) _framer.Reset();
++                scheduler.OnLinkUp();
++                SetState(DeviceSessionState.Ready);
++                break;
++            case TransportState.Faulted:
++            case TransportState.Closed:
++                scheduler.OnLinkDown();
++                SetState(DeviceSessionState.Suspended);
++                break;
++        }
++    }
++
++    private void HandleStream(Frame frame)
++    {
++        foreach (ProtocolDefinition def in _streams)
++        {
++            if (def.Expect is not null && !def.Expect.IsMatch(frame)) continue;
++            if (!_parsers.ContainsKey(def.PtlCd))
++            {
++                if (def.Expect is not null) return; // 해석 규칙 없는 스트림: 받기만
++                continue;
++            }
++            if (Publish(def, frame) || def.Expect is not null) return;
++        }
++        UnhandledFrame?.Invoke(this, frame);
++    }
++
++    /// <summary>해석 성공하면 true</summary>
++    private bool Publish(ProtocolDefinition def, Frame frame)
++    {
++        if (!_parsers.TryGetValue(def.PtlCd, out IFrameParser? parser)) return false;
++        ParseResult parsed = parser.Parse(frame, def.ParseContext);
++        if (!parsed.Ok)
++        {
++            Warning?.Invoke(this, $"{DevCd}/{def.PtlCd}: 해석 실패 ({parsed.Error}) '{ProtocolExpression.ToDisplay(frame.Raw)}'");
++            return false;
++        }
++
++        IReadOnlyList<LogicalValue> values = _mapper.Map(DevCd, def.PtlCd, parsed.Values, DateTimeOffset.Now);
++        if (values.Count > 0) Values?.Invoke(this, new ValuesEventArgs(def.PtlCd, values));
++        return true;
++    }
++
++    private void SetState(DeviceSessionState next, DeviceSessionState? onlyFrom = null)
++    {
++        lock (_stateLock)
++        {
++            if (_state == next) return;
++            if (onlyFrom is { } from && _state != from) return;
++            if (_state == DeviceSessionState.Stopped) return;
++            _state = next;
++        }
++        StateChanged?.Invoke(this, next);
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/DeviceSessionTests.cs b/desktop/tests/juprovider.tests.protocol/DeviceSessionTests.cs
+new file mode 100644
+index 0000000..8f1cab8
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/DeviceSessionTests.cs
+@@ -0,0 +1,209 @@
++using System.Collections.Concurrent;
++using System.Text;
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Scheduling;
++using JuProvider.Lib.Protocol.Session;
++using JuProvider.Lib.Protocol.Simulation;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>DeviceSession = Transport(가상 GTEC) → Framer → Scheduler → Parser → Mapper</summary>
++public class DeviceSessionTests
++{
++    private const string Dev = "SDEV_GTEC01";
++    private static readonly FrameRule CrLf = new() { Kind = FrameKind.Delim, End = [0x0D, 0x0A] };
++
++    private static List<ProtocolDefinition> GtecProtocols() =>
++    [
++        new() { PtlCd = "GTEC0000", Pattern = ExchangePattern.TxRx, Roles = ProtocolRole.Info, Tx = "S{TEST}[CR][LF]",
++                Expect = ResponseMatcher.StartsWith("{OK"), TimeoutMs = 1000 },
++        new() { PtlCd = "GTEC0002", Pattern = ExchangePattern.TxRx, Roles = ProtocolRole.Info, Tx = "S{20}",
++                Expect = ResponseMatcher.Regex(@"^\{\d{3},\d{3},\d{3},\d{3}\}$"), TimeoutMs = 1000 },
++        new() { PtlCd = "GTEC0300", Pattern = ExchangePattern.TxOnly, Roles = ProtocolRole.Control, Action = CommandAction.Start, Tx = "S{10,1}" },
++        new() { PtlCd = "GTEC0301", Pattern = ExchangePattern.TxOnly, Roles = ProtocolRole.Control, Action = CommandAction.Stop, Tx = "S{10,0}" },
++        new() { PtlCd = "NORESP", Pattern = ExchangePattern.TxRx, Roles = ProtocolRole.Info, Tx = "S{99}",
++                Expect = ResponseMatcher.StartsWith("{"), TimeoutMs = 5000 },
++        new() { PtlCd = "SLOW", Pattern = ExchangePattern.TxRx, Roles = ProtocolRole.Info, Tx = "S{98}",
++                Expect = ResponseMatcher.StartsWith("{"), TimeoutMs = 300 },
++        new() { PtlCd = "GTEC0400", Pattern = ExchangePattern.RxStream, Roles = ProtocolRole.Data,
++                Parse = new ParseRule { Kind = ParseKind.Text, Trim = "{}", Separator = TextSeparator.Space, Count = 3 } },
++    ];
++
++    private static IDataMapper GtecMapper() => new DataMapper(LegacyTagIdMapping.ToEntries(
++    [
++        new(Dev, "GTEC", "AIN", 1, "CH1"),
++        new(Dev, "GTEC", "AIN", 2, "CH2"),
++        new(Dev, "GTEC", "AIN", 3, "CH3"),
++    ]));
++
++    private static VirtualTransport GtecTransport(FaultOptions? faults = null) =>
++        new(new ProfileSimulator(BuiltInProfiles.Get("GTEC_SCIENCE_CUBE")), faults);
++
++    private static async Task<(DeviceSession S, VirtualTransport T, ConcurrentQueue<LogicalValue> V)> StartAsync(FaultOptions? faults = null)
++    {
++        VirtualTransport t = GtecTransport(faults);
++        await t.OpenAsync();
++        var s = new DeviceSession(Dev, t, CrLf, GtecProtocols(), GtecMapper());
++        var values = new ConcurrentQueue<LogicalValue>();
++        s.Values += (_, e) => { foreach (LogicalValue v in e.Values) values.Enqueue(v); };
++        await s.StartAsync();
++        return (s, t, values);
++    }
++
++    [Fact] // 확인 → 센서정보 → 시작(연속 데이터 → 논리 Data) → 중지
++    public async Task Gtec_Session_End_To_End()
++    {
++        var (s, t, values) = await StartAsync();
++        await using var _t = t;
++        await using var _s = s;
++        Assert.Equal(DeviceSessionState.Ready, s.State);
++
++        CommandResult check = await s.ExecuteAsync("GTEC0000");
++        Assert.Equal(CommandStatus.Completed, check.Status);
++        Assert.Equal("{OK}", Encoding.ASCII.GetString(check.Response!.Body));
++
++        CommandResult info = await s.ExecuteAsync("GTEC0002");
++        Assert.Equal("{008,000,000,000}", Encoding.ASCII.GetString(info.Response!.Body));
++
++        Assert.Equal(CommandStatus.Completed, (await s.ExecuteAsync("GTEC0300")).Status);
++        Assert.True(await Wait.UntilAsync(() => values.Count >= 9, 3000), $"values {values.Count}");
++
++        LogicalValue[] snapshot = values.ToArray();
++        Assert.All(snapshot, v => Assert.Equal(DataQuality.Good, v.Quality));
++        Assert.All(snapshot, v => Assert.Equal(new DeviceRef(Dev), v.Device));
++        Assert.Equal(
++            new[] { "GTEC/AIN/1", "GTEC/AIN/2", "GTEC/AIN/3" },
++            snapshot.Select(v => v.Data!.Key).Distinct().OrderBy(x => x, StringComparer.Ordinal));
++
++        Assert.Equal(CommandStatus.Completed, (await s.ExecuteAsync("GTEC0301")).Status);
++        await Task.Delay(300);
++        int stopped = values.Count;
++        await Task.Delay(400);
++        Assert.Equal(stopped, values.Count);
++    }
++
++    [Fact] // M1 통합: 연속 데이터 중 센서정보 요청 → 응답은 명령으로, 데이터는 계속 논리 Data로
++    public async Task Request_During_Stream_Does_Not_Swallow_Data()
++    {
++        var (s, t, values) = await StartAsync();
++        await using var _t = t;
++        await using var _s = s;
++        var unhandled = new ConcurrentQueue<string>();
++        s.UnhandledFrame += (_, f) => unhandled.Enqueue(Encoding.ASCII.GetString(f.Body));
++
++        await s.ExecuteAsync("GTEC0300");
++        Assert.True(await Wait.UntilAsync(() => values.Count >= 3, 3000));
++
++        for (int i = 0; i < 3; i++)
++        {
++            int before = values.Count;
++            CommandResult info = await s.ExecuteAsync("GTEC0002");
++            Assert.Equal(CommandStatus.Completed, info.Status);
++            Assert.Equal("{008,000,000,000}", Encoding.ASCII.GetString(info.Response!.Body));
++            Assert.True(await Wait.UntilAsync(() => values.Count > before, 2000), "요청 후에도 데이터 계속");
++        }
++
++        await s.ExecuteAsync("GTEC0301");
++        Assert.Empty(unhandled);
++    }
++
++    [Fact] // Link 끊김 → Suspended + 진행 중 LinkDown, 다시 열면 Ready
++    public async Task Link_Down_Suspends_And_Reopen_Recovers()
++    {
++        var (s, t, _) = await StartAsync();
++        await using var _t = t;
++        await using var _s = s;
++        var states = new ConcurrentQueue<DeviceSessionState>();
++        s.StateChanged += (_, st) => states.Enqueue(st);
++
++        Task<CommandResult> pending = s.ExecuteAsync("NORESP");
++        Assert.True(await Wait.UntilAsync(() => s.Scheduler!.InFlightCount == 1, 1000));
++        t.ForceDisconnect();
++
++        CommandResult r = await pending.WaitAsync(TimeSpan.FromSeconds(2));
++        Assert.Equal(CommandStatus.LinkDown, r.Status);
++        Assert.True(await Wait.UntilAsync(() => s.State == DeviceSessionState.Suspended, 1000));
++        Assert.Equal(CommandStatus.LinkDown, (await s.ExecuteAsync("GTEC0000")).Status);
++
++        await t.OpenAsync();
++        Assert.True(await Wait.UntilAsync(() => s.State == DeviceSessionState.Ready, 1000));
++        Assert.Equal(CommandStatus.Completed, (await s.ExecuteAsync("GTEC0000")).Status);
++        Assert.Equal(new[] { DeviceSessionState.Suspended, DeviceSessionState.Ready }, states.ToArray());
++    }
++
++    [Fact] // STOP 이 대기 중 START 를 취소 (세션 경로)
++    public async Task Stop_Cancels_Pending_Start_Through_Session()
++    {
++        var sim = new ProfileSimulator(BuiltInProfiles.Get("GTEC_SCIENCE_CUBE"));
++        var t = new VirtualTransport(sim);
++        await using var _t = t;
++        await t.OpenAsync();
++        var s = new DeviceSession(Dev, t, CrLf, GtecProtocols(), GtecMapper());
++        await using var _s = s;
++        await s.StartAsync();
++
++        Task<CommandResult> busy = s.ExecuteAsync("SLOW");
++        Assert.True(await Wait.UntilAsync(() => s.Scheduler!.InFlightCount == 1, 1000));
++        Task<CommandResult> start = s.ExecuteAsync("GTEC0300");
++        Task<CommandResult> stop = s.ExecuteAsync("GTEC0301");
++
++        Assert.Equal(CommandStatus.Cancelled, (await start).Status);
++        Assert.Equal(CommandStatus.Timeout, (await busy).Status);
++        Assert.Equal(CommandStatus.Completed, (await stop).Status);
++        Assert.Equal("false", sim.GetVar("running"));
++    }
++
++    [Fact] // 같은 DEV_CD, 다른 Link(조각난 수신) → 같은 식별자
++    public async Task Same_Device_Different_Link_Same_Identifiers()
++    {
++        var (a, ta, va) = await StartAsync();
++        var (b, tb, vb) = await StartAsync(new FaultOptions(FragmentSize: 3));
++        await using var _ta = ta;
++        await using var _tb = tb;
++        await using var _a = a;
++        await using var _b = b;
++
++        await a.ExecuteAsync("GTEC0300");
++        await b.ExecuteAsync("GTEC0300");
++        Assert.True(await Wait.UntilAsync(() => va.Count >= 6 && vb.Count >= 6, 3000));
++        await a.ExecuteAsync("GTEC0301");
++        await b.ExecuteAsync("GTEC0301");
++
++        static string[] Keys(IEnumerable<LogicalValue> v) =>
++            v.Select(x => $"{x.Device.DevCd}|{x.Channel.ChannelKey}|{x.Data!.Key}").Distinct().OrderBy(x => x, StringComparer.Ordinal).ToArray();
++        Assert.Equal(Keys(va), Keys(vb));
++    }
++
++    [Fact]
++    public async Task Execute_Rejects_Unknown_Stream_And_Before_Start()
++    {
++        VirtualTransport t = GtecTransport();
++        await using var _t = t;
++        await t.OpenAsync();
++        var s = new DeviceSession(Dev, t, CrLf, GtecProtocols(), GtecMapper());
++        await using var _s = s;
++
++        Assert.Equal(CommandStatus.Rejected, (await s.ExecuteAsync("GTEC0000")).Status);
++        await s.StartAsync();
++        Assert.Equal(CommandStatus.Rejected, (await s.ExecuteAsync("NONE")).Status);
++        Assert.Equal(CommandStatus.Rejected, (await s.ExecuteAsync("GTEC0400")).Status);
++        Assert.Throws<ArgumentException>(() => new DeviceSession(Dev, t, CrLf, [.. GtecProtocols(), .. GtecProtocols()], GtecMapper()));
++    }
++
++    [Fact]
++    public void Priority_And_Pattern_Mapping()
++    {
++        Assert.Equal(CommandPriority.Stop, DeviceSession.PriorityOf(new() { PtlCd = "S", Pattern = ExchangePattern.TxOnly, Action = CommandAction.Stop }));
++        Assert.Equal(CommandPriority.Control, DeviceSession.PriorityOf(new() { PtlCd = "C", Pattern = ExchangePattern.TxRx, Roles = ProtocolRole.Control }));
++        Assert.Equal(CommandPriority.Poll, DeviceSession.PriorityOf(new() { PtlCd = "P", Pattern = ExchangePattern.Poll, Roles = ProtocolRole.Data }));
++        Assert.Equal(CommandPriority.Info, DeviceSession.PriorityOf(new() { PtlCd = "I", Pattern = ExchangePattern.TxRx }));
++        Assert.Equal(ExchangePattern.Poll, ProtocolModel.FromPtlType("PROT0000"));
++        Assert.Equal(ExchangePattern.TxOnly, ProtocolModel.FromPtlType("PROT0001"));
++        Assert.Equal(ExchangePattern.RxStream, ProtocolModel.FromPtlType("PROT0002"));
++        Assert.Equal(ExchangePattern.TxRx, ProtocolModel.FromPtlType("PROT0003"));
++        Assert.Throws<ArgumentException>(() => ProtocolModel.FromPtlType("X"));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/MappingTests.cs b/desktop/tests/juprovider.tests.protocol/MappingTests.cs
+new file mode 100644
+index 0000000..ccfe324
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/MappingTests.cs
+@@ -0,0 +1,167 @@
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Parsing;
++
++namespace JuProvider.Tests.Protocol;
++
++public class MappingTests
++{
++    private static readonly DateTimeOffset At = new(2026, 10, 30, 10, 0, 0, TimeSpan.FromHours(9));
++
++    private static LogicalDataRef R(string cd, int idx, string gr = "GTEC") => new(gr, cd, idx);
++
++    private static RawValue V(string key, double? value, int sample = 0, string? text = null, bool absent = false) =>
++        new(key, sample, value, text ?? value?.ToString(System.Globalization.CultureInfo.InvariantCulture), absent);
++
++    private static List<ChannelMapEntry> Entries() =>
++    [
++        new("DEV1", "1", R("AIN", 1), Unit: "V", Min: 0, Max: 5),
++        new("DEV1", "2", R("AIN", 2), Unit: "V"),
++        new("DEV1", "3", R("AIN", 3), Unit: "V"),
++    ];
++
++    [Fact] // D1 같은 입력 → 같은 LogicalDataRef, 매핑 목록 순서와 무관
++    public void D1_Same_Input_Same_Refs_Regardless_Of_Entry_Order()
++    {
++        var raw = new[] { V("1", 1.0), V("2", 2.0), V("3", 3.0) };
++        List<ChannelMapEntry> entries = Entries();
++        entries.Add(new("DEV1", "1", R("AIN_X10", 1), Transform: new ValueTransform(10)));
++
++        var forward = new DataMapper(entries).Map("DEV1", "P", raw, At);
++        var backward = new DataMapper(Enumerable.Reverse(entries).ToList()).Map("DEV1", "P", raw, At);
++        var again = new DataMapper(entries).Map("DEV1", "P", raw, At);
++
++        Assert.Equal(forward, backward);
++        Assert.Equal(forward, again);
++        Assert.Equal(new[] { "GTEC/AIN/1", "GTEC/AIN_X10/1", "GTEC/AIN/2", "GTEC/AIN/3" }, forward.Select(v => v.Data!.Key));
++    }
++
++    [Fact] // D1b 같은 대상 중복 행은 1개로
++    public void D1b_Duplicate_Entries_Collapse()
++    {
++        List<ChannelMapEntry> entries = [.. Entries(), .. Entries()];
++        var mapper = new DataMapper(entries);
++        Assert.Equal(3, mapper.EntryCount);
++        Assert.Single(mapper.Map("DEV1", "P", [V("1", 1.0)], At));
++    }
++
++    [Fact] // D2 ChannelKey 는 문자열 그대로 비교 ("1" ≠ "01", 대소문자 구분), 위치·이름 키 공존
++    public void D2_ChannelKey_Is_Exact_String()
++    {
++        var mapper = new DataMapper(
++        [
++            new("DEV1", "1", R("POS", 1)),
++            new("DEV1", "CH1", R("NAMED", 1)),
++        ]);
++
++        var r = mapper.Map("DEV1", "P", [V("1", 1), V("01", 2), V("CH1", 3), V("ch1", 4)], At);
++
++        Assert.Equal(DataQuality.Good, r[0].Quality);
++        Assert.Equal(R("POS", 1), r[0].Data);
++        Assert.Equal(DataQuality.Unmapped, r[1].Quality);
++        Assert.Equal(R("NAMED", 1), r[2].Data);
++        Assert.Equal(DataQuality.Unmapped, r[3].Quality);
++        Assert.NotEqual(new ChannelRef("DEV1", "1"), new ChannelRef("DEV1", "01"));
++    }
++
++    [Fact] // D3 한 채널 → 원값·환산값 두 논리 Data
++    public void D3_One_Channel_Two_Logical_Data()
++    {
++        var mapper = new DataMapper(
++        [
++            new("DEV1", "1", R("RAW", 1)),
++            new("DEV1", "1", R("TEMP", 1), Transform: new ValueTransform(Scale: 100, Offset: -50), Unit: "C"),
++        ]);
++
++        var r = mapper.Map("DEV1", "P", [V("1", 0.75)], At);
++
++        Assert.Equal(2, r.Count);
++        Assert.NotEqual(r[0].Data, r[1].Data);
++        Assert.Equal(0.75, r.Single(v => v.Data == R("RAW", 1)).Value);
++        Assert.Equal(25.0, r.Single(v => v.Data == R("TEMP", 1)).Value!.Value, 6);
++        Assert.Equal("C", r.Single(v => v.Data == R("TEMP", 1)).Unit);
++    }
++
++    [Fact] // D4 매핑 없는 채널 → 버리지 않고 UNMAPPED
++    public void D4_Unmapped_Channel_Reported()
++    {
++        var r = new DataMapper(Entries()).Map("DEV1", "P", [V("1", 1), V("9", 9)], At);
++        Assert.Equal(2, r.Count);
++        LogicalValue un = r[1];
++        Assert.Equal(DataQuality.Unmapped, un.Quality);
++        Assert.Null(un.Data);
++        Assert.Equal(9, un.Value);
++        Assert.Equal(new ChannelRef("DEV1", "9"), un.Channel);
++    }
++
++    [Fact] // D5 SAMPLES: 같은 LogicalDataRef + SampleIndex 순서 보존
++    public void D5_Samples_Keep_Order_And_Ref()
++    {
++        var raw = Enumerable.Range(0, 6).Select(i => V("2", i * 0.5, sample: i)).ToArray();
++        var r = new DataMapper(Entries()).Map("DEV1", "P", raw, At);
++
++        Assert.Equal(6, r.Count);
++        Assert.All(r, v => Assert.Equal(R("AIN", 2), v.Data));
++        Assert.Equal(Enumerable.Range(0, 6), r.Select(v => v.SampleIndex));
++        Assert.Equal(raw.Select(x => x.Value), r.Select(v => v.Value));
++    }
++
++    [Fact] // D6 TAG_ID=CH<n> 임시 변환 = 매핑 테이블 형식과 같은 결과
++    public void D6_Legacy_TagId_Equals_Table_Form()
++    {
++        var warnings = new List<string>();
++        var legacy = LegacyTagIdMapping.ToEntries(
++        [
++            new("DEV1", "GTEC", "AIN", 1, "CH1", "V", 0, 5),
++            new("DEV1", "GTEC", "AIN", 2, "CH2", "V"),
++            new("DEV1", "GTEC", "AIN", 3, "CH03", "V"),
++            new("DEV1", "GTEC", "DIG", 1, "PHOTO"),
++            new("DEV1", "GTEC", "DIG", 2, null),
++        ], warnings);
++
++        Assert.Equal(2, warnings.Count);
++        Assert.Equal(Entries(), legacy);
++
++        var raw = new[] { V("1", 1.5), V("2", 2.5), V("3", 3.5) };
++        Assert.Equal(new DataMapper(Entries()).Map("DEV1", "P", raw, At), new DataMapper(legacy).Map("DEV1", "P", raw, At));
++    }
++
++    [Fact] // D7 같은 DEV_CD 는 연결 방식(직접·Gateway 하위)과 무관하게 같은 키
++    public void D7_DeviceRef_Has_No_Parent()
++    {
++        var mapper = new DataMapper(Entries());
++        var direct = mapper.Map("DEV1", "P_DIRECT", [V("1", 1)], At);
++        var viaGateway = mapper.Map("DEV1", "P_GATEWAY", [V("1", 1)], At);
++
++        Assert.Equal(direct[0].Device, viaGateway[0].Device);
++        Assert.Equal(direct[0].Data, viaGateway[0].Data);
++        Assert.Equal(new DeviceRef("DEV1"), direct[0].Device);
++    }
++
++    [Fact] // D8 범위 밖 → 값 유지 + RANGE
++    public void D8_Out_Of_Range_Keeps_Value()
++    {
++        var r = new DataMapper(Entries()).Map("DEV1", "P", [V("1", 7.5), V("1", -1), V("1", 5)], At);
++        Assert.Equal(new[] { DataQuality.Range, DataQuality.Range, DataQuality.Good }, r.Select(v => v.Quality));
++        Assert.Equal(7.5, r[0].Value);
++    }
++
++    [Fact] // PTL_CD 지정 행은 그 프로토콜에서만, 숫자 아닌 값은 PARSE_ERR, Absent 는 제외
++    public void PtlCd_Filter_ParseErr_And_Absent()
++    {
++        var mapper = new DataMapper(
++        [
++            new("DEV1", "1", R("ONLY_P1", 1), PtlCd: "P1"),
++            new("DEV1", "1", R("ALL", 1)),
++        ]);
++
++        Assert.Equal(2, mapper.Map("DEV1", "P1", [V("1", 1)], At).Count);
++        Assert.Equal(R("ALL", 1), mapper.Map("DEV1", "P2", [V("1", 1)], At).Single().Data);
++
++        var bad = mapper.Map("DEV1", "P2", [V("1", null, text: "N/A")], At).Single();
++        Assert.Equal(DataQuality.ParseErr, bad.Quality);
++        Assert.Equal("N/A", bad.Text);
++
++        Assert.Empty(mapper.Map("DEV1", "P2", [V("1", null, text: "000", absent: true)], At));
++        Assert.Throws<ArgumentException>(() => new DataMapper([new("", "1", R("X", 1))]));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/SchedulerTests.cs b/desktop/tests/juprovider.tests.protocol/SchedulerTests.cs
+new file mode 100644
+index 0000000..57ef676
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/SchedulerTests.cs
+@@ -0,0 +1,407 @@
++using System.Collections.Concurrent;
++using System.Diagnostics;
++using System.Text;
++using System.Text.RegularExpressions;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Scheduling;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>가짜 Link: 쓰기를 기록하고, Responder가 정한 지연 뒤 응답 프레임을 Scheduler에 넣는다</summary>
++internal sealed class FakeLink : ILinkWriter
++{
++    private readonly Stopwatch _clock = Stopwatch.StartNew();
++    public CommandScheduler Scheduler = null!;
++    public ConcurrentQueue<(string Text, long At)> Writes { get; } = new();
++    public Func<string, (int, string)[]>? Responder;
++    public bool FailWrites;
++
++    public Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
++    {
++        if (FailWrites) throw new IOException("쓰기 실패(테스트)");
++        string text = Encoding.ASCII.GetString(data.Span);
++        Writes.Enqueue((text, _clock.ElapsedMilliseconds));
++        foreach (var (delay, body) in Responder?.Invoke(text) ?? [])
++        {
++            _ = Task.Run(async () =>
++            {
++                if (delay > 0) await Task.Delay(delay);
++                Scheduler.OnFrame(F(body));
++            });
++        }
++        return Task.CompletedTask;
++    }
++
++    public List<string> Sent => Writes.Select(w => w.Text).ToList();
++
++    public long WriteTime(string text) => Writes.First(w => w.Text == text).At;
++
++    public static Frame F(string body) => new(Encoding.ASCII.GetBytes(body + "\r\n"), Encoding.ASCII.GetBytes(body));
++}
++
++public class SchedulerTests
++{
++    private static (CommandScheduler S, FakeLink L) Create(SchedulerOptions? options = null,
++        Func<string, (int, string)[]>? responder = null)
++    {
++        var link = new FakeLink { Responder = responder };
++        var s = new CommandScheduler(link, options ?? new SchedulerOptions(LateGuardMs: 0));
++        link.Scheduler = s;
++        return (s, link);
++    }
++
++    private static CommandRequest Req(string payload, string dev = "D1", ExchangePattern pattern = ExchangePattern.TxRx,
++        CommandAction action = CommandAction.None, CommandPriority priority = CommandPriority.Info,
++        ResponseMatcher? expect = null, int timeoutMs = 500, int retry = 0, bool idempotent = true, string? key = null,
++        bool noExpect = false) => new()
++    {
++        DevCd = dev,
++        PtlCd = payload,
++        Payload = Encoding.ASCII.GetBytes(payload),
++        Pattern = pattern,
++        Action = action,
++        Priority = priority,
++        Expect = noExpect ? null : expect ?? ResponseMatcher.StartsWith("{"),
++        TimeoutMs = timeoutMs,
++        RetryCount = retry,
++        Idempotent = idempotent,
++        CorrelationKey = key
++    };
++
++    private static string Body(CommandResult r) => Encoding.ASCII.GetString(r.Response!.Body);
++
++    private static (int, string)[] Reply(int delay, string body) => [(delay, body)];
++
++    // ---------- 기본 ----------
++
++    [Fact]
++    public async Task TxRx_Completes_With_Response_And_TxOnly_On_Write()
++    {
++        var (s, _) = Create(responder: t => t == "Q" ? Reply(10, "{A}") : []);
++        await using var _s = s;
++
++        CommandResult r = await s.EnqueueAsync(Req("Q"));
++        Assert.Equal(CommandStatus.Completed, r.Status);
++        Assert.Equal("{A}", Body(r));
++        Assert.Equal(1, r.Attempts);
++
++        CommandResult t = await s.EnqueueAsync(Req("T", pattern: ExchangePattern.TxOnly));
++        Assert.Equal(CommandStatus.Completed, t.Status);
++        Assert.Null(t.Response);
++    }
++
++    [Fact]
++    public async Task Write_Failure_Is_LinkDown_And_RxStream_Rejected()
++    {
++        var (s, l) = Create();
++        await using var _s = s;
++        l.FailWrites = true;
++        Assert.Equal(CommandStatus.LinkDown, (await s.EnqueueAsync(Req("Q"))).Status);
++        Assert.Equal(CommandStatus.Rejected, (await s.EnqueueAsync(Req("R", pattern: ExchangePattern.RxStream))).Status);
++    }
++
++    [Fact]
++    public async Task TxOnly_InterCommandGap_Is_Applied()
++    {
++        var (s, l) = Create(new SchedulerOptions(InterCommandGapMs: 120, LateGuardMs: 0));
++        await using var _s = s;
++        var a = s.EnqueueAsync(Req("A", pattern: ExchangePattern.TxOnly));
++        var b = s.EnqueueAsync(Req("B", pattern: ExchangePattern.TxOnly));
++        await Task.WhenAll(a, b);
++        Assert.True(l.WriteTime("B") - l.WriteTime("A") >= 100, $"gap {l.WriteTime("B") - l.WriteTime("A")}");
++    }
++
++    // ---------- M: 응답 매칭 충돌 ----------
++
++    [Fact] // M1 대기 중 연속 데이터 → 스트림으로, 진짜 응답으로 완료
++    public async Task M1_Stream_Frames_While_Waiting_Go_To_Unmatched()
++    {
++        var (s, _) = Create(responder: t => t == "S{20}"
++            ? [(10, "{1.0 2.0 3.0}"), (30, "{1.1 2.1 3.1}"), (80, "{008,000,000,000}")]
++            : []);
++        await using var _s = s;
++        var unmatched = new ConcurrentQueue<string>();
++        s.Unmatched += (_, f) => unmatched.Enqueue(Encoding.ASCII.GetString(f.Body));
++
++        CommandResult r = await s.EnqueueAsync(Req("S{20}", expect: ResponseMatcher.Regex(@"^\{\d{3},\d{3},\d{3},\d{3}\}$")));
++
++        Assert.Equal(CommandStatus.Completed, r.Status);
++        Assert.Equal("{008,000,000,000}", Body(r));
++        Assert.Equal(new[] { "{1.0 2.0 3.0}", "{1.1 2.1 3.1}" }, unmatched.ToArray());
++    }
++
++    [Fact] // M2 응답 형식이 같은 두 명령: 직렬이라 각자 자기 응답, 순서 유지
++    public async Task M2_Same_Response_Shape_Serial_No_Crossing()
++    {
++        var (s, l) = Create(responder: t => t switch
++        {
++            "A" => Reply(60, "{A}"),
++            "B" => Reply(5, "{B}"),
++            _ => []
++        });
++        await using var _s = s;
++
++        var a = s.EnqueueAsync(Req("A"));
++        var b = s.EnqueueAsync(Req("B"));
++        CommandResult[] r = await Task.WhenAll(a, b);
++
++        Assert.Equal("{A}", Body(r[0]));
++        Assert.Equal("{B}", Body(r[1]));
++        Assert.Equal(new[] { "A", "B" }, l.Sent);
++        Assert.True(l.WriteTime("B") - l.WriteTime("A") >= 50, "B 는 A 응답 뒤에 송신");
++    }
++
++    [Fact] // M3 상관키 병렬: 응답 순서가 뒤바뀌어도 키로 연결
++    public async Task M3_Correlation_Key_Parallel_Out_Of_Order()
++    {
++        var keyRegex = new Regex(@"^\{(\w+):");
++        var options = new SchedulerOptions(FullDuplex: true, MaxInFlight: 4, LateGuardMs: 0,
++            CorrelationOf: f => keyRegex.Match(Encoding.ASCII.GetString(f.Body)) is { Success: true } m ? m.Groups[1].Value : null);
++        var (s, l) = Create(options, t => t switch
++        {
++            "K1" => Reply(120, "{K1:one}"),
++            "K2" => Reply(70, "{K2:two}"),
++            "K3" => Reply(20, "{K3:three}"),
++            _ => []
++        });
++        await using var _s = s;
++
++        var tasks = new[] { "K1", "K2", "K3" }.Select(k => s.EnqueueAsync(Req(k, key: k))).ToArray();
++        Assert.True(await Wait.UntilAsync(() => l.Writes.Count == 3, 100), "3건이 응답 전에 모두 송신");
++        CommandResult[] r = await Task.WhenAll(tasks);
++
++        Assert.Equal("{K1:one}", Body(r[0]));
++        Assert.Equal("{K2:two}", Body(r[1]));
++        Assert.Equal("{K3:three}", Body(r[2]));
++    }
++
++    [Fact] // M4 타임아웃 후 늦은 응답 → 다음 명령에 연결되지 않음 (LATE)
++    public async Task M4_Late_Response_Not_Linked_To_Next_Command()
++    {
++        var (s, l) = Create(new SchedulerOptions(LateGuardMs: 250), t => t switch
++        {
++            "Q1" => Reply(180, "{R1}"),
++            "Q2" => Reply(20, "{R2}"),
++            _ => []
++        });
++        await using var _s = s;
++        var late = new ConcurrentQueue<string>();
++        s.Late += (_, f) => late.Enqueue(Encoding.ASCII.GetString(f.Body));
++
++        var a = s.EnqueueAsync(Req("Q1", timeoutMs: 100, expect: ResponseMatcher.StartsWith("{R")));
++        var b = s.EnqueueAsync(Req("Q2", timeoutMs: 1000, expect: ResponseMatcher.StartsWith("{R")));
++
++        Assert.Equal(CommandStatus.Timeout, (await a).Status);
++        CommandResult rb = await b;
++        Assert.Equal(CommandStatus.Completed, rb.Status);
++        Assert.Equal("{R2}", Body(rb));
++        Assert.Equal(new[] { "{R1}" }, late.ToArray());
++        Assert.True(l.WriteTime("Q2") - l.WriteTime("Q1") >= 300, "타임아웃 + guard 뒤 송신");
++    }
++
++    [Fact] // M4b 상관키: 타임아웃된 키의 늦은 응답은 LATE
++    public async Task M4b_Late_Response_By_Correlation_Key()
++    {
++        var options = new SchedulerOptions(FullDuplex: true, MaxInFlight: 2, LateGuardMs: 0,
++            CorrelationOf: f => Encoding.ASCII.GetString(f.Body) is var b && b.StartsWith("{K") ? b[1..3] : null);
++        var (s, _) = Create(options, t => t == "K1" ? Reply(150, "{K1}") : []);
++        await using var _s = s;
++        var late = new ConcurrentQueue<string>();
++        s.Late += (_, f) => late.Enqueue(Encoding.ASCII.GetString(f.Body));
++
++        Assert.Equal(CommandStatus.Timeout, (await s.EnqueueAsync(Req("K1", key: "K1", timeoutMs: 60))).Status);
++        Assert.True(await Wait.UntilAsync(() => late.Count == 1, 1000));
++    }
++
++    [Fact] // M5 Expect 없는 레거시 TX_RX → 첫 프레임 + 경고 1회
++    public async Task M5_Legacy_No_Expect_Takes_First_Frame_With_Warning()
++    {
++        var (s, _) = Create(responder: t => t == "L" ? Reply(5, "anything") : []);
++        await using var _s = s;
++        var warnings = new ConcurrentQueue<string>();
++        s.Warning += (_, w) => warnings.Enqueue(w);
++
++        CommandResult r1 = await s.EnqueueAsync(Req("L", noExpect: true));
++        CommandResult r2 = await s.EnqueueAsync(Req("L", noExpect: true));
++
++        Assert.Equal("anything", Body(r1));
++        Assert.Equal(CommandStatus.Completed, r2.Status);
++        Assert.Single(warnings);
++    }
++
++    [Fact] // M6 같은 상관키 동시 등록 → Rejected
++    public async Task M6_Duplicate_Correlation_Key_Rejected()
++    {
++        var options = new SchedulerOptions(FullDuplex: true, MaxInFlight: 2, LateGuardMs: 0, CorrelationOf: _ => null);
++        var (s, _) = Create(options);
++        await using var _s = s;
++
++        var first = s.EnqueueAsync(Req("K1", key: "K1", timeoutMs: 200));
++        CommandResult dup = await s.EnqueueAsync(Req("K1", key: "K1"));
++
++        Assert.Equal(CommandStatus.Rejected, dup.Status);
++        Assert.Equal(CommandStatus.Timeout, (await first).Status);
++    }
++
++    // ---------- S: STOP 우선순위·취소·타임아웃 ----------
++
++    [Fact] // S1 STOP 은 진행 중 명령 다음 첫 번째
++    public async Task S1_Stop_Runs_First_After_InFlight()
++    {
++        var (s, l) = Create(responder: t => t == "BUSY" ? Reply(100, "{busy}") : t.StartsWith("STOP") ? [] : Reply(5, "{ok}"));
++        await using var _s = s;
++
++        var busy = s.EnqueueAsync(Req("BUSY"));
++        Assert.True(await Wait.UntilAsync(() => l.Writes.Count == 1, 500));
++        var tasks = new List<Task<CommandResult>>
++        {
++            s.EnqueueAsync(Req("INFO1")),
++            s.EnqueueAsync(Req("POLL1", pattern: ExchangePattern.Poll, priority: CommandPriority.Poll)),
++            s.EnqueueAsync(Req("INFO2")),
++            s.EnqueueAsync(Req("CTRL1", priority: CommandPriority.Control)),
++            s.EnqueueAsync(Req("STOP", pattern: ExchangePattern.TxOnly, action: CommandAction.Stop)),
++        };
++        await busy;
++        CommandResult[] r = await Task.WhenAll(tasks);
++
++        Assert.All(r, x => Assert.Equal(CommandStatus.Completed, x.Status));
++        Assert.Equal(new[] { "BUSY", "STOP", "CTRL1", "INFO1", "INFO2", "POLL1" }, l.Sent);
++    }
++
++    [Fact] // S2 STOP: 같은 장치 대기 중 START·PAUSE 취소, 다른 장치·다른 명령 유지
++    public async Task S2_Stop_Cancels_Pending_Start_And_Pause_Of_Same_Device()
++    {
++        var (s, l) = Create(responder: t => t == "BUSY" ? Reply(80, "{busy}") : Reply(5, "{ok}"));
++        await using var _s = s;
++
++        var busy = s.EnqueueAsync(Req("BUSY"));
++        Assert.True(await Wait.UntilAsync(() => l.Writes.Count == 1, 500));
++        var start1 = s.EnqueueAsync(Req("START1", action: CommandAction.Start, priority: CommandPriority.Control, idempotent: false));
++        var pause1 = s.EnqueueAsync(Req("PAUSE1", action: CommandAction.Pause, priority: CommandPriority.Control, idempotent: false));
++        var info1 = s.EnqueueAsync(Req("INFO1"));
++        var start2 = s.EnqueueAsync(Req("START2", dev: "D2", action: CommandAction.Start, priority: CommandPriority.Control, idempotent: false));
++        var stop1 = s.EnqueueAsync(Req("STOP1", pattern: ExchangePattern.TxOnly, action: CommandAction.Stop));
++
++        CommandResult rs1 = await start1, rp1 = await pause1;
++        Assert.Equal(CommandStatus.Cancelled, rs1.Status);
++        Assert.Contains("STOP", rs1.Reason);
++        Assert.Equal(CommandStatus.Cancelled, rp1.Status);
++
++        await Task.WhenAll(busy, info1, start2, stop1);
++        Assert.Equal(CommandStatus.Completed, (await info1).Status);
++        Assert.Equal(CommandStatus.Completed, (await start2).Status);
++        Assert.DoesNotContain("START1", l.Sent);
++        Assert.DoesNotContain("PAUSE1", l.Sent);
++        Assert.Equal("STOP1", l.Sent[1]);
++    }
++
++    [Fact] // S3 상태 전이(START)는 재시도 안 함, INFO 는 RetryCount 까지
++    public async Task S3_Retry_Only_For_Idempotent()
++    {
++        var (s, l) = Create();
++        await using var _s = s;
++
++        CommandResult info = await s.EnqueueAsync(Req("INFO", timeoutMs: 60, retry: 2));
++        Assert.Equal(CommandStatus.Timeout, info.Status);
++        Assert.Equal(3, info.Attempts);
++
++        CommandResult start = await s.EnqueueAsync(Req("START", timeoutMs: 60, retry: 2, action: CommandAction.Start, idempotent: false));
++        Assert.Equal(CommandStatus.Timeout, start.Status);
++        Assert.Equal(1, start.Attempts);
++
++        Assert.Equal(3, l.Sent.Count(x => x == "INFO"));
++        Assert.Equal(1, l.Sent.Count(x => x == "START"));
++    }
++
++    [Fact] // S4 진행 중 취소: 호출자 즉시 Cancelled, Link 는 타임아웃까지 점유
++    public async Task S4_Cancel_InFlight_Keeps_Link_Busy_Until_Timeout()
++    {
++        var (s, l) = Create(responder: t => t == "B" ? Reply(5, "{b}") : []);
++        await using var _s = s;
++        using var cts = new CancellationTokenSource();
++
++        var sw = Stopwatch.StartNew();
++        var a = s.EnqueueAsync(Req("A", timeoutMs: 300), cts.Token);
++        var b = s.EnqueueAsync(Req("B"));
++        Assert.True(await Wait.UntilAsync(() => l.Writes.Count == 1, 500));
++        cts.Cancel();
++
++        CommandResult ra = await a;
++        Assert.Equal(CommandStatus.Cancelled, ra.Status);
++        Assert.True(sw.ElapsedMilliseconds < 250, $"취소 결과가 늦음 {sw.ElapsedMilliseconds}");
++
++        Assert.Equal(CommandStatus.Completed, (await b).Status);
++        Assert.True(l.WriteTime("B") - l.WriteTime("A") >= 280, $"B 송신이 타임아웃 전 {l.WriteTime("B") - l.WriteTime("A")}");
++    }
++
++    [Fact] // S4b 대기 중 취소: 큐에서 제거, 송신 안 함
++    public async Task S4b_Cancel_Queued_Is_Never_Sent()
++    {
++        var (s, l) = Create(responder: t => t == "A" ? Reply(80, "{a}") : Reply(5, "{x}"));
++        await using var _s = s;
++        using var cts = new CancellationTokenSource();
++
++        var a = s.EnqueueAsync(Req("A"));
++        var q = s.EnqueueAsync(Req("Q"), cts.Token);
++        cts.Cancel();
++
++        Assert.Equal(CommandStatus.Cancelled, (await q).Status);
++        await a;
++        await Task.Delay(50);
++        Assert.DoesNotContain("Q", l.Sent);
++    }
++
++    [Fact] // S5 연속 타임아웃 3회 → Link 의심 1회, 성공하면 초기화
++    public async Task S5_Three_Consecutive_Timeouts_Raise_LinkSuspect_Once()
++    {
++        var (s, _) = Create(responder: t => t == "OK" ? Reply(5, "{ok}") : []);
++        await using var _s = s;
++        var suspects = new ConcurrentQueue<int>();
++        s.LinkSuspect += (_, n) => suspects.Enqueue(n);
++
++        for (int i = 0; i < 4; i++) Assert.Equal(CommandStatus.Timeout, (await s.EnqueueAsync(Req($"T{i}", timeoutMs: 40))).Status);
++        Assert.Equal(new[] { 3 }, suspects.ToArray());
++
++        Assert.Equal(CommandStatus.Completed, (await s.EnqueueAsync(Req("OK"))).Status);
++        for (int i = 0; i < 3; i++) await s.EnqueueAsync(Req($"U{i}", timeoutMs: 40));
++        Assert.Equal(new[] { 3, 3 }, suspects.ToArray());
++    }
++
++    [Fact] // S6 폴링: 이전 회차 미완료면 건너뜀
++    public async Task S6_Poll_Skipped_While_Previous_Pending()
++    {
++        var (s, l) = Create(responder: t => t == "P" ? Reply(100, "{p}") : []);
++        await using var _s = s;
++
++        var first = s.EnqueueAsync(Req("P", pattern: ExchangePattern.Poll, priority: CommandPriority.Poll));
++        CommandResult second = await s.EnqueueAsync(Req("P", pattern: ExchangePattern.Poll, priority: CommandPriority.Poll));
++        Assert.Equal(CommandStatus.Skipped, second.Status);
++        Assert.Equal(CommandStatus.Completed, (await first).Status);
++
++        CommandResult third = await s.EnqueueAsync(Req("P", pattern: ExchangePattern.Poll, priority: CommandPriority.Poll));
++        Assert.Equal(CommandStatus.Completed, third.Status);
++        Assert.Equal(2, l.Sent.Count(x => x == "P"));
++    }
++
++    [Fact] // S7 Link 끊김 → 대기·진행 전부 LinkDown, 복구 후 정상
++    public async Task S7_LinkDown_Fails_All_And_Recovers()
++    {
++        var (s, l) = Create(responder: t => t == "E" ? Reply(5, "{e}") : []);
++        await using var _s = s;
++
++        var a = s.EnqueueAsync(Req("A", timeoutMs: 2000));
++        var b = s.EnqueueAsync(Req("B"));
++        var c = s.EnqueueAsync(Req("C", pattern: ExchangePattern.TxOnly));
++        Assert.True(await Wait.UntilAsync(() => l.Writes.Count == 1, 500));
++
++        s.OnLinkDown();
++        CommandResult[] r = await Task.WhenAll(a, b, c);
++        Assert.All(r, x => Assert.Equal(CommandStatus.LinkDown, x.Status));
++        Assert.Equal(CommandStatus.LinkDown, (await s.EnqueueAsync(Req("D"))).Status);
++
++        s.OnLinkUp();
++        Assert.Equal(CommandStatus.Completed, (await s.EnqueueAsync(Req("E"))).Status);
++        Assert.Equal(new[] { "A", "E" }, l.Sent);
++    }
++}
+-- 
+2.43.0
+

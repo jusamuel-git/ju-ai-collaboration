@@ -1,0 +1,8 @@
+desktop/lib/juprovider.lib.protocol/Mapping/DataMapping.cs
+desktop/lib/juprovider.lib.protocol/Model/ProtocolModel.cs
+desktop/lib/juprovider.lib.protocol/Scheduling/CommandScheduler.cs
+desktop/lib/juprovider.lib.protocol/Scheduling/Commands.cs
+desktop/lib/juprovider.lib.protocol/Session/DeviceSession.cs
+desktop/tests/juprovider.tests.protocol/DeviceSessionTests.cs
+desktop/tests/juprovider.tests.protocol/MappingTests.cs
+desktop/tests/juprovider.tests.protocol/SchedulerTests.cs

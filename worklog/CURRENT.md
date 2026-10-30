@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자 | **C2 PASS** [결과](../reviews/claude/2026-10-30_c2_result.md) — `feature/collect-c2` @ `332c229` (Serial/TCP/Virtual Transport, 시뮬레이터, 재연결), Desktop 테스트 109/109, COM6 실장비 PASS(장치확인 `S{10,3}`, `S{TEST}`는 가상 전용), push 없음. 다음: C3 결정 대기 |
+| 사용자 | **C3 PASS** [결과](../reviews/claude/2026-10-30_c3_result.md) — `feature/collect-c3` @ `ad9fda3` (Scheduler·Mapper·Session), Desktop 테스트 144/144, 빌드 5종 PASS, push 없음. 다음: 검토 대기 (C2 최종 PASS, 케이블 분리 테스트는 후속) |
 | ChatGPT | **과거 소스 ZIP 조사 구조 검토**: [reviews/claude/2026-10-30_legacy-zip_survey.md](../reviews/claude/2026-10-30_legacy-zip_survey.md) — `backup\juprovider-backup.zip`(10-16, 823파일) 1개. 기능 7개 영역 비교, 재사용 후보 5개(모두 참조 후 재작성), 미사용 항목, 결정 L-Q1~Q5. 과거 기능은 모두 동작 미검증. 조사만(코드·DB 변경 없음) |
 | 사용자 | **INT-1 PASS 인정 (10/28 09:59), 배포 보류 — 금요일(10/30) 17시 이후 G4(실제 DB 06)·G5(main push·Jenkins) 승인 단계**: [결과](../reviews/claude/2026-10-28_int1_result.md) · [배포 체크리스트](../reviews/claude/2026-10-28_deploy_checklist.md). `feature/integration-1` @ `14d1ab9` 로컬 유지, 제품 코드 추가 수정 중단, 8081 기존 상태 유지 |
 | 사용자 | **WEB-02/03 결과 검토**: [reviews/claude/2026-10-28_web-02-03_result.md](../reviews/claude/2026-10-28_web-02-03_result.md) — `feature/web-01` 로컬 commit `60bc008` (← protocol-ref `1d1c1ab`, push 없음), 공개 홈 `/`·콘솔 `/console/**` 분리, 자동 54/54 + 브라우저(복귀 URL·로그아웃·조회자·비밀번호 변경 필수) PASS. clearable은 Action Contract v2 후속 과제 |
@@ -39,6 +39,7 @@
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
 
 ## 최근 확인
+- 2026-10-30 10:52 C3 로컬 commit `ad9fda3` (M1–M6, S1–S7, D1–D8 + 세션 통합, 144/144)
 - 2026-10-30 10:30 C2 실장비(COM6 GTEC) 확인 PASS: 장치확인 S{10,3}, 센서정보, 측정 50/50, 중지, 재열기. S{TEST}는 가상 전용(사용자 확인 10:33)
 - 2026-10-30 10:05 C2 로컬 commit `332c229` (Transport 3종·LinkSupervisor·시뮬레이터, 테스트 109/109, 빌드 5종 PASS)
 - 2026-10-26 ENV-0 · JU-0A · JU-0B · SYS-01 · SEC-01 완료 (상세: [2026-10-26.md](2026-10-26.md))
