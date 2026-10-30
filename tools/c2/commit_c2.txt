@@ -1,0 +1,12 @@
+feat(desktop): serial/tcp/virtual transports, simulator and link supervisor (C2)
+
+- ITransport/TransportBase: background receive loop, Faulted on read/write error or EOF
+- TcpClientTransport (continuous receive), SerialTransport (System.IO.Ports, raw bytes)
+- VirtualTransport + fault injection (drop, garbage, delay, fragment, disconnect, fail-open, seed)
+- Generic ProfileSimulator + DeviceProfile JSON v1, built-in GTEC/ECHO/STREAM profiles
+- LinkSupervisor + ReconnectPolicy (1,2,3s then 5s..60s backoff), TransportFactory (local config)
+- Tests: loopback TCP, virtual scenarios, faults, reconnect, config/profile validation
+- No server, DB, client, terminal or IPC change
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

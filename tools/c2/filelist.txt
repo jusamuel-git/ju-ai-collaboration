@@ -1,0 +1,16 @@
+desktop/lib/juprovider.lib.protocol/Simulation/BuiltInProfiles.cs
+desktop/lib/juprovider.lib.protocol/Simulation/DeviceProfile.cs
+desktop/lib/juprovider.lib.protocol/Simulation/ISimulatedDevice.cs
+desktop/lib/juprovider.lib.protocol/Simulation/ProfileSimulator.cs
+desktop/lib/juprovider.lib.protocol/Transport/ITransport.cs
+desktop/lib/juprovider.lib.protocol/Transport/LinkSupervisor.cs
+desktop/lib/juprovider.lib.protocol/Transport/SerialTransport.cs
+desktop/lib/juprovider.lib.protocol/Transport/TcpClientTransport.cs
+desktop/lib/juprovider.lib.protocol/Transport/TransportBase.cs
+desktop/lib/juprovider.lib.protocol/Transport/TransportFactory.cs
+desktop/lib/juprovider.lib.protocol/Transport/VirtualTransport.cs
+desktop/lib/juprovider.lib.protocol/juprovider.lib.protocol.csproj
+desktop/tests/juprovider.tests.protocol/ProfileAndConfigTests.cs
+desktop/tests/juprovider.tests.protocol/TcpTransportTests.cs
+desktop/tests/juprovider.tests.protocol/TransportTestUtil.cs
+desktop/tests/juprovider.tests.protocol/VirtualTransportTests.cs

@@ -1,0 +1,1829 @@
+From 38ea08f52c0dcf39bccca1a5e552c698e55a0d21 Mon Sep 17 00:00:00 2001
+From: JU <jusamuel@gmail.com>
+Date: Fri, 30 Oct 2026 10:04:28 +0900
+Subject: [PATCH] feat(desktop): serial/tcp/virtual transports, simulator and
+ link supervisor (C2)
+
+- ITransport/TransportBase: background receive loop, Faulted on read/write error or EOF
+- TcpClientTransport (continuous receive), SerialTransport (System.IO.Ports, raw bytes)
+- VirtualTransport + fault injection (drop, garbage, delay, fragment, disconnect, fail-open, seed)
+- Generic ProfileSimulator + DeviceProfile JSON v1, built-in GTEC/ECHO/STREAM profiles
+- LinkSupervisor + ReconnectPolicy (1,2,3s then 5s..60s backoff), TransportFactory (local config)
+- Tests: loopback TCP, virtual scenarios, faults, reconnect, config/profile validation
+- No server, DB, client, terminal or IPC change
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../Simulation/BuiltInProfiles.cs             |  58 +++++
+ .../Simulation/DeviceProfile.cs               | 134 ++++++++++
+ .../Simulation/ISimulatedDevice.cs            |  21 ++
+ .../Simulation/ProfileSimulator.cs            | 234 ++++++++++++++++++
+ .../Transport/ITransport.cs                   |  39 +++
+ .../Transport/LinkSupervisor.cs               | 176 +++++++++++++
+ .../Transport/SerialTransport.cs              |  81 ++++++
+ .../Transport/TcpClientTransport.cs           |  61 +++++
+ .../Transport/TransportBase.cs                | 145 +++++++++++
+ .../Transport/TransportFactory.cs             | 113 +++++++++
+ .../Transport/VirtualTransport.cs             | 160 ++++++++++++
+ .../juprovider.lib.protocol.csproj            |   5 +
+ .../ProfileAndConfigTests.cs                  |  85 +++++++
+ .../TcpTransportTests.cs                      | 110 ++++++++
+ .../TransportTestUtil.cs                      |  43 ++++
+ .../VirtualTransportTests.cs                  | 212 ++++++++++++++++
+ 16 files changed, 1677 insertions(+)
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Simulation/BuiltInProfiles.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Simulation/DeviceProfile.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Simulation/ISimulatedDevice.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Simulation/ProfileSimulator.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Transport/ITransport.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Transport/LinkSupervisor.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Transport/SerialTransport.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Transport/TcpClientTransport.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Transport/TransportBase.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Transport/TransportFactory.cs
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Transport/VirtualTransport.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/ProfileAndConfigTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/TcpTransportTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/TransportTestUtil.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/VirtualTransportTests.cs
+
+diff --git a/desktop/lib/juprovider.lib.protocol/Simulation/BuiltInProfiles.cs b/desktop/lib/juprovider.lib.protocol/Simulation/BuiltInProfiles.cs
+new file mode 100644
+index 0000000..559e584
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Simulation/BuiltInProfiles.cs
+@@ -0,0 +1,58 @@
++namespace JuProvider.Lib.Protocol.Simulation;
++
++/// <summary>
++/// 기본 프로파일 (C0-Q6: 1차는 코드에 포함된 리소스, DB 저장은 후속).
++/// GTEC_SCIENCE_CUBE 명령은 seed의 GTEC 프로토콜(PTL_VAL)과 같다:
++///  S{TEST}·S{10,3} 확인, S{20} 센서정보, S{11,n} 모드, S{12,초} 간격, S{10,1} 시작, S{10,0} 중지.
++/// </summary>
++public static class BuiltInProfiles
++{
++    public const string GtecScienceCubeJson = """
++    {
++      "profileId": "GTEC_SCIENCE_CUBE", "v": 1, "seed": 1,
++      "vars": { "running": false, "mode": "ANALOG", "intervalMs": 100, "sensor1": "008" },
++      "responses": [
++        { "match": "S{TEST}", "reply": "{OK}[CR][LF]" },
++        { "match": "S{10,3}", "reply": "{OK}[CR][LF]" },
++        { "match": "S{20}",   "reply": "{${sensor1},000,000,000}[CR][LF]" },
++        { "match": "S{10,1}", "set": { "running": true } },
++        { "match": "S{10,0}", "set": { "running": false } },
++        { "match": "S{11,1}", "set": { "mode": "ANALOG" } },
++        { "match": "S{11,0}", "set": { "mode": "PHOTOGATE1" } },
++        { "match": "S{11,2}", "set": { "mode": "PHOTOGATE2" } },
++        { "matchRegex": "^S\\{12,(?<sec>[0-9]+(\\.[0-9]+)?)\\}$", "set": { "intervalMs": "${sec*1000}" } }
++      ],
++      "streams": [
++        { "when": "running==true && mode==ANALOG", "everyMs": "${intervalMs}", "frame": "{${ch1} ${ch2} ${ch3}}[CR][LF]" }
++      ],
++      "generators": {
++        "ch1": { "type": "sine", "amp": 1, "periodMs": 2000, "offset": 2 },
++        "ch2": { "type": "ramp", "value": 0, "step": 0.1, "max": 5 },
++        "ch3": { "type": "random", "min": 0, "max": 5 }
++      }
++    }
++    """;
++
++    /// <summary>받은 요청을 그대로 + [CR][LF] 로 돌려준다</summary>
++    public const string EchoJson = """
++    { "profileId": "GENERIC_ECHO", "v": 1,
++      "responses": [ { "matchRegex": "^(?<all>.*)$", "reply": "${all}[CR][LF]" } ] }
++    """;
++
++    /// <summary>연결되면 바로 일정 간격으로 순번을 보낸다</summary>
++    public const string StreamJson = """
++    { "profileId": "GENERIC_STREAM", "v": 1,
++      "vars": { "running": true, "everyMs": 20 },
++      "responses": [ { "match": "STOP", "set": { "running": false } }, { "match": "START", "set": { "running": true } } ],
++      "streams": [ { "when": "running", "everyMs": "${everyMs}", "frame": "{${seq}}[CR][LF]" } ],
++      "generators": { "seq": { "type": "ramp", "value": 1, "step": 1, "max": 1000000 } } }
++    """;
++
++    public static DeviceProfile Get(string profileId) => profileId.ToUpperInvariant() switch
++    {
++        "GTEC_SCIENCE_CUBE" => DeviceProfile.Parse(GtecScienceCubeJson),
++        "GENERIC_ECHO" => DeviceProfile.Parse(EchoJson),
++        "GENERIC_STREAM" => DeviceProfile.Parse(StreamJson),
++        _ => throw new ProfileFormatException($"알 수 없는 프로파일: {profileId}")
++    };
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Simulation/DeviceProfile.cs b/desktop/lib/juprovider.lib.protocol/Simulation/DeviceProfile.cs
+new file mode 100644
+index 0000000..9245ec4
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Simulation/DeviceProfile.cs
+@@ -0,0 +1,134 @@
++using System.Globalization;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++
++namespace JuProvider.Lib.Protocol.Simulation;
++
++public sealed class ProfileFormatException(string message) : FormatException(message);
++
++public sealed record ProfileResponse(string? Match, Regex? MatchRegex, string? Reply, IReadOnlyDictionary<string, string> Set);
++
++public sealed record ProfileStream(string When, string EveryMs, string Frame);
++
++public sealed record GeneratorSpec(string Type, double Value, double Min, double Max, double Step, double Amp, double PeriodMs, double Offset, IReadOnlyList<double> Values);
++
++/// <summary>
++/// 장치 프로파일 (C0 §5, JSON v1). 코드가 아니라 데이터로 장치 동작을 적는다.
++/// {"profileId","v":1,"seed","vars":{..},"responses":[{"match"|"matchRegex","reply","set":{..}}],
++///  "streams":[{"when","everyMs","frame"}],"generators":{"name":{"type":"constant|ramp|sine|random|sequence",..}}}
++/// match: 요청 표현식(끝의 [CR][LF]는 무시하고 비교). reply/frame: 표현식 템플릿, ${이름}·${이름*수}·${이름/수}.
++/// when: "이름", "이름==값", "이름!=값"을 && 로 연결.
++/// </summary>
++public sealed record DeviceProfile(
++    string ProfileId,
++    int Seed,
++    IReadOnlyDictionary<string, string> Vars,
++    IReadOnlyList<ProfileResponse> Responses,
++    IReadOnlyList<ProfileStream> Streams,
++    IReadOnlyDictionary<string, GeneratorSpec> Generators)
++{
++    public static DeviceProfile Parse(string json)
++    {
++        JsonElement r;
++        try
++        {
++            using JsonDocument doc = JsonDocument.Parse(json);
++            r = doc.RootElement.Clone();
++        }
++        catch (JsonException ex)
++        {
++            throw new ProfileFormatException("프로파일 JSON 형식 오류: " + ex.Message);
++        }
++
++        if (r.ValueKind != JsonValueKind.Object) throw new ProfileFormatException("프로파일은 JSON 객체입니다.");
++        if (!r.TryGetProperty("v", out JsonElement v) || v.ValueKind != JsonValueKind.Number || v.GetInt32() != 1)
++        {
++            throw new ProfileFormatException("프로파일 버전 v=1 이 필요합니다.");
++        }
++
++        string id = Str(r, "profileId") ?? throw new ProfileFormatException("profileId가 필요합니다.");
++        int seed = r.TryGetProperty("seed", out JsonElement s) && s.ValueKind == JsonValueKind.Number ? s.GetInt32() : 1;
++
++        var vars = new Dictionary<string, string>(StringComparer.Ordinal);
++        if (r.TryGetProperty("vars", out JsonElement ve) && ve.ValueKind == JsonValueKind.Object)
++        {
++            foreach (JsonProperty p in ve.EnumerateObject()) vars[p.Name] = Scalar(p.Value, "vars." + p.Name);
++        }
++
++        var responses = new List<ProfileResponse>();
++        if (r.TryGetProperty("responses", out JsonElement re) && re.ValueKind == JsonValueKind.Array)
++        {
++            foreach (JsonElement x in re.EnumerateArray())
++            {
++                string? match = Str(x, "match");
++                string? regexText = Str(x, "matchRegex");
++                if ((match is null) == (regexText is null)) throw new ProfileFormatException("response는 match 또는 matchRegex 중 하나가 필요합니다.");
++                Regex? regex = null;
++                if (regexText is not null)
++                {
++                    try { regex = new Regex(regexText, RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200)); }
++                    catch (ArgumentException ex) { throw new ProfileFormatException("matchRegex 오류: " + ex.Message); }
++                }
++                var set = new Dictionary<string, string>(StringComparer.Ordinal);
++                if (x.TryGetProperty("set", out JsonElement se) && se.ValueKind == JsonValueKind.Object)
++                {
++                    foreach (JsonProperty p in se.EnumerateObject()) set[p.Name] = Scalar(p.Value, "set." + p.Name);
++                }
++                string? reply = Str(x, "reply");
++                if (reply is null && set.Count == 0) throw new ProfileFormatException("response는 reply 또는 set이 필요합니다.");
++                responses.Add(new ProfileResponse(match, regex, reply, set));
++            }
++        }
++
++        var streams = new List<ProfileStream>();
++        if (r.TryGetProperty("streams", out JsonElement st) && st.ValueKind == JsonValueKind.Array)
++        {
++            foreach (JsonElement x in st.EnumerateArray())
++            {
++                streams.Add(new ProfileStream(
++                    Str(x, "when") ?? "",
++                    x.TryGetProperty("everyMs", out JsonElement e) ? Scalar(e, "everyMs") : throw new ProfileFormatException("stream everyMs가 필요합니다."),
++                    Str(x, "frame") ?? throw new ProfileFormatException("stream frame이 필요합니다.")));
++            }
++        }
++
++        var generators = new Dictionary<string, GeneratorSpec>(StringComparer.Ordinal);
++        if (r.TryGetProperty("generators", out JsonElement ge) && ge.ValueKind == JsonValueKind.Object)
++        {
++            foreach (JsonProperty p in ge.EnumerateObject())
++            {
++                string type = (Str(p.Value, "type") ?? throw new ProfileFormatException($"generator {p.Name}: type이 필요합니다.")).ToLowerInvariant();
++                if (type is not ("constant" or "ramp" or "sine" or "random" or "sequence"))
++                {
++                    throw new ProfileFormatException($"generator {p.Name}: 알 수 없는 type {type}");
++                }
++                var values = new List<double>();
++                if (p.Value.TryGetProperty("values", out JsonElement va) && va.ValueKind == JsonValueKind.Array)
++                {
++                    foreach (JsonElement n in va.EnumerateArray()) values.Add(n.GetDouble());
++                }
++                if (type == "sequence" && values.Count == 0) throw new ProfileFormatException($"generator {p.Name}: values가 필요합니다.");
++                generators[p.Name] = new GeneratorSpec(type,
++                    Num(p.Value, "value", 0), Num(p.Value, "min", 0), Num(p.Value, "max", 1), Num(p.Value, "step", 1),
++                    Num(p.Value, "amp", 1), Num(p.Value, "periodMs", 1000), Num(p.Value, "offset", 0), values);
++            }
++        }
++
++        return new DeviceProfile(id, seed, vars, responses, streams, generators);
++    }
++
++    private static string? Str(JsonElement e, string name) =>
++        e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
++
++    private static double Num(JsonElement e, string name, double fallback) =>
++        e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : fallback;
++
++    private static string Scalar(JsonElement e, string name) => e.ValueKind switch
++    {
++        JsonValueKind.String => e.GetString()!,
++        JsonValueKind.Number => e.GetDouble().ToString(CultureInfo.InvariantCulture),
++        JsonValueKind.True => "true",
++        JsonValueKind.False => "false",
++        _ => throw new ProfileFormatException($"{name}: 문자열·숫자·true/false만 허용됩니다.")
++    };
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Simulation/ISimulatedDevice.cs b/desktop/lib/juprovider.lib.protocol/Simulation/ISimulatedDevice.cs
+new file mode 100644
+index 0000000..5ed2ff1
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Simulation/ISimulatedDevice.cs
+@@ -0,0 +1,21 @@
++namespace JuProvider.Lib.Protocol.Simulation;
++
++/// <summary>시뮬레이터 장치가 바이트를 내보내는 곳 (VirtualTransport)</summary>
++public interface ISimulatorSink
++{
++    void Send(byte[] data);
++}
++
++/// <summary>가상 장치. 요청을 받고 응답·연속 데이터를 sink로 보낸다.</summary>
++public interface ISimulatedDevice
++{
++    string ProfileId { get; }
++
++    /// <summary>연결 시작. lifetime이 취소되면 연속 송신을 멈춘다.</summary>
++    void Open(ISimulatorSink sink, CancellationToken lifetime);
++
++    /// <summary>쓰기 1회 = 요청 1건</summary>
++    void OnRequest(byte[] request);
++
++    void Close();
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Simulation/ProfileSimulator.cs b/desktop/lib/juprovider.lib.protocol/Simulation/ProfileSimulator.cs
+new file mode 100644
+index 0000000..e8fbb13
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Simulation/ProfileSimulator.cs
+@@ -0,0 +1,234 @@
++using System.Diagnostics;
++using System.Globalization;
++using System.Text.RegularExpressions;
++using JuProvider.Lib.Protocol.Expression;
++
++namespace JuProvider.Lib.Protocol.Simulation;
++
++/// <summary>범용 시뮬레이터 엔진: DeviceProfile에 따라 요청에 응답하고, 조건이 맞는 동안 연속 송신한다.</summary>
++public sealed partial class ProfileSimulator(DeviceProfile profile) : ISimulatedDevice
++{
++    private readonly object _lock = new();
++    private readonly Dictionary<string, string> _vars = new(StringComparer.Ordinal);
++    private readonly Dictionary<string, double> _ramp = new(StringComparer.Ordinal);
++    private readonly Dictionary<string, int> _sequence = new(StringComparer.Ordinal);
++    private Random _random = new(profile.Seed);
++    private readonly Stopwatch _clock = new();
++    private ISimulatorSink? _sink;
++    private Task? _streamTask;
++
++    public DeviceProfile Profile { get; } = profile;
++    public string ProfileId => Profile.ProfileId;
++
++    /// <summary>처리하지 못한 요청 수 (매칭 없음·템플릿 오류)</summary>
++    public int UnmatchedRequests { get; private set; }
++
++    /// <summary>현재 변수 값 (시험용)</summary>
++    public string? GetVar(string name)
++    {
++        lock (_lock) return _vars.TryGetValue(name, out string? v) ? v : null;
++    }
++
++    public void Open(ISimulatorSink sink, CancellationToken lifetime)
++    {
++        lock (_lock)
++        {
++            // 연결마다 장치 상태 초기화 (전원 재투입과 같음)
++            _vars.Clear();
++            foreach (var p in Profile.Vars) _vars[p.Key] = p.Value;
++            _ramp.Clear();
++            _sequence.Clear();
++            _random = new Random(Profile.Seed);
++            _sink = sink;
++            _clock.Restart();
++        }
++        if (Profile.Streams.Count > 0)
++        {
++            _streamTask = Task.Run(() => StreamLoopAsync(lifetime));
++        }
++    }
++
++    public void Close()
++    {
++        lock (_lock) _sink = null;
++    }
++
++    public void OnRequest(byte[] request)
++    {
++        byte[]? reply = null;
++        ISimulatorSink? sink;
++        lock (_lock)
++        {
++            sink = _sink;
++            string display = Normalize(request);
++            bool handled = false;
++
++            foreach (ProfileResponse r in Profile.Responses)
++            {
++                Dictionary<string, string>? groups = Match(r, display);
++                if (groups is null) continue;
++
++                try
++                {
++                    foreach (var s in r.Set) _vars[s.Key] = Render(s.Value, groups);
++                    if (r.Reply is not null) reply = ProtocolExpression.ToBytes(Render(r.Reply, groups));
++                    handled = true;
++                }
++                catch (Exception ex) when (ex is FormatException or InvalidOperationException)
++                {
++                    handled = false;
++                }
++                break;
++            }
++            if (!handled) UnmatchedRequests++;
++        }
++        if (reply is not null) sink?.Send(reply);
++    }
++
++    // ----- 내부 -----
++
++    private static string Normalize(byte[] bytes)
++    {
++        int end = bytes.Length;
++        while (end > 0 && (bytes[end - 1] == 0x0D || bytes[end - 1] == 0x0A)) end--;
++        return ProtocolExpression.ToDisplay(bytes.AsSpan(0, end));
++    }
++
++    private static Dictionary<string, string>? Match(ProfileResponse r, string display)
++    {
++        if (r.Match is not null)
++        {
++            return Normalize(ProtocolExpression.ToBytes(r.Match)) == display ? new Dictionary<string, string>() : null;
++        }
++        System.Text.RegularExpressions.Match m = r.MatchRegex!.Match(display);
++        if (!m.Success) return null;
++        var groups = new Dictionary<string, string>(StringComparer.Ordinal);
++        foreach (Group g in m.Groups)
++        {
++            if (!int.TryParse(g.Name, out _)) groups[g.Name] = g.Value;
++        }
++        return groups;
++    }
++
++    [GeneratedRegex(@"\$\{(?<name>[A-Za-z_][A-Za-z0-9_]*)(?:(?<op>[*/])(?<num>[0-9]+(?:\.[0-9]+)?))?\}")]
++    private static partial Regex TokenRegex();
++
++    /// <summary>${이름}, ${이름*수}, ${이름/수}. 우선순위: 정규식 그룹 → 생성기 → 변수. 없으면 InvalidOperationException</summary>
++    private string Render(string template, IReadOnlyDictionary<string, string> groups) =>
++        TokenRegex().Replace(template, m =>
++        {
++            string name = m.Groups["name"].Value;
++            string value = groups.TryGetValue(name, out string? g) ? g
++                : Profile.Generators.TryGetValue(name, out GeneratorSpec? gen) ? Format(Next(name, gen))
++                : _vars.TryGetValue(name, out string? v) ? v
++                : throw new InvalidOperationException($"템플릿 값 없음: {name}");
++
++            if (!m.Groups["op"].Success) return value;
++            if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double x))
++            {
++                throw new InvalidOperationException($"숫자가 아님: {name}={value}");
++            }
++            double k = double.Parse(m.Groups["num"].Value, CultureInfo.InvariantCulture);
++            return Format(m.Groups["op"].Value == "*" ? x * k : x / k);
++        });
++
++    private static string Format(double v) => Math.Round(v, 4).ToString("0.####", CultureInfo.InvariantCulture);
++
++    private double Next(string name, GeneratorSpec g)
++    {
++        switch (g.Type)
++        {
++            case "constant":
++                return g.Value;
++            case "ramp":
++            {
++                double cur = _ramp.TryGetValue(name, out double c) ? c : g.Value;
++                double next = cur + g.Step;
++                _ramp[name] = next > g.Max ? g.Value : next;
++                return cur;
++            }
++            case "sine":
++                return g.Offset + g.Amp * Math.Sin(2 * Math.PI * _clock.Elapsed.TotalMilliseconds / Math.Max(1, g.PeriodMs));
++            case "random":
++                return g.Min + _random.NextDouble() * (g.Max - g.Min);
++            case "sequence":
++            {
++                int i = _sequence.TryGetValue(name, out int idx) ? idx : 0;
++                _sequence[name] = i + 1;
++                return g.Values[i % g.Values.Count];
++            }
++            default:
++                throw new InvalidOperationException("알 수 없는 생성기: " + g.Type);
++        }
++    }
++
++    private bool When(string condition)
++    {
++        if (string.IsNullOrWhiteSpace(condition)) return true;
++        foreach (string part in condition.Split("&&", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
++        {
++            bool ok;
++            int ne = part.IndexOf("!=", StringComparison.Ordinal);
++            int eq = part.IndexOf("==", StringComparison.Ordinal);
++            if (ne > 0)
++            {
++                ok = !string.Equals(Var(part[..ne].Trim()), part[(ne + 2)..].Trim(), StringComparison.Ordinal);
++            }
++            else if (eq > 0)
++            {
++                ok = string.Equals(Var(part[..eq].Trim()), part[(eq + 2)..].Trim(), StringComparison.Ordinal);
++            }
++            else
++            {
++                string v = Var(part);
++                ok = v.Length > 0 && v != "false" && v != "0";
++            }
++            if (!ok) return false;
++        }
++        return true;
++    }
++
++    private string Var(string name) => _vars.TryGetValue(name, out string? v) ? v : "";
++
++    private async Task StreamLoopAsync(CancellationToken lifetime)
++    {
++        var last = new double[Profile.Streams.Count];
++        Array.Fill(last, double.NegativeInfinity);
++        try
++        {
++            while (!lifetime.IsCancellationRequested)
++            {
++                for (int i = 0; i < Profile.Streams.Count; i++)
++                {
++                    byte[]? frame = null;
++                    ISimulatorSink? sink;
++                    lock (_lock)
++                    {
++                        sink = _sink;
++                        ProfileStream s = Profile.Streams[i];
++                        if (sink is null || !When(s.When))
++                        {
++                            last[i] = double.NegativeInfinity;
++                            continue;
++                        }
++                        double now = _clock.Elapsed.TotalMilliseconds;
++                        double every = double.TryParse(Render(s.EveryMs, new Dictionary<string, string>()), NumberStyles.Float,
++                            CultureInfo.InvariantCulture, out double e) ? Math.Max(1, e) : 1000;
++                        if (now - last[i] < every) continue;
++                        last[i] = now;
++                        frame = ProtocolExpression.ToBytes(Render(s.Frame, new Dictionary<string, string>()));
++                    }
++                    sink?.Send(frame!);
++                }
++                await Task.Delay(5, lifetime).ConfigureAwait(false);
++            }
++        }
++        catch (OperationCanceledException)
++        {
++        }
++        catch (Exception ex) when (ex is FormatException or InvalidOperationException)
++        {
++            // 프로파일 템플릿 오류 → 연속 송신 중단 (요청 응답은 계속)
++        }
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Transport/ITransport.cs b/desktop/lib/juprovider.lib.protocol/Transport/ITransport.cs
+new file mode 100644
+index 0000000..168a5ae
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Transport/ITransport.cs
+@@ -0,0 +1,39 @@
++namespace JuProvider.Lib.Protocol.Transport;
++
++public enum TransportState
++{
++    Closed,
++    Opening,
++    Open,
++    Faulted
++}
++
++/// <summary>Link 능력 (C0 §2.2). 기본은 반이중·동시 1건</summary>
++public sealed record LinkCaps(bool FullDuplex = false, int MaxInFlight = 1);
++
++public sealed class TransportStateChangedEventArgs(TransportState state, Exception? error) : EventArgs
++{
++    public TransportState State { get; } = state;
++    public Exception? Error { get; } = error;
++}
++
++/// <summary>
++/// 바이트 전송 (C0 §0, §3). 프레임·프로토콜을 모른다.
++/// 수신은 Open 이후 백그라운드에서 계속되며 Received 이벤트로 조각(chunk)을 넘긴다.
++/// 읽기·쓰기 오류나 상대 종료(EOF)는 State = Faulted 로 알린다. 재연결은 LinkSupervisor 책임.
++/// </summary>
++public interface ITransport : IAsyncDisposable
++{
++    string Name { get; }
++    TransportState State { get; }
++    LinkCaps Caps { get; }
++
++    /// <summary>수신 조각. 배열은 호출마다 새로 만든 것이므로 보관해도 된다. 백그라운드 스레드에서 호출된다.</summary>
++    event EventHandler<byte[]>? Received;
++
++    event EventHandler<TransportStateChangedEventArgs>? StateChanged;
++
++    Task OpenAsync(CancellationToken cancellationToken = default);
++    Task CloseAsync();
++    Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Transport/LinkSupervisor.cs b/desktop/lib/juprovider.lib.protocol/Transport/LinkSupervisor.cs
+new file mode 100644
+index 0000000..22330ec
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Transport/LinkSupervisor.cs
+@@ -0,0 +1,176 @@
++namespace JuProvider.Lib.Protocol.Transport;
++
++/// <summary>
++/// 재연결 대기 시간 (C0 §2.4): 빠른 재시도(기본 1·2·3초) 후 점증(기본 5초부터 2배, 최대 60초). 포기하지 않는다.
++/// </summary>
++public sealed record ReconnectPolicy(IReadOnlyList<TimeSpan> Quick, TimeSpan BackoffStart, TimeSpan BackoffMax)
++{
++    public static ReconnectPolicy Default { get; } =
++        new([TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3)], TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(60));
++
++    /// <summary>attempt: 1부터</summary>
++    public TimeSpan DelayFor(int attempt)
++    {
++        if (attempt < 1) throw new ArgumentOutOfRangeException(nameof(attempt));
++        if (attempt <= Quick.Count) return Quick[attempt - 1];
++        int n = Math.Min(attempt - Quick.Count - 1, 20);
++        double ms = BackoffStart.TotalMilliseconds * Math.Pow(2, n);
++        return TimeSpan.FromMilliseconds(Math.Min(ms, BackoffMax.TotalMilliseconds));
++    }
++}
++
++public enum LinkEventKind
++{
++    Connected,
++    Faulted,
++    Reconnecting,
++    Recovered,
++    Stopped
++}
++
++public sealed record LinkEvent(LinkEventKind Kind, int Attempt, TimeSpan Delay, Exception? Error);
++
++/// <summary>
++/// Link 소유자 (C0 §1.2: 재연결 권한은 Link 소유자에만). "연결 원함"인 동안 끊기면 정책대로 다시 연다.
++/// delay 함수는 시험에서 바꿔 넣을 수 있다.
++/// </summary>
++public sealed class LinkSupervisor : IAsyncDisposable
++{
++    private readonly ITransport _transport;
++    private readonly ReconnectPolicy _policy;
++    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
++    private readonly object _sync = new();
++    private CancellationTokenSource? _cts;
++    private Task? _reconnectTask;
++    private bool _wasConnected;
++    private volatile bool _opening; // 감독자가 직접 Open 중 → 그 실패는 호출한 쪽이 처리
++
++    public LinkSupervisor(ITransport transport, ReconnectPolicy? policy = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
++    {
++        _transport = transport;
++        _policy = policy ?? ReconnectPolicy.Default;
++        _delay = delay ?? ((d, ct) => Task.Delay(d, ct));
++        _transport.StateChanged += OnStateChanged;
++    }
++
++    public ITransport Transport => _transport;
++    public bool Desired { get; private set; }
++    public event EventHandler<LinkEvent>? Event;
++
++    /// <summary>연결 시작. 첫 연결이 실패해도 예외 없이 재연결을 이어간다(결과는 Event로).</summary>
++    public async Task StartAsync(CancellationToken cancellationToken = default)
++    {
++        lock (_sync)
++        {
++            if (Desired) return;
++            Desired = true;
++            _cts = new CancellationTokenSource();
++        }
++
++        _opening = true;
++        try
++        {
++            await _transport.OpenAsync(cancellationToken).ConfigureAwait(false);
++            _wasConnected = true;
++            Raise(LinkEventKind.Connected, 0, TimeSpan.Zero, null);
++        }
++        catch (Exception ex) when (ex is not OperationCanceledException)
++        {
++            Raise(LinkEventKind.Faulted, 0, TimeSpan.Zero, ex);
++            StartReconnect();
++        }
++        finally
++        {
++            _opening = false;
++        }
++    }
++
++    public async Task StopAsync()
++    {
++        CancellationTokenSource? cts;
++        Task? task;
++        lock (_sync)
++        {
++            Desired = false;
++            cts = _cts;
++            _cts = null;
++            task = _reconnectTask;
++            _reconnectTask = null;
++        }
++        cts?.Cancel();
++        if (task is not null)
++        {
++            try { await task.ConfigureAwait(false); } catch { /* 취소 */ }
++        }
++        await _transport.CloseAsync().ConfigureAwait(false);
++        cts?.Dispose();
++        Raise(LinkEventKind.Stopped, 0, TimeSpan.Zero, null);
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        await StopAsync().ConfigureAwait(false);
++        _transport.StateChanged -= OnStateChanged;
++    }
++
++    private void OnStateChanged(object? sender, TransportStateChangedEventArgs e)
++    {
++        if (e.State != TransportState.Faulted) return;
++        if (!Desired || _opening) return; // 감독자의 Open 실패는 Open을 부른 쪽(루프·Start)이 처리
++
++        Raise(LinkEventKind.Faulted, 0, TimeSpan.Zero, e.Error);
++        StartReconnect();
++    }
++
++    private void StartReconnect()
++    {
++        lock (_sync)
++        {
++            if (!Desired || _cts is null) return;
++            CancellationToken token = _cts.Token;
++            Task? previous = _reconnectTask;
++            // 이전 루프가 막 끝나는 중이면 그 뒤에 이어서 시작 (끊김을 놓치지 않음)
++            _reconnectTask = previous is { IsCompleted: false }
++                ? previous.ContinueWith(_ => ReconnectLoopAsync(token), CancellationToken.None,
++                    TaskContinuationOptions.None, TaskScheduler.Default).Unwrap()
++                : Task.Run(() => ReconnectLoopAsync(token));
++        }
++    }
++
++    private async Task ReconnectLoopAsync(CancellationToken ct)
++    {
++        for (int attempt = 1; !ct.IsCancellationRequested; attempt++)
++        {
++            TimeSpan delay = _policy.DelayFor(attempt);
++            Raise(LinkEventKind.Reconnecting, attempt, delay, null);
++            await _delay(delay, ct).ConfigureAwait(false);
++            if (ct.IsCancellationRequested) return;
++
++            if (_transport.State == TransportState.Open) return; // 이미 다른 경로로 열림
++            _opening = true;
++            try
++            {
++                await _transport.OpenAsync(ct).ConfigureAwait(false);
++                _opening = false;
++                Raise(_wasConnected ? LinkEventKind.Recovered : LinkEventKind.Connected, attempt, delay, null);
++                _wasConnected = true;
++                return;
++            }
++            catch (OperationCanceledException) when (ct.IsCancellationRequested)
++            {
++                return;
++            }
++            catch (Exception ex)
++            {
++                Raise(LinkEventKind.Faulted, attempt, delay, ex);
++            }
++            finally
++            {
++                _opening = false;
++            }
++        }
++    }
++
++    private void Raise(LinkEventKind kind, int attempt, TimeSpan delay, Exception? error) =>
++        Event?.Invoke(this, new LinkEvent(kind, attempt, delay, error));
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Transport/SerialTransport.cs b/desktop/lib/juprovider.lib.protocol/Transport/SerialTransport.cs
+new file mode 100644
+index 0000000..e548400
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Transport/SerialTransport.cs
+@@ -0,0 +1,81 @@
++using System.IO.Ports;
++
++namespace JuProvider.Lib.Protocol.Transport;
++
++/// <summary>
++/// Serial 설정. 키 이름은 과거 장치 설정과 같다 (CP-Q5): portName(또는 serialPort), baudRate, dataBits,
++/// parity(None/Odd/Even/Mark/Space), stopBits(One/OnePointFive/Two), handshake(None/XOnXOff/RequestToSend/RequestToSendXOnXOff),
++/// dtrEnable, rtsEnable, writeTimeoutMs.
++/// </summary>
++public sealed record SerialSettings(
++    string PortName,
++    int BaudRate = 9600,
++    int DataBits = 8,
++    Parity Parity = Parity.None,
++    StopBits StopBits = StopBits.One,
++    Handshake Handshake = Handshake.None,
++    bool DtrEnable = true,
++    bool RtsEnable = true,
++    int WriteTimeoutMs = 3000);
++
++/// <summary>
++/// Serial. 과거 구현(응답 끝을 100ms 무수신으로 판단)과 달리 바이트를 그대로 계속 넘기고,
++/// 프레임 경계는 Framer(Frame Rule)가 판단한다.
++/// </summary>
++public sealed class SerialTransport(SerialSettings settings) : TransportBase
++{
++    private SerialPort? _port;
++
++    public SerialSettings Settings { get; } = settings;
++    public override string Name => $"SERIAL {Settings.PortName}";
++
++    protected override Task OpenCoreAsync(CancellationToken cancellationToken)
++    {
++        cancellationToken.ThrowIfCancellationRequested();
++        var port = new SerialPort(Settings.PortName, Settings.BaudRate, Settings.Parity, Settings.DataBits, Settings.StopBits)
++        {
++            Handshake = Settings.Handshake,
++            DtrEnable = Settings.DtrEnable,
++            RtsEnable = Settings.RtsEnable,
++            WriteTimeout = Settings.WriteTimeoutMs,
++            ReadTimeout = SerialPort.InfiniteTimeout
++        };
++        try
++        {
++            port.Open();
++            port.DiscardInBuffer();
++        }
++        catch
++        {
++            port.Dispose();
++            throw;
++        }
++        _port = port;
++        return Task.CompletedTask;
++    }
++
++    protected override async Task<int> ReadCoreAsync(Memory<byte> buffer, CancellationToken cancellationToken)
++    {
++        SerialPort port = _port ?? throw new IOException($"{Name}: 연결 없음");
++        // 포트를 닫으면 대기 중인 읽기가 예외로 끝난다 (CloseCoreAsync).
++        return await port.BaseStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
++    }
++
++    protected override async Task WriteCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
++    {
++        SerialPort port = _port ?? throw new IOException($"{Name}: 연결 없음");
++        await port.BaseStream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
++        await port.BaseStream.FlushAsync(cancellationToken).ConfigureAwait(false);
++    }
++
++    protected override Task CloseCoreAsync()
++    {
++        SerialPort? port = _port;
++        _port = null;
++        if (port is not null)
++        {
++            try { if (port.IsOpen) port.Close(); } finally { port.Dispose(); }
++        }
++        return Task.CompletedTask;
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Transport/TcpClientTransport.cs b/desktop/lib/juprovider.lib.protocol/Transport/TcpClientTransport.cs
+new file mode 100644
+index 0000000..9154f7f
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Transport/TcpClientTransport.cs
+@@ -0,0 +1,61 @@
++using System.Net.Sockets;
++
++namespace JuProvider.Lib.Protocol.Transport;
++
++/// <summary>TCP 클라이언트. 과거 구현(1회 Read)과 달리 백그라운드에서 계속 수신한다.</summary>
++public sealed class TcpClientTransport(string host, int port, int connectTimeoutMs = 3000) : TransportBase
++{
++    private TcpClient? _client;
++    private NetworkStream? _stream;
++
++    public string Host { get; } = string.IsNullOrWhiteSpace(host) ? throw new ArgumentException("host가 필요합니다.", nameof(host)) : host;
++    public int Port { get; } = port is > 0 and <= 65535 ? port : throw new ArgumentOutOfRangeException(nameof(port), "port는 1~65535");
++
++    public override string Name => $"TCP {Host}:{Port}";
++    public override LinkCaps Caps => new(FullDuplex: true);
++
++    protected override async Task OpenCoreAsync(CancellationToken cancellationToken)
++    {
++        var client = new TcpClient { NoDelay = true };
++        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++        timeout.CancelAfter(connectTimeoutMs);
++        try
++        {
++            await client.ConnectAsync(Host, Port, timeout.Token).ConfigureAwait(false);
++        }
++        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
++        {
++            client.Dispose();
++            throw new TimeoutException($"{Name}: {connectTimeoutMs}ms 안에 연결하지 못했습니다.");
++        }
++        catch
++        {
++            client.Dispose();
++            throw;
++        }
++        _client = client;
++        _stream = client.GetStream();
++    }
++
++    protected override async Task<int> ReadCoreAsync(Memory<byte> buffer, CancellationToken cancellationToken)
++    {
++        NetworkStream stream = _stream ?? throw new IOException($"{Name}: 연결 없음");
++        return await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
++    }
++
++    protected override async Task WriteCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
++    {
++        NetworkStream stream = _stream ?? throw new IOException($"{Name}: 연결 없음");
++        await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
++        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
++    }
++
++    protected override Task CloseCoreAsync()
++    {
++        _stream?.Dispose();
++        _client?.Dispose();
++        _stream = null;
++        _client = null;
++        return Task.CompletedTask;
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Transport/TransportBase.cs b/desktop/lib/juprovider.lib.protocol/Transport/TransportBase.cs
+new file mode 100644
+index 0000000..2a6a64c
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Transport/TransportBase.cs
+@@ -0,0 +1,145 @@
++namespace JuProvider.Lib.Protocol.Transport;
++
++/// <summary>상태 전이·백그라운드 수신 루프·오류 처리 공통</summary>
++public abstract class TransportBase : ITransport
++{
++    private readonly object _sync = new();
++    private CancellationTokenSource? _readCts;
++    private Task? _readTask;
++    private TransportState _state = TransportState.Closed;
++
++    public abstract string Name { get; }
++    public virtual LinkCaps Caps => new();
++
++    public TransportState State
++    {
++        get { lock (_sync) return _state; }
++    }
++
++    public event EventHandler<byte[]>? Received;
++    public event EventHandler<TransportStateChangedEventArgs>? StateChanged;
++
++    public async Task OpenAsync(CancellationToken cancellationToken = default)
++    {
++        lock (_sync)
++        {
++            if (_state is TransportState.Open or TransportState.Opening) return;
++        }
++
++        SetState(TransportState.Opening, null);
++        try
++        {
++            await OpenCoreAsync(cancellationToken).ConfigureAwait(false);
++        }
++        catch (Exception ex)
++        {
++            await SafeCloseCoreAsync().ConfigureAwait(false);
++            SetState(TransportState.Faulted, ex);
++            throw;
++        }
++
++        var cts = new CancellationTokenSource();
++        lock (_sync) _readCts = cts;
++        SetState(TransportState.Open, null);
++        _readTask = Task.Run(() => ReadLoopAsync(cts.Token));
++    }
++
++    public async Task CloseAsync()
++    {
++        CancellationTokenSource? cts;
++        Task? readTask;
++        lock (_sync)
++        {
++            cts = _readCts;
++            _readCts = null;
++            readTask = _readTask;
++            _readTask = null;
++        }
++
++        cts?.Cancel();
++        await SafeCloseCoreAsync().ConfigureAwait(false);
++        if (readTask is not null)
++        {
++            try { await readTask.ConfigureAwait(false); } catch { /* 닫는 중 읽기 오류는 무시 */ }
++        }
++        cts?.Dispose();
++
++        if (State != TransportState.Closed) SetState(TransportState.Closed, null);
++    }
++
++    public async Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
++    {
++        if (State != TransportState.Open)
++        {
++            throw new InvalidOperationException($"{Name}: 연결되어 있지 않습니다 ({State}).");
++        }
++
++        try
++        {
++            await WriteCoreAsync(data, cancellationToken).ConfigureAwait(false);
++        }
++        catch (Exception ex) when (ex is not OperationCanceledException)
++        {
++            await FaultAsync(ex).ConfigureAwait(false);
++            throw;
++        }
++    }
++
++    public ValueTask DisposeAsync() => new(CloseAsync());
++
++    protected abstract Task OpenCoreAsync(CancellationToken cancellationToken);
++
++    /// <summary>읽은 바이트 수. 0 이하 = 상대가 연결을 닫음(EOF)</summary>
++    protected abstract Task<int> ReadCoreAsync(Memory<byte> buffer, CancellationToken cancellationToken);
++
++    protected abstract Task WriteCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
++
++    protected abstract Task CloseCoreAsync();
++
++    private async Task ReadLoopAsync(CancellationToken ct)
++    {
++        byte[] buffer = new byte[4096];
++        try
++        {
++            while (!ct.IsCancellationRequested)
++            {
++                int n = await ReadCoreAsync(buffer, ct).ConfigureAwait(false);
++                if (n <= 0) throw new IOException($"{Name}: 상대가 연결을 닫았습니다.");
++                Received?.Invoke(this, buffer.AsSpan(0, n).ToArray());
++            }
++        }
++        catch (Exception ex) when (!ct.IsCancellationRequested)
++        {
++            await FaultAsync(ex).ConfigureAwait(false);
++        }
++        catch
++        {
++            // CloseAsync가 취소한 경우
++        }
++    }
++
++    private async Task FaultAsync(Exception ex)
++    {
++        CancellationTokenSource? cts;
++        lock (_sync)
++        {
++            if (_state != TransportState.Open) return;
++            cts = _readCts;
++            _readCts = null;
++        }
++        cts?.Cancel();
++        await SafeCloseCoreAsync().ConfigureAwait(false);
++        SetState(TransportState.Faulted, ex);
++    }
++
++    private async Task SafeCloseCoreAsync()
++    {
++        try { await CloseCoreAsync().ConfigureAwait(false); } catch { /* 이미 닫힘 */ }
++    }
++
++    private void SetState(TransportState state, Exception? error)
++    {
++        lock (_sync) _state = state;
++        StateChanged?.Invoke(this, new TransportStateChangedEventArgs(state, error));
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Transport/TransportFactory.cs b/desktop/lib/juprovider.lib.protocol/Transport/TransportFactory.cs
+new file mode 100644
+index 0000000..a7b47d9
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Transport/TransportFactory.cs
+@@ -0,0 +1,113 @@
++using System.IO.Ports;
++using System.Text.Json;
++using JuProvider.Lib.Protocol.Simulation;
++
++namespace JuProvider.Lib.Protocol.Transport;
++
++public sealed class TransportConfigException(string message) : FormatException(message);
++
++/// <summary>
++/// PC별 로컬 연결값(C0·SYSINFO-01: ClientId+DevCd 로컬 override) → ITransport.
++///  {"transport":"SERIAL","portName":"COM6","baudRate":115200, ...}
++///  {"transport":"TCP","host":"192.168.0.10","port":5000,"connectTimeoutMs":3000}
++///  {"transport":"VIRTUAL","profile":"GTEC_SCIENCE_CUBE","faults":{"dropRate":0,...}}
++/// 키 이름은 과거 장치 설정과 같다(serialPort, ip도 허용). 비밀 값은 다루지 않는다.
++/// </summary>
++public static class TransportFactory
++{
++    public static ITransport FromLocalConfig(string json)
++    {
++        JsonElement r;
++        try
++        {
++            using JsonDocument doc = JsonDocument.Parse(json);
++            r = doc.RootElement.Clone();
++        }
++        catch (JsonException ex)
++        {
++            throw new TransportConfigException("연결 설정 JSON 형식 오류: " + ex.Message);
++        }
++        if (r.ValueKind != JsonValueKind.Object) throw new TransportConfigException("연결 설정은 JSON 객체입니다.");
++
++        string kind = (Str(r, "transport") ?? throw new TransportConfigException("transport가 필요합니다.")).ToUpperInvariant();
++        return kind switch
++        {
++            "SERIAL" => new SerialTransport(ReadSerial(r)),
++            "TCP" => new TcpClientTransport(
++                Str(r, "host") ?? Str(r, "ip") ?? throw new TransportConfigException("TCP host가 필요합니다."),
++                Int(r, "port") is int p and > 0 and <= 65535 ? p : throw new TransportConfigException("TCP port(1~65535)가 필요합니다."),
++                Int(r, "connectTimeoutMs") ?? 3000),
++            "VIRTUAL" => new VirtualTransport(
++                new ProfileSimulator(ReadProfile(Str(r, "profile") ?? "GTEC_SCIENCE_CUBE")),
++                ReadFaults(r)),
++            _ => throw new TransportConfigException($"알 수 없는 transport: {kind}")
++        };
++    }
++
++    public static SerialSettings ReadSerial(JsonElement r)
++    {
++        string port = Str(r, "portName") ?? Str(r, "serialPort") ?? throw new TransportConfigException("Serial portName이 필요합니다.");
++        return new SerialSettings(
++            port,
++            Int(r, "baudRate") ?? 9600,
++            Int(r, "dataBits") ?? 8,
++            Enum<Parity>(r, "parity", Parity.None),
++            Enum<StopBits>(r, "stopBits", StopBits.One),
++            Enum<Handshake>(r, "handshake", Handshake.None),
++            Bool(r, "dtrEnable") ?? true,
++            Bool(r, "rtsEnable") ?? true,
++            Int(r, "writeTimeoutMs") ?? Int(r, "timeoutMs") ?? 3000);
++    }
++
++    private static DeviceProfile ReadProfile(string id)
++    {
++        try { return BuiltInProfiles.Get(id); }
++        catch (ProfileFormatException ex) { throw new TransportConfigException(ex.Message); }
++    }
++
++    private static FaultOptions ReadFaults(JsonElement r)
++    {
++        if (!r.TryGetProperty("faults", out JsonElement f) || f.ValueKind != JsonValueKind.Object) return FaultOptions.None;
++        return new FaultOptions(
++            Dbl(f, "dropRate") ?? 0, Dbl(f, "garbageRate") ?? 0, Int(f, "delayMs") ?? 0, Int(f, "fragmentSize") ?? 0,
++            Int(f, "disconnectAfterMs") ?? 0, Int(f, "failOpenCount") ?? 0, Int(f, "seed") ?? 1);
++    }
++
++    private static string? Str(JsonElement e, string n) =>
++        e.TryGetProperty(n, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
++
++    private static int? Int(JsonElement e, string n)
++    {
++        if (!e.TryGetProperty(n, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return null;
++        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int i)) return i;
++        if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out i)) return i;
++        throw new TransportConfigException($"{n}: 정수여야 합니다.");
++    }
++
++    private static double? Dbl(JsonElement e, string n)
++    {
++        if (!e.TryGetProperty(n, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return null;
++        if (v.ValueKind == JsonValueKind.Number) return v.GetDouble();
++        throw new TransportConfigException($"{n}: 숫자여야 합니다.");
++    }
++
++    private static bool? Bool(JsonElement e, string n)
++    {
++        if (!e.TryGetProperty(n, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return null;
++        return v.ValueKind switch
++        {
++            JsonValueKind.True => true,
++            JsonValueKind.False => false,
++            _ => throw new TransportConfigException($"{n}: true/false여야 합니다.")
++        };
++    }
++
++    private static T Enum<T>(JsonElement e, string n, T fallback) where T : struct, System.Enum
++    {
++        string? s = Str(e, n);
++        if (s is null) return fallback;
++        return System.Enum.TryParse(s, ignoreCase: true, out T value) && System.Enum.IsDefined(value)
++            ? value
++            : throw new TransportConfigException($"{n}: 알 수 없는 값 {s}");
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Transport/VirtualTransport.cs b/desktop/lib/juprovider.lib.protocol/Transport/VirtualTransport.cs
+new file mode 100644
+index 0000000..36ab1ee
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Transport/VirtualTransport.cs
+@@ -0,0 +1,160 @@
++using System.Threading.Channels;
++using JuProvider.Lib.Protocol.Simulation;
++
++namespace JuProvider.Lib.Protocol.Transport;
++
++/// <summary>
++/// 장애 주입 (C0 §5). 장치 → 수신 방향에 적용한다. Seed가 같으면 같은 결과.
++/// DropRate: 응답/송신 조각을 버릴 확률, GarbageRate: 조각 앞에 쓰레기 바이트를 붙일 확률,
++/// DelayMs: 전달 지연, FragmentSize: 조각을 이 크기로 나눠 전달(0=그대로),
++/// DisconnectAfterMs: 연결 후 이 시간이 지나면 끊김(0=안 함), FailOpenCount: 처음 N번 Open 실패.
++/// </summary>
++public sealed record FaultOptions(
++    double DropRate = 0,
++    double GarbageRate = 0,
++    int DelayMs = 0,
++    int FragmentSize = 0,
++    int DisconnectAfterMs = 0,
++    int FailOpenCount = 0,
++    int Seed = 1)
++{
++    public static FaultOptions None { get; } = new();
++}
++
++/// <summary>
++/// 가상 Transport = 범용 시뮬레이터 장치(ISimulatedDevice) + 장애 주입.
++/// 실제 Transport와 같은 Received/StateChanged 경로를 거치므로 Framer·Parser·재연결을 장비 없이 시험한다.
++/// 쓰기 1회 = 장치가 받는 요청 1건.
++/// </summary>
++public sealed class VirtualTransport : TransportBase, ISimulatorSink
++{
++    private static readonly byte[] Garbage = [0x00, 0xFF, 0x23];
++
++    private readonly ISimulatedDevice _device;
++    private readonly FaultOptions _faults;
++    private readonly Random _random;
++    private readonly object _randomLock = new();
++    private Channel<byte[]>? _inbound;
++    private byte[]? _pending;
++    private int _pendingOffset;
++    private int _openAttempts;
++    private CancellationTokenSource? _lifetime;
++
++    public VirtualTransport(ISimulatedDevice device, FaultOptions? faults = null, string? name = null)
++    {
++        _device = device;
++        _faults = faults ?? FaultOptions.None;
++        _random = new Random(_faults.Seed);
++        Name = name ?? $"VIRTUAL {device.ProfileId}";
++    }
++
++    public override string Name { get; }
++    public override LinkCaps Caps => new(FullDuplex: true);
++
++    /// <summary>시험용: 지금 연결을 끊는다(상대 종료와 같음)</summary>
++    public void ForceDisconnect() => _inbound?.Writer.TryComplete(new IOException($"{Name}: 가상 연결 끊김"));
++
++    protected override Task OpenCoreAsync(CancellationToken cancellationToken)
++    {
++        int attempt = Interlocked.Increment(ref _openAttempts);
++        if (attempt <= _faults.FailOpenCount)
++        {
++            throw new IOException($"{Name}: 가상 Open 실패 주입 ({attempt}/{_faults.FailOpenCount})");
++        }
++
++        _inbound = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
++        _pending = null;
++        _lifetime = new CancellationTokenSource();
++        _device.Open(this, _lifetime.Token);
++
++        if (_faults.DisconnectAfterMs > 0)
++        {
++            CancellationToken token = _lifetime.Token;
++            _ = Task.Delay(_faults.DisconnectAfterMs, token).ContinueWith(t =>
++            {
++                if (!t.IsCanceled) ForceDisconnect();
++            }, TaskScheduler.Default);
++        }
++        return Task.CompletedTask;
++    }
++
++    protected override async Task<int> ReadCoreAsync(Memory<byte> buffer, CancellationToken cancellationToken)
++    {
++        if (_pending is null)
++        {
++            Channel<byte[]> inbound = _inbound ?? throw new IOException($"{Name}: 연결 없음");
++            _pending = await inbound.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
++            _pendingOffset = 0;
++        }
++
++        int n = Math.Min(buffer.Length, _pending.Length - _pendingOffset);
++        _pending.AsMemory(_pendingOffset, n).CopyTo(buffer);
++        _pendingOffset += n;
++        if (_pendingOffset >= _pending.Length) _pending = null;
++        return n;
++    }
++
++    protected override Task WriteCoreAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
++    {
++        if (_inbound is null || _inbound.Reader.Completion.IsCompleted)
++        {
++            throw new IOException($"{Name}: 연결 끊김");
++        }
++        _device.OnRequest(data.ToArray());
++        return Task.CompletedTask;
++    }
++
++    protected override Task CloseCoreAsync()
++    {
++        _lifetime?.Cancel();
++        _lifetime?.Dispose();
++        _lifetime = null;
++        _device.Close();
++        _inbound?.Writer.TryComplete();
++        return Task.CompletedTask;
++    }
++
++    /// <summary>시뮬레이터 장치가 보내는 바이트 (장애 주입 후 수신 큐로)</summary>
++    void ISimulatorSink.Send(byte[] data)
++    {
++        Channel<byte[]>? inbound = _inbound;
++        if (inbound is null || data.Length == 0) return;
++
++        bool drop, garbage;
++        lock (_randomLock)
++        {
++            drop = _faults.DropRate > 0 && _random.NextDouble() < _faults.DropRate;
++            garbage = _faults.GarbageRate > 0 && _random.NextDouble() < _faults.GarbageRate;
++        }
++        if (drop) return;
++
++        byte[] payload = garbage ? [.. Garbage, .. data] : data;
++
++        if (_faults.DelayMs > 0)
++        {
++            CancellationToken token = _lifetime?.Token ?? CancellationToken.None;
++            _ = Task.Delay(_faults.DelayMs, token).ContinueWith(t =>
++            {
++                if (!t.IsCanceled) Enqueue(inbound, payload);
++            }, TaskScheduler.Default);
++        }
++        else
++        {
++            Enqueue(inbound, payload);
++        }
++    }
++
++    private void Enqueue(Channel<byte[]> inbound, byte[] payload)
++    {
++        int size = _faults.FragmentSize;
++        if (size <= 0 || size >= payload.Length)
++        {
++            inbound.Writer.TryWrite(payload);
++            return;
++        }
++        for (int i = 0; i < payload.Length; i += size)
++        {
++            inbound.Writer.TryWrite(payload[i..Math.Min(i + size, payload.Length)]);
++        }
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/juprovider.lib.protocol.csproj b/desktop/lib/juprovider.lib.protocol/juprovider.lib.protocol.csproj
+index d3e1a49..5595fc7 100644
+--- a/desktop/lib/juprovider.lib.protocol/juprovider.lib.protocol.csproj
++++ b/desktop/lib/juprovider.lib.protocol/juprovider.lib.protocol.csproj
+@@ -7,4 +7,9 @@
+     <ImplicitUsings>enable</ImplicitUsings>
+   </PropertyGroup>
+ 
++  <!-- C2: Serial Transport -->
++  <ItemGroup>
++    <PackageReference Include="System.IO.Ports" Version="10.0.13" />
++  </ItemGroup>
++
+ </Project>
+diff --git a/desktop/tests/juprovider.tests.protocol/ProfileAndConfigTests.cs b/desktop/tests/juprovider.tests.protocol/ProfileAndConfigTests.cs
+new file mode 100644
+index 0000000..0b7acdf
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/ProfileAndConfigTests.cs
+@@ -0,0 +1,85 @@
++using JuProvider.Lib.Protocol.Simulation;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Tests.Protocol;
++
++public class ProfileAndConfigTests
++{
++    [Fact]
++    public void BuiltIn_Profiles_Parse()
++    {
++        foreach (string id in new[] { "GTEC_SCIENCE_CUBE", "GENERIC_ECHO", "GENERIC_STREAM" })
++        {
++            Assert.Equal(id, BuiltInProfiles.Get(id).ProfileId);
++        }
++        Assert.Throws<ProfileFormatException>(() => BuiltInProfiles.Get("NOPE"));
++    }
++
++    [Theory]
++    [InlineData("""{"profileId":"X"}""")]                                                     // v 없음
++    [InlineData("""{"v":1}""")]                                                               // id 없음
++    [InlineData("""{"v":1,"profileId":"X","responses":[{"reply":"A"}]}""")]                   // match 없음
++    [InlineData("""{"v":1,"profileId":"X","responses":[{"match":"A","matchRegex":"A","reply":"B"}]}""")]
++    [InlineData("""{"v":1,"profileId":"X","responses":[{"match":"A"}]}""")]                   // reply/set 없음
++    [InlineData("""{"v":1,"profileId":"X","responses":[{"matchRegex":"(","reply":"B"}]}""")]  // 잘못된 정규식
++    [InlineData("""{"v":1,"profileId":"X","streams":[{"frame":"A"}]}""")]                     // everyMs 없음
++    [InlineData("""{"v":1,"profileId":"X","generators":{"g":{"type":"noise"}}}""")]
++    [InlineData("""{"v":1,"profileId":"X","generators":{"g":{"type":"sequence"}}}""")]
++    [InlineData("""{"v":1,"profileId":"X","vars":{"a":[1]}}""")]
++    [InlineData("""not json""")]
++    public void Invalid_Profiles(string json)
++    {
++        Assert.ThrowsAny<FormatException>(() => DeviceProfile.Parse(json));
++    }
++
++    [Fact]
++    public void ReconnectPolicy_Default_Delays()
++    {
++        ReconnectPolicy p = ReconnectPolicy.Default;
++        int[] expected = { 1, 2, 3, 5, 10, 20, 40, 60, 60, 60 };
++        for (int i = 0; i < expected.Length; i++) Assert.Equal(TimeSpan.FromSeconds(expected[i]), p.DelayFor(i + 1));
++        Assert.Equal(TimeSpan.FromSeconds(60), p.DelayFor(1000));
++        Assert.Throws<ArgumentOutOfRangeException>(() => p.DelayFor(0));
++    }
++
++    [Fact]
++    public async Task Factory_Builds_Transports()
++    {
++        await using ITransport serial = TransportFactory.FromLocalConfig("""{"transport":"serial","portName":"COM6","baudRate":115200,"parity":"even","stopBits":"Two"}""");
++        var s = Assert.IsType<SerialTransport>(serial);
++        Assert.Equal(new SerialSettings("COM6", 115200, 8, System.IO.Ports.Parity.Even, System.IO.Ports.StopBits.Two), s.Settings);
++
++        await using ITransport legacyKeys = TransportFactory.FromLocalConfig("""{"transport":"SERIAL","serialPort":"COM3","timeoutMs":500}""");
++        Assert.Equal(500, ((SerialTransport)legacyKeys).Settings.WriteTimeoutMs);
++
++        await using ITransport tcp = TransportFactory.FromLocalConfig("""{"transport":"TCP","ip":"10.0.0.1","port":"5000"}""");
++        Assert.Equal("TCP 10.0.0.1:5000", tcp.Name);
++
++        await using ITransport v = TransportFactory.FromLocalConfig("""{"transport":"VIRTUAL","profile":"GENERIC_ECHO","faults":{"dropRate":0.1,"seed":7}}""");
++        Assert.Equal("VIRTUAL GENERIC_ECHO", v.Name);
++    }
++
++    [Theory]
++    [InlineData("""{"portName":"COM1"}""")]                          // transport 없음
++    [InlineData("""{"transport":"USB"}""")]
++    [InlineData("""{"transport":"SERIAL"}""")]                       // 포트 없음
++    [InlineData("""{"transport":"SERIAL","portName":"COM1","parity":"Maybe"}""")]
++    [InlineData("""{"transport":"SERIAL","portName":"COM1","baudRate":"fast"}""")]
++    [InlineData("""{"transport":"TCP","host":"h"}""")]               // port 없음
++    [InlineData("""{"transport":"TCP","host":"h","port":70000}""")]
++    [InlineData("""{"transport":"VIRTUAL","profile":"NOPE"}""")]
++    [InlineData("""[1]""")]
++    public void Factory_Rejects_Invalid(string json)
++    {
++        Assert.Throws<TransportConfigException>(() => TransportFactory.FromLocalConfig(json));
++    }
++
++    [Fact] // S1 없는 COM 포트 → 예외 + Faulted (장비 없이 확인 가능한 범위)
++    public async Task Serial_Missing_Port_Faults()
++    {
++        await using var t = new SerialTransport(new SerialSettings("COM250"));
++        await Assert.ThrowsAnyAsync<Exception>(() => t.OpenAsync());
++        Assert.Equal(TransportState.Faulted, t.State);
++        Assert.Equal("SERIAL COM250", t.Name);
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/TcpTransportTests.cs b/desktop/tests/juprovider.tests.protocol/TcpTransportTests.cs
+new file mode 100644
+index 0000000..16faf0b
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/TcpTransportTests.cs
+@@ -0,0 +1,110 @@
++using System.Net;
++using System.Net.Sockets;
++using System.Text;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>로컬 루프백 TCP 서버로 백그라운드 수신·조각·종료·재연결 확인</summary>
++public class TcpTransportTests
++{
++    private static TcpListener Listen()
++    {
++        var l = new TcpListener(IPAddress.Loopback, 0);
++        l.Start();
++        return l;
++    }
++
++    private static int PortOf(TcpListener l) => ((IPEndPoint)l.LocalEndpoint).Port;
++
++    [Fact] // T1 조각난 연속 수신 → Framer가 프레임 복원, 쓰기 전달
++    public async Task Receives_Fragmented_Stream_And_Writes()
++    {
++        using TcpListener listener = Listen();
++        await using var t = new TcpClientTransport("127.0.0.1", PortOf(listener));
++        var frames = new FrameCollector(t);
++
++        Task<TcpClient> accept = listener.AcceptTcpClientAsync();
++        await t.OpenAsync();
++        using TcpClient server = await accept;
++        NetworkStream s = server.GetStream();
++
++        byte[] data = Encoding.ASCII.GetBytes("{1 2 3}\r\n{4 5 6}\r\n{7 8 9}\r\n");
++        foreach (byte b in data)
++        {
++            await s.WriteAsync(new[] { b });
++            await s.FlushAsync();
++        }
++
++        Assert.True(await Wait.UntilAsync(() => frames.Frames.Count == 3), "프레임 3개 수신");
++        Assert.Equal(new[] { "{1 2 3}", "{4 5 6}", "{7 8 9}" }, frames.Snapshot());
++        Assert.Equal(TransportState.Open, t.State);
++
++        await t.WriteAsync(Encoding.ASCII.GetBytes("S{10,1}\r\n"));
++        var buf = new byte[64];
++        int n = await s.ReadAsync(buf).AsTask().WaitAsync(TimeSpan.FromSeconds(3));
++        Assert.Equal("S{10,1}\r\n", Encoding.ASCII.GetString(buf, 0, n));
++    }
++
++    [Fact] // T2 상대 종료 → Faulted
++    public async Task Peer_Close_Faults()
++    {
++        using TcpListener listener = Listen();
++        await using var t = new TcpClientTransport("127.0.0.1", PortOf(listener));
++        var states = new List<TransportState>();
++        t.StateChanged += (_, e) => { lock (states) states.Add(e.State); };
++
++        Task<TcpClient> accept = listener.AcceptTcpClientAsync();
++        await t.OpenAsync();
++        (await accept).Dispose();
++
++        Assert.True(await Wait.UntilAsync(() => t.State == TransportState.Faulted));
++        lock (states) Assert.Equal(new[] { TransportState.Opening, TransportState.Open, TransportState.Faulted }, states);
++        await Assert.ThrowsAsync<InvalidOperationException>(() => t.WriteAsync(new byte[] { 1 }));
++    }
++
++    [Fact] // T3 열 수 없는 포트 → 예외 + Faulted
++    public async Task Open_Refused_Faults()
++    {
++        int port;
++        using (TcpListener l = Listen()) { port = PortOf(l); l.Stop(); }
++        await using var t = new TcpClientTransport("127.0.0.1", port, connectTimeoutMs: 2000);
++        await Assert.ThrowsAnyAsync<Exception>(() => t.OpenAsync());
++        Assert.Equal(TransportState.Faulted, t.State);
++    }
++
++    [Fact] // T4 끊김 후 LinkSupervisor가 다시 연결 (Recovered)
++    public async Task Supervisor_Reconnects_After_Peer_Close()
++    {
++        using TcpListener listener = Listen();
++        var t = new TcpClientTransport("127.0.0.1", PortOf(listener));
++        var policy = new ReconnectPolicy([TimeSpan.FromMilliseconds(20)], TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(80));
++        await using var sup = new LinkSupervisor(t, policy);
++        var events = new List<LinkEventKind>();
++        sup.Event += (_, e) => { lock (events) events.Add(e.Kind); };
++
++        Task<TcpClient> accept1 = listener.AcceptTcpClientAsync();
++        await sup.StartAsync();
++        TcpClient first = await accept1;
++        Task<TcpClient> accept2 = listener.AcceptTcpClientAsync();
++        first.Dispose();
++
++        using TcpClient second = await accept2.WaitAsync(TimeSpan.FromSeconds(5));
++        Assert.True(await Wait.UntilAsync(() => { lock (events) return events.Contains(LinkEventKind.Recovered); }));
++        Assert.Equal(TransportState.Open, t.State);
++        lock (events)
++        {
++            Assert.Equal(LinkEventKind.Connected, events[0]);
++            Assert.Contains(LinkEventKind.Faulted, events);
++            Assert.Contains(LinkEventKind.Reconnecting, events);
++        }
++    }
++
++    [Fact]
++    public void Ctor_Validates()
++    {
++        Assert.Throws<ArgumentException>(() => new TcpClientTransport(" ", 1));
++        Assert.Throws<ArgumentOutOfRangeException>(() => new TcpClientTransport("h", 0));
++        Assert.Throws<ArgumentOutOfRangeException>(() => new TcpClientTransport("h", 70000));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/TransportTestUtil.cs b/desktop/tests/juprovider.tests.protocol/TransportTestUtil.cs
+new file mode 100644
+index 0000000..c4a5d24
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/TransportTestUtil.cs
+@@ -0,0 +1,43 @@
++using System.Collections.Concurrent;
++using System.Text;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>Transport 수신을 CRLF Framer로 모아 문자열 프레임 목록으로 만든다</summary>
++internal sealed class FrameCollector
++{
++    private readonly IFramer _framer = FramerFactory.Create(new FrameRule { Kind = FrameKind.Delim, End = [0x0D, 0x0A] });
++    private readonly object _lock = new();
++    public ConcurrentQueue<string> Frames { get; } = new();
++    public int Chunks;
++    public int Rejected;
++
++    public FrameCollector(ITransport t) => t.Received += (_, data) =>
++    {
++        Interlocked.Increment(ref Chunks);
++        lock (_lock)
++        {
++            foreach (Frame f in _framer.Push(data)) Frames.Enqueue(Encoding.ASCII.GetString(f.Body));
++            Rejected += _framer.Rejections.Count;
++        }
++    };
++
++    public List<string> Snapshot() => Frames.ToList();
++}
++
++internal static class Wait
++{
++    public static async Task<bool> UntilAsync(Func<bool> condition, int timeoutMs = 3000)
++    {
++        var sw = System.Diagnostics.Stopwatch.StartNew();
++        while (sw.ElapsedMilliseconds < timeoutMs)
++        {
++            if (condition()) return true;
++            await Task.Delay(10);
++        }
++        return condition();
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/VirtualTransportTests.cs b/desktop/tests/juprovider.tests.protocol/VirtualTransportTests.cs
+new file mode 100644
+index 0000000..805aa16
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/VirtualTransportTests.cs
+@@ -0,0 +1,212 @@
++using System.Text;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Parsing;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Simulation;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Tests.Protocol;
++
++public class VirtualTransportTests
++{
++    private static VirtualTransport Gtec(FaultOptions? faults = null, ProfileSimulator? sim = null) =>
++        new(sim ?? new ProfileSimulator(BuiltInProfiles.Get("GTEC_SCIENCE_CUBE")), faults);
++
++    private static Task Send(ITransport t, string expr) => t.WriteAsync(JuProvider.Lib.Protocol.Expression.ProtocolExpression.ToBytes(expr));
++
++    [Fact] // V1 GTEC 시나리오: 확인 → 센서정보 → 간격 → 시작(연속) → 중지
++    public async Task Gtec_Scenario_Through_Framer_And_Parser()
++    {
++        var sim = new ProfileSimulator(BuiltInProfiles.Get("GTEC_SCIENCE_CUBE"));
++        await using VirtualTransport t = Gtec(sim: sim);
++        var frames = new FrameCollector(t);
++        await t.OpenAsync();
++
++        await Send(t, "S{TEST}[CR][LF]");
++        Assert.True(await Wait.UntilAsync(() => frames.Frames.Contains("{OK}")));
++
++        await Send(t, "S{20}");
++        Assert.True(await Wait.UntilAsync(() => frames.Frames.Contains("{008,000,000,000}")));
++
++        await Send(t, "S{12,0.020}");
++        Assert.Equal("20", sim.GetVar("intervalMs"));
++
++        int before = frames.Frames.Count;
++        await Send(t, "S{10,1}");
++        Assert.True(await Wait.UntilAsync(() => frames.Frames.Count >= before + 5), "연속 데이터 5프레임 이상");
++
++        IFrameParser parser = ParserFactory.Create(RuleReader.ReadParseRule("FRAME=CRLF;STX={;ETX=};MODE=DELIMITED;SEP=SPACE;COUNT=3;MAP=CHANNELS")!);
++        List<string> data = frames.Snapshot().Skip(before).Take(5).ToList();
++        foreach (string f in data)
++        {
++            byte[] b = Encoding.ASCII.GetBytes(f);
++            ParseResult r = parser.Parse(new Frame(b, b));
++            Assert.True(r.Ok, f + " → " + r.Error);
++            Assert.Equal(3, r.Values.Count);
++        }
++
++        await Send(t, "S{10,0}[CR][LF]");
++        await Task.Delay(100);
++        int stopped = frames.Frames.Count;
++        await Task.Delay(150);
++        Assert.Equal(stopped, frames.Frames.Count); // 중지 후 추가 데이터 없음
++        Assert.Equal(0, sim.UnmatchedRequests);
++    }
++
++    [Fact]
++    public async Task Unknown_Request_Is_Counted_Without_Reply()
++    {
++        var sim = new ProfileSimulator(BuiltInProfiles.Get("GTEC_SCIENCE_CUBE"));
++        await using VirtualTransport t = Gtec(sim: sim);
++        var frames = new FrameCollector(t);
++        await t.OpenAsync();
++        await Send(t, "S{99}");
++        await Task.Delay(100);
++        Assert.Empty(frames.Frames);
++        Assert.Equal(1, sim.UnmatchedRequests);
++    }
++
++    [Fact] // V2 장애: 1바이트 조각 + 지연 → 그래도 프레임 복원
++    public async Task Fault_Fragment_And_Delay()
++    {
++        await using VirtualTransport t = Gtec(new FaultOptions(FragmentSize: 1, DelayMs: 30));
++        var frames = new FrameCollector(t);
++        await t.OpenAsync();
++        await Send(t, "S{20}");
++        await Task.Delay(10);
++        Assert.Empty(frames.Frames); // 지연 중
++        Assert.True(await Wait.UntilAsync(() => frames.Frames.Contains("{008,000,000,000}")));
++        Assert.True(frames.Chunks >= "{008,000,000,000}\r\n".Length);
++    }
++
++    [Fact] // V3 장애: 응답 누락(drop=1) → 응답 없음
++    public async Task Fault_Drop_All()
++    {
++        await using VirtualTransport t = Gtec(new FaultOptions(DropRate: 1));
++        var frames = new FrameCollector(t);
++        await t.OpenAsync();
++        await Send(t, "S{20}");
++        await Task.Delay(150);
++        Assert.Empty(frames.Frames);
++    }
++
++    [Fact] // V4 장애: 쓰레기 바이트 → 해당 프레임은 해석 실패, 다음 정상 프레임은 계속
++    public async Task Fault_Garbage_Then_Recover()
++    {
++        var parser = ParserFactory.Create(RuleReader.ReadParseRule("""{"v":1,"kind":"INFO","trim":"{}","fields":["CH1","CH2","CH3","CH4"]}""")!);
++        await using VirtualTransport bad = Gtec(new FaultOptions(GarbageRate: 1));
++        var frames = new FrameCollector(bad);
++        await bad.OpenAsync();
++        await Send(bad, "S{20}");
++        Assert.True(await Wait.UntilAsync(() => frames.Frames.Count == 1));
++        byte[] body = Encoding.Latin1.GetBytes(frames.Snapshot()[0]);
++        Assert.False(parser.Parse(new Frame(body, body)).Ok);
++
++        await using VirtualTransport good = Gtec(new FaultOptions(GarbageRate: 0));
++        var frames2 = new FrameCollector(good);
++        await good.OpenAsync();
++        await Send(good, "S{20}");
++        Assert.True(await Wait.UntilAsync(() => frames2.Frames.Count == 1));
++        byte[] ok = Encoding.ASCII.GetBytes(frames2.Snapshot()[0]);
++        Assert.True(parser.Parse(new Frame(ok, ok)).Ok);
++    }
++
++    [Fact] // V5 같은 seed → 같은 장애 결과 (재현성)
++    public async Task Fault_Is_Deterministic_By_Seed()
++    {
++        async Task<int> Run()
++        {
++            await using VirtualTransport t = Gtec(new FaultOptions(DropRate: 0.5, Seed: 42));
++            var frames = new FrameCollector(t);
++            await t.OpenAsync();
++            for (int i = 0; i < 20; i++) await Send(t, "S{TEST}");
++            await Task.Delay(150);
++            return frames.Frames.Count;
++        }
++        int a = await Run();
++        int b = await Run();
++        Assert.Equal(a, b);
++        Assert.InRange(a, 1, 19);
++    }
++
++    [Fact] // V6 강제 끊김 → Faulted, 쓰기 거부
++    public async Task ForceDisconnect_Faults()
++    {
++        await using VirtualTransport t = Gtec();
++        await t.OpenAsync();
++        t.ForceDisconnect();
++        Assert.True(await Wait.UntilAsync(() => t.State == TransportState.Faulted));
++        await Assert.ThrowsAsync<InvalidOperationException>(() => t.WriteAsync(new byte[] { 1 }));
++    }
++
++    [Fact] // V7 연결 후 자동 끊김 + 감독자 재연결 → 장치 상태 초기화(running=false)
++    public async Task DisconnectAfter_Supervisor_Recovers_And_Device_Resets()
++    {
++        var sim = new ProfileSimulator(BuiltInProfiles.Get("GTEC_SCIENCE_CUBE"));
++        var t = Gtec(new FaultOptions(DisconnectAfterMs: 150), sim);
++        var policy = new ReconnectPolicy([TimeSpan.FromMilliseconds(10)], TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(40));
++        await using var sup = new LinkSupervisor(t, policy);
++        var events = new List<LinkEvent>();
++        sup.Event += (_, e) => { lock (events) events.Add(e); };
++
++        await sup.StartAsync();
++        await Send(t, "S{10,1}");
++        Assert.Equal("true", sim.GetVar("running"));
++
++        Assert.True(await Wait.UntilAsync(() => { lock (events) return events.Any(e => e.Kind == LinkEventKind.Recovered); }));
++        Assert.Equal(TransportState.Open, t.State);
++        Assert.Equal("false", sim.GetVar("running")); // 재연결 = 장치 재시작
++    }
++
++    [Fact] // V8 처음 N번 Open 실패 → 감독자가 계속 시도해 연결 (지연은 가짜로 즉시)
++    public async Task FailOpen_Then_Connects_With_Policy_Delays()
++    {
++        var delays = new List<TimeSpan>();
++        var t = Gtec(new FaultOptions(FailOpenCount: 5));
++        await using var sup = new LinkSupervisor(t, ReconnectPolicy.Default, (d, _) => { lock (delays) delays.Add(d); return Task.CompletedTask; });
++        var events = new List<LinkEvent>();
++        sup.Event += (_, e) => { lock (events) events.Add(e); };
++
++        await sup.StartAsync(); // 1번째 실패 (예외 없음)
++        Assert.True(await Wait.UntilAsync(() => t.State == TransportState.Open));
++
++        lock (delays) Assert.Equal(new[] { 1, 2, 3, 5, 10 }.Select(s => TimeSpan.FromSeconds(s)), delays);
++        lock (events)
++        {
++            Assert.Equal(LinkEventKind.Faulted, events[0].Kind);
++            Assert.Equal(LinkEventKind.Connected, events[^1].Kind); // 한 번도 연결된 적 없음 → Connected
++            Assert.Equal(5, events.Count(e => e.Kind == LinkEventKind.Reconnecting));
++        }
++    }
++
++    [Fact] // V9 Stop 후에는 재연결하지 않음
++    public async Task Stop_Prevents_Reconnect()
++    {
++        var t = Gtec();
++        var sup = new LinkSupervisor(t, ReconnectPolicy.Default, (_, ct) => Task.Delay(10, ct));
++        await sup.StartAsync();
++        await sup.StopAsync();
++        Assert.Equal(TransportState.Closed, t.State);
++        t.ForceDisconnect();
++        await Task.Delay(100);
++        Assert.Equal(TransportState.Closed, t.State);
++        await sup.DisposeAsync();
++    }
++
++    [Fact]
++    public async Task Echo_And_Stream_Profiles()
++    {
++        await using var echo = new VirtualTransport(new ProfileSimulator(BuiltInProfiles.Get("GENERIC_ECHO")));
++        var ef = new FrameCollector(echo);
++        await echo.OpenAsync();
++        await Send(echo, "HELLO[01]");
++        Assert.True(await Wait.UntilAsync(() => ef.Frames.Count == 1));
++        Assert.Equal("HELLO\u0001", ef.Snapshot()[0]);
++
++        await using var stream = new VirtualTransport(new ProfileSimulator(BuiltInProfiles.Get("GENERIC_STREAM")));
++        var sf = new FrameCollector(stream);
++        await stream.OpenAsync();
++        Assert.True(await Wait.UntilAsync(() => sf.Frames.Count >= 3));
++        Assert.Equal(new[] { "{1}", "{2}", "{3}" }, sf.Snapshot().Take(3));
++    }
++}
+-- 
+2.43.0
+
