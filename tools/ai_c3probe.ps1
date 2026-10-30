@@ -23,7 +23,7 @@ Log "  (exit $c)"
 if ($c -ne 0) { Log 'C3PROBE-BUILD-FAIL'; exit 1 }
 
 Log ''; Log '===== 2. 실장비 (COM6 115200) — 안내가 나오면 케이블을 뽑았다가 다시 꽂아 주세요 ====='
-& dotnet run --project $prj -c Debug --no-build -- COM6 115200 45 2>&1 | ForEach-Object { Log ('  ' + $_) }
+& dotnet run --project $prj -c Debug --no-build -- COM6 115200 60 full 0 2>&1 | ForEach-Object { Log ('  ' + $_) }
 $probe = $LASTEXITCODE
 Log "  (exit $probe)"
 

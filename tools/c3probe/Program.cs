@@ -55,17 +55,24 @@ session.Values += (_, e) => { foreach (var v in e.Values) values.Enqueue(v); };
 session.Warning += (_, w) => { warnings.Enqueue(w); Log("WARN " + w); };
 session.UnhandledFrame += (_, f) => { Interlocked.Increment(ref unhandled); Log("UNHANDLED " + Encoding.ASCII.GetString(f.Body)); };
 session.StateChanged += (_, s) => Log($"SESSION {s}");
+// 원시 수신 기록 (프레임 규칙 {..}[CR][LF] 이 깨졌는지 확인용)
+long rawBytes = 0; var rawHead = new List<byte>(); object rawLock = new();
+transport.Received += (_, b) => { lock (rawLock) { rawBytes += b.Length; if (rawHead.Count < 160) rawHead.AddRange(b.Take(160 - rawHead.Count)); } };
+void RawReset() { lock (rawLock) { rawBytes = 0; rawHead.Clear(); } }
+string RawInfo() { lock (rawLock) return $"원시 {rawBytes} byte, 앞부분 '{JuProvider.Lib.Protocol.Expression.ProtocolExpression.ToDisplay(rawHead.ToArray())}'"; }
 
 async Task<bool> WaitFor(Func<bool> c, int ms) { var t = Stopwatch.StartNew(); while (t.ElapsedMilliseconds < ms) { if (c()) return true; await Task.Delay(50); } return c(); }
 
 async Task<int> Measure(string label, int ms)
 {
     while (values.TryDequeue(out _)) { }
+    RawReset();
     var start = await session.ExecuteAsync("GTEC0300");
     Check(start.Ok, $"[{label}] START S{{10,1}} ({start.Status})");
     await Task.Delay(ms);
     var got = values.ToArray();
     int frames = got.Length / 3;
+    Log($"[{label}] {RawInfo()}");
     var refs = got.Select(v => v.Data?.Key ?? "UNMAPPED").Distinct().OrderBy(x => x, StringComparer.Ordinal).ToArray();
     var q = got.GroupBy(v => v.Quality).Select(g => $"{g.Key}={g.Count()}");
     Log($"[{label}] 값 {got.Length}개(≈{frames} 프레임 / {ms} ms), 대상 {string.Join(",", refs)}, 품질 {string.Join(",", q)}");
@@ -83,13 +90,28 @@ async Task<int> Measure(string label, int ms)
     return frames;
 }
 
+// 연결·재연결 루틴 (사용자 지침 11:09): 측정 중인 장비는 S{10,0} 외 명령을 무시하므로 STOP 먼저 → 정상 루틴
+async Task Routine(string label)
+{
+    var stop0 = await session.ExecuteAsync("GTEC0301");
+    Check(stop0.Ok, $"[{label}] 루틴 1. STOP 먼저 ({stop0.Status})");
+    await Task.Delay(500);
+    var c = await session.ExecuteAsync("GTEC0001");
+    Log($"     [{label}] 장치확인 응답: {B(c)}");
+    Check(c.Ok, $"[{label}] 루틴 2. 장치확인 S{{10,3}} ({c.Status})");
+    var i = await session.ExecuteAsync("GTEC0002");
+    Log($"     [{label}] 센서정보 응답: {B(i)}");
+    Check(i.Ok, $"[{label}] 루틴 3. 센서정보 S{{20}} ({i.Status})");
+    Check((await session.ExecuteAsync("GTEC0100")).Ok, $"[{label}] 루틴 4. 모드 S{{11,1}}");
+}
+
 bool measuring = false;
 try
 {
     Log($"START supervisor {port} {baud}");
     await supervisor.StartAsync();
     await session.StartAsync();
-    Check(session.State == DeviceSessionState.Ready, "세션 Ready");
+    Check(await WaitFor(() => session.State == DeviceSessionState.Ready, 60000), $"세션 Ready (명령 간격 {gapMs} ms)");
 
     if (args.Length > 3 && args[3] == "gapseq")
     {
@@ -134,17 +156,7 @@ try
         throw new OperationCanceledException("initseq 종료");
     }
 
-    var check = await session.ExecuteAsync("GTEC0001");
-    Log($"     장치확인 응답: {B(check)}");
-    Check(check.Ok, $"장치확인 S{{10,3}} ({check.Status})");
-
-    var info = await session.ExecuteAsync("GTEC0002");
-    Log($"     센서정보 응답: {B(info)}");
-    Check(info.Ok, $"센서정보 S{{20}} ({info.Status})");
-
-    var mode = await session.ExecuteAsync("GTEC0100");
-    Check(mode.Ok, $"모드 S{{11,1}} ({mode.Status})");
-
+    await Routine("최초");
     measuring = true;
     await Measure("1차", 5000);
 
@@ -162,6 +174,7 @@ try
     measuring = false;
 
     // 케이블 분리·재연결
+    while (linkEvents.TryDequeue(out _)) { }
     Console.Beep();
     Log("==================================================");
     Log($">>> 지금 COM6 장비 USB 케이블을 뽑아 주세요 ({cableWaitSec}초 대기) <<<");
@@ -183,13 +196,10 @@ try
         Check(back, "자동 재연결 Recovered + 세션 Ready");
         if (back)
         {
-            await Task.Delay(1500);
-            var again = await session.ExecuteAsync("GTEC0001");
-            Log($"     재연결 후 장치확인: {B(again)}");
-            Check(again.Ok, $"재연결 후 장치확인 ({again.Status})");
-            Check((await session.ExecuteAsync("GTEC0100")).Ok, "재연결 후 모드 S{11,1}");
+            await Task.Delay(1000);
+            await Routine("재연결");
             measuring = true;
-            await Measure("재연결 후", 3000);
+            await Measure("재연결 후", 5000);
             measuring = false;
         }
     }
