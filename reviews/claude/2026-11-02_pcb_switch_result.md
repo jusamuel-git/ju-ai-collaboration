@@ -1,4 +1,4 @@
-# PC-B 개발 PC 전환 결과 (2026-11-02 21:30, JUSAMUEL) — PASS (도구 설치 4건 남음)
+# PC-B 개발 PC 전환 결과 (2026-11-02 21:30, JUSAMUEL) — PASS (환경변수 3개 설정 남음)
 
 도구: `tools/pcb/ai_pcb_switch2.ps1`. push·main 병합·배포·실제 DB 변경·삭제 없음.
 
@@ -41,3 +41,8 @@
 ## 5. GTEC 포트
 - PC-B 는 **COM3** (현재 연결 확인). `tools/ai_c4probe.ps1` 기본 포트 COM3(`-Port` 로 변경 가능), 포트 없으면 실행 전 중단. `tools/c4probe/Program.cs` 기본값·안내 문구도 포트 인자 사용
 - seed 의 장치 설명(`SDEV_GTEC01` "COM6 / 115200") 은 DB 데이터라 미변경 — 연결값 로컬 설정(devices.local.json)은 이후 단계
+
+## 6. 환경 재확인 (21:46, 사용자 정보 반영, `tools/pcb/ai_pcb_envvars.ps1`)
+- vcpkg: `C:\MyData\MyTool\vcpkg-master\vcpkg.exe` 있음, PATH 등록, 버전 2026-09-26 (PC-A 2026-07-27 보다 새것) → **설치 문제 아님**. 점검 스크립트가 PC-A 경로(`C:\MyData\MyTool\vcpkg`)만 찾아 FAIL 로 표시됨
+- `JU_WORKSPACE`·`VCPKG_ROOT`·`JU_TOMCAT_HOME`: User·Machine·현재 프로세스 **모두 미설정** (폴더는 있음). 설정 시 점검 PASS 예상
+- CMake 4.2.3·VS 18.10: 재설치 아님, 선택적 소폭 업데이트(빌드 5종 미사용)

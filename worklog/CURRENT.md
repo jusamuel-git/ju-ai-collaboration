@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자 | **PC-B 전환 완료 (11/02 21:30)** [결과](../reviews/claude/2026-11-02_pcb_switch_result.md) — autocrlf=true, PC-B 미커밋 작업 백업 브랜치·패치 보존, juprovider `feature/collect-c5`@854da5c·juproject `feature/user-role-filter`@f0d5467 (PC-A 동일), 빌드 5종·서버 34·Desktop 175·실서버 43/43 PASS, GTEC COM3. 남은 것: vcpkg 설치·CMake·VS 업데이트·환경변수(사용자). 다음: C5b 승인 대기 |
+| 사용자 | **PC-B 전환 완료 (11/02 21:30)** [결과](../reviews/claude/2026-11-02_pcb_switch_result.md) — autocrlf=true, PC-B 미커밋 작업 백업 브랜치·패치 보존, juprovider `feature/collect-c5`@854da5c·juproject `feature/user-role-filter`@f0d5467 (PC-A 동일), 빌드 5종·서버 34·Desktop 175·실서버 43/43 PASS, GTEC COM3. 남은 것: 사용자 환경변수 JU_WORKSPACE·VCPKG_ROOT(vcpkg-master)·JU_TOMCAT_HOME 설정(사용자), CMake·VS 소폭 업데이트는 선택. 다음: C5b 승인 대기 |
 | 사용자 | **PC-A 포맷 준비 완료 (11/02)** [인수인계](../reviews/claude/2026-11-02_pca_handover.md) — 로컬 전용 브랜치 9개 origin push(main 제외), 미커밋 없음. PC-B 에서 `feature/collect-c5` @ `854da5c` 부터 계속. 다음: C5b 승인 대기 |
 | 사용자 | **C5a PASS** [결과](../reviews/claude/2026-10-30_c5a_result.md) — `feature/collect-c5` @ `854da5c` = integration-1(14d1ab9) + collect-c4(66e9255) 로컬 merge, 충돌 2(해결), 서버 34/34·Desktop 175/175·실서버 회귀 43/43, DB 변경·push 없음. migration 순서 06→07→08 제안. 다음: C5b 승인 대기 |
 | ChatGPT | **과거 소스 ZIP 조사 구조 검토**: [reviews/claude/2026-10-30_legacy-zip_survey.md](../reviews/claude/2026-10-30_legacy-zip_survey.md) — `backup\juprovider-backup.zip`(10-16, 823파일) 1개. 기능 7개 영역 비교, 재사용 후보 5개(모두 참조 후 재작성), 미사용 항목, 결정 L-Q1~Q5. 과거 기능은 모두 동작 미검증. 조사만(코드·DB 변경 없음) |
