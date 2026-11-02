@@ -1,5 +1,5 @@
 ﻿// C4 실장비 회귀 확인용 임시 도구 (제품 저장소 밖).
-// 서버 내려받기 응답(seed 기준 JSON) + 내장 GTEC 수집 설정 → CollectionPlan → DeviceSession(초기화 루틴·명령 간격·시작 문자) + LinkSupervisor + COM6.
+// 서버 내려받기 응답(seed 기준 JSON) + 내장 GTEC 수집 설정 → CollectionPlan → DeviceSession(초기화 루틴·명령 간격·시작 문자) + LinkSupervisor + 직렬 포트(기본 COM3).
 // 루틴은 세션이 자동 실행(도구는 손대지 않음). 장비에는 중지·장치확인·센서정보·모드·시작만 보낸다.
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -11,7 +11,7 @@ using JuProvider.Lib.Protocol.Session;
 using JuProvider.Lib.Protocol.Sync;
 using JuProvider.Lib.Protocol.Transport;
 
-string port = args.Length > 0 ? args[0] : "COM6";
+string port = args.Length > 0 ? args[0] : "COM3";
 int baud = args.Length > 1 ? int.Parse(args[1]) : 115200;
 int cableWaitSec = args.Length > 2 ? int.Parse(args[2]) : 60;
 const string Dev = "SDEV_GTEC01";
@@ -85,7 +85,7 @@ try
     int initsBefore = inits.Count;
     Console.Beep();
     Log("==================================================");
-    Log($">>> 측정 중입니다. 지금 COM6 장비 USB 케이블을 뽑아 주세요 ({cableWaitSec}초 대기) <<<");
+    Log($">>> 측정 중입니다. 지금 {port} 장비 USB 케이블을 뽑아 주세요 ({cableWaitSec}초 대기) <<<");
     Log("==================================================");
     bool faulted = await WaitFor(() => session.State == DeviceSessionState.Suspended, cableWaitSec * 1000);
     if (!faulted) Log("SKIP 케이블 분리 감지 안 됨");
