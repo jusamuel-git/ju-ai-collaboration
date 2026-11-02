@@ -1,0 +1,4 @@
+database/README.md
+database/migration/08_collect_settings.sql
+database/migration/08_collect_settings_down.sql
+database/migration/08_collect_settings_check.sql

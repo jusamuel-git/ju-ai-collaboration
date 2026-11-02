@@ -1,12 +1,13 @@
 ﻿# C4 실서버 검증: feature/collect-c4 WAR + 테스트 DB(실제 DB 덤프 사본) 18081. 실제 DB는 mysqldump(읽기)만, 변경 검증은 테스트 DB의 테스트 데이터로.
 # 비밀 값(DB 비밀번호·JWT·Client Key·사용자 비밀번호)은 로그에 쓰지 않는다. 제품 저장소 변경 없음.
-param([switch]$Fix, [switch]$Merge)
+param([switch]$Fix, [switch]$Merge, [switch]$Mig08)
+if ($Mig08) { $Merge = $true }
 if ($Merge) { $Fix = $true }
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ws  = 'C:\MyData\MyDev\workspace'
 $src = Join-Path $ws 'ai_changes\c4srv'
-$log = Join-Path $ws ($(if ($Merge) {'ai_c5a_srv_{0}.log'} elseif ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
+$log = Join-Path $ws ($(if ($Mig08) {'ai_c5b_srv_{0}.log'} elseif ($Merge) {'ai_c5a_srv_{0}.log'} elseif ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
 $enc = New-Object System.Text.UTF8Encoding($false)
 New-Item -ItemType Directory -Force -Path $src | Out-Null
 [IO.File]::WriteAllText($log, '', $enc)
@@ -25,7 +26,7 @@ $b = (& git -C $jp rev-parse --abbrev-ref HEAD); $h = (& git -C $jp log -1 --for
 Log "  branch $b @ $h"
 $war = Join-Path $jp 'juprovider.backend\target\juprovider.war'
 if ($Fix) {
-    if ($b -ne $(if ($Merge) {'feature/collect-c5'} else {'feature/collect-c4'})) { Stop "예상 브랜치 아님: $b" }
+    if ($b -ne $(if ($Mig08) {'feature/collect-c5b'} elseif ($Merge) {'feature/collect-c5'} else {'feature/collect-c4'})) { Stop "예상 브랜치 아님: $b" }
     if (-not (Test-Path $war) -or (Get-Item $war).LastWriteTime -lt (Get-Date).AddMinutes(-30)) { Stop '방금 빌드한 WAR 없음' }
     $ct = (Get-Item $war).LastWriteTime
 } else {
@@ -53,6 +54,7 @@ cmd /c "`"$bin\mysqldump.exe`" -h localhost -u $($vars['JU_DB_USER']) --default-
 cmd /c "$base -e `"DROP DATABASE IF EXISTS $T; CREATE DATABASE $T CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`"" | Out-Null
 cmd /c "$base $T < `"$dump`""; Log ("  $T 적재 exit $LASTEXITCODE"); Remove-Item $dump -Force
 if ($Merge) { cmd /c "$base $T < `"$jp\database\migration\06_protocol_actions.sql`""; Log ("  06 적용(테스트 DB) exit $LASTEXITCODE") }
+if ($Mig08) { cmd /c "$base $T < `"$jp\database\migration\08_collect_settings.sql`"" | Out-Null; Log ("  08 적용(테스트 DB) exit $LASTEXITCODE") }
 
 Log ''; Log '===== 3. 서버 기동 (18081, 테스트 DB) ====='
 $java = Join-Path $env:JAVA_HOME 'bin\java.exe'

@@ -1,0 +1,14 @@
+feat(db): migration 08 collect settings, protocol roles and channel map (C5b)
+
+- 08_collect_settings.sql: ju_protocol_group FRAME_RULE/CMD_GAP_MS/INIT_ROUTINE/INIT_DELAY_MS,
+  ju_protocol PTL_ROLES/PTL_ACTION/EXPECT_RULE/IDEMPOTENT_YN, common codes PROL/PACT,
+  ju_data_channel_map (UK covers NULL PTL_CD, CHANNEL_KEY binary, FK device/data tag),
+  GTEC verified values for 7 protocols + 4 channel maps, backup tables for rollback,
+  ju_schema_version '08' only when 07 exists. Re-run safe; only empty (NULL) rows corrected.
+- 08_collect_settings_down.sql: restore previous values, drop columns/table/codes. Re-run safe.
+- 08_collect_settings_check.sql: read-only check.
+- database/README.md: 08 row and code table.
+Verified on a test DB copy only. Real DB not changed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
