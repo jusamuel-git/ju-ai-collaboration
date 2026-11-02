@@ -40,6 +40,7 @@
 | SYS-0+1 (juproject) | Claude 작업공간 stash (`feature/sys-core-schema`) | SYS-01에 필요한 부분 재사용 완료 |
 
 ## 최근 확인
+- 2026-11-02 21:22 PC-B 전환 1단계 점검: 브랜치·커밋 누락 없음, PC-B 로컬 변경 juprovider 40·juproject 36(보존 필요), vcpkg 없음·autocrlf 미설정 → [보고](../reviews/claude/2026-11-02_pcb_switch_check.md), 2단계 승인 대기
 - 2026-11-02 12:12 PC-A 포맷 대비: juprovider feature 브랜치 9개 push(9/9 확인, origin/main 불변), 미커밋·stash 없음
 - 2026-10-30 15:45 C5a merge `854da5c` (integration-1 + collect-c4), 회귀 43/43 PASS
 - 2026-10-30 15:25 C4b `66e9255` 405 처리, 실서버 31/31 PASS. C5 설계 검토안 업로드
