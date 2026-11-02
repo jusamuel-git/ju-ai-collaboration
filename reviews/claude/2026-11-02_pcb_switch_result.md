@@ -1,4 +1,4 @@
-# PC-B 개발 PC 전환 결과 (2026-11-02 21:30, JUSAMUEL) — PASS (환경변수 3개 설정 남음)
+# PC-B 개발 PC 전환 결과 (2026-11-02 21:30, JUSAMUEL) — PASS (환경 FAIL 0, 경로·버전 차이 WARN 8)
 
 도구: `tools/pcb/ai_pcb_switch2.ps1`. push·main 병합·배포·실제 DB 변경·삭제 없음.
 
@@ -46,3 +46,14 @@
 - vcpkg: `C:\MyData\MyTool\vcpkg-master\vcpkg.exe` 있음, PATH 등록, 버전 2026-09-26 (PC-A 2026-07-27 보다 새것) → **설치 문제 아님**. 점검 스크립트가 PC-A 경로(`C:\MyData\MyTool\vcpkg`)만 찾아 FAIL 로 표시됨
 - `JU_WORKSPACE`·`VCPKG_ROOT`·`JU_TOMCAT_HOME`: User·Machine·현재 프로세스 **모두 미설정** (폴더는 있음). 설정 시 점검 PASS 예상
 - CMake 4.2.3·VS 18.10: 재설치 아님, 선택적 소폭 업데이트(빌드 5종 미사용)
+
+## 7. 환경변수 설정 후 재점검 (21:49) — PASS 26 / WARN 8 / **FAIL 0**
+- 사용자 변수 설정 확인: `JU_WORKSPACE`=workspace, `VCPKG_ROOT`=`C:\MyData\MyTool\vcpkg-master`, `JU_TOMCAT_HOME`=tomcat 10.1.52 → JU_WORKSPACE·JU_TOMCAT_HOME PASS, vcpkg FAIL→WARN
+- 남은 WARN 8 (모두 동작 영향 없음, 위치·범위·버전 차이):
+  | 항목 | PC-B | PC-A 기준 |
+  |---|---|---|
+  | JDK 21.0.1 / Maven 3.9.11 경로 | `C:\MyData\MyTool\jdk…`, `…\MyTool\maven…` | `C:\MyData\MyDev\jdk…`, `…\MyDev\maven…` |
+  | JAVA_HOME·MAVEN_HOME 범위 | Machine | User |
+  | vcpkg 경로·버전 | `vcpkg-master`, 2026-09-26 | `vcpkg`, 2026-07-27 |
+  | VCPKG_ROOT 값 | vcpkg-master | `C:\MyData\MyTool\vcpkg` |
+  | CMake / Visual Studio | 4.2.3 / 18.10 | 4.4.3 / 18.11 |
