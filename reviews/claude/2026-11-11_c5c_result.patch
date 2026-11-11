@@ -1,6 +1,6 @@
-From b1c23e5d67232425e04ca6fda7bdd42a0743faed Mon Sep 17 00:00:00 2001
+From 6e744be9400e99f1ad145d7f2015519fbd3b97d5 Mon Sep 17 00:00:00 2001
 From: JU <jusamuel@gmail.com>
-Date: Wed, 11 Nov 2026 21:13:57 +0900
+Date: Wed, 11 Nov 2026 21:25:23 +0900
 Subject: [PATCH] feat(collect): protocol save validation, sync collect
  settings and data-map API (C5c)
 
@@ -2424,5 +2424,5 @@ index 447ab98..cd7d8a8 100644
 +
  </mapper>
 -- 
-2.43.0
+2.36.1.windows.1
 

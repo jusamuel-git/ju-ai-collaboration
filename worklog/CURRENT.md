@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자 | **C5c 구현 완료·commit 보류 (11/11 21:20)** [결과](../reviews/claude/2026-11-11_c5c_result.md) — PC-B `feature/collect-c5c`(c8474c6 기준, 작업 폴더 19파일) · 빌드 5종 PASS · 서버 57/57 · 실서버+C5c API 58/59. **Smart App Control(켜짐)이 로컬 빌드 DLL 차단 → Desktop 테스트 176개·6-1 실행 불가** (11/11 보안 업데이트 후). 결정 요청: SAC 끄기/코드 서명/다른 PC. 확인 요청 6건(§5) |
+| 사용자 | **C5c PASS (11/11 21:25)** [결과](../reviews/claude/2026-11-11_c5c_result.md) — PC-B `feature/collect-c5c` @ `6e744be` 로컬 commit(push 없음), 빌드 5종·서버 57/57·Desktop 176/176·실서버+C5c API 59/59, 실제 DB 무변경. Smart App Control 해제 후 재실행. 확인 요청 6건(§4). 다음: C5d 승인 대기 (GTEC COM3 연결 필요) |
 | 사용자 | **C5b PASS 52/52 (11/02 22:25)** [결과](../reviews/claude/2026-11-02_c5b_result.md) — `feature/collect-c5b` @ `c8474c6` 로컬 commit(push 없음), migration 08 up/down/재실행·보존·논리삭제·제약조건 테스트 DB 사본에서 검증, 실제 DB 무변경, 빌드 5종·실서버 43/43 PASS. 확인 요청: 설계 차이 5건(§4). 다음: C5c 승인 대기 |
 | 사용자 | **PC-B 전환 완료 (11/02 21:30)** [결과](../reviews/claude/2026-11-02_pcb_switch_result.md) — autocrlf=true, PC-B 미커밋 작업 백업 브랜치·패치 보존, juprovider `feature/collect-c5`@854da5c·juproject `feature/user-role-filter`@f0d5467 (PC-A 동일), 빌드 5종·서버 34·Desktop 175·실서버 43/43 PASS, GTEC COM3. 환경 재점검 FAIL 0 (WARN 8: 경로·범위·버전 차이, 동작 영향 없음). 다음: C5b 승인 대기 |
 | 사용자 | **PC-A 포맷 준비 완료 (11/02)** [인수인계](../reviews/claude/2026-11-02_pca_handover.md) — 로컬 전용 브랜치 9개 origin push(main 제외), 미커밋 없음. PC-B 에서 `feature/collect-c5` @ `854da5c` 부터 계속. 다음: C5b 승인 대기 |
@@ -46,7 +46,7 @@
 - 2026-11-02 21:36 PC-B 전환: 브랜치 복원·빌드·회귀 PASS, 환경 차이 4건(도구 설치) 사용자 조치 대기
 - 2026-11-02 21:22 PC-B 전환 1단계 점검: 브랜치·커밋 누락 없음, PC-B 로컬 변경 juprovider 40·juproject 36(보존 필요), vcpkg 없음·autocrlf 미설정 → [보고](../reviews/claude/2026-11-02_pcb_switch_check.md), 2단계 승인 대기
 - 2026-11-02 12:12 PC-A 포맷 대비: juprovider feature 브랜치 9개 push(9/9 확인, origin/main 불변), 미커밋·stash 없음
-- 2026-11-11 21:20 C5c 구현·서버 검증 PASS, Desktop 테스트 SAC 차단으로 commit 보류
+- 2026-11-11 21:25 C5c `6e744be` 로컬 commit, 59/59·176/176 PASS (SAC 해제 후)
 - 2026-11-02 22:25 C5b `c8474c6` migration 08 (테스트 DB만), 52/52 PASS
 - 2026-10-30 15:45 C5a merge `854da5c` (integration-1 + collect-c4), 회귀 43/43 PASS
 - 2026-10-30 15:25 C4b `66e9255` 405 처리, 실서버 31/31 PASS. C5 설계 검토안 업로드
