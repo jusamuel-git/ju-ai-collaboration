@@ -1,0 +1,1267 @@
+From 33a64947beebfa6056013735a107bc413f37ac57 Mon Sep 17 00:00:00 2001
+From: JU <jusamuel@gmail.com>
+Date: Wed, 11 Nov 2026 21:43:15 +0900
+Subject: [PATCH] feat(desktop): server-first collection plan and data-map
+ channel mapping (C5d)
+
+- CollectionPlanBuilder: priority server -> built-in (or given) profile -> default for frameRule,
+  cmdGapMs, initDelayMs, initRoutine, PTL_TYPE/roles (when server roles set), action, expect,
+  idempotent, tx, parse. Per-item source in CollectionPlan.Sources; missing or invalid server values
+  fall back with a warning (no exception).
+- Channel mapping from GET /api/core/sync/data-map (scale/offset, PTL_CD filter, unit/range from tag);
+  TAG_ID=CH<n> temporary mapping kept when the device has no map rows.
+- SyncModels: C5c fields (nullable, old server responses still read), DataChannelMapSync;
+  JuProviderApiClient.GetDataMapAsync; Rules/ExpectRule shared with the builder.
+- Tests: server-only plan equals built-in plan, virtual GTEC full cycle with server values only
+  (init/START/data/STOP/disconnect/reconnect), fallback cases, Java/.NET regex vectors,
+  server-side boundary tests (roles-less protocols, unchanged-field skip scope).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../Api/JuProviderApiClient.cs                |  26 ++
+ .../Rules/ExpectRule.cs                       |  57 +++
+ .../Sync/CollectionPlan.cs                    | 356 +++++++++++++++---
+ .../Sync/SyncModels.cs                        |  37 +-
+ .../RuleVectorTests.cs                        |  23 ++
+ .../ServerPlanTests.cs                        | 345 +++++++++++++++++
+ .../TestData/rule_vectors.json                | 127 +++++++
+ .../core/protocol/ProtocolRulesTest.java      |  25 ++
+ .../core/protocol/ProtocolServiceC5cTest.java |  45 +++
+ 9 files changed, 987 insertions(+), 54 deletions(-)
+ create mode 100644 desktop/lib/juprovider.lib.protocol/Rules/ExpectRule.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/ServerPlanTests.cs
+
+diff --git a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+index 42b6748..57f0879 100644
+--- a/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
++++ b/desktop/lib/juprovider.lib.data/Api/JuProviderApiClient.cs
+@@ -191,6 +191,32 @@ public sealed class JuProviderApiClient : IDisposable
+             ) ?? new SyncResult<DataTagSync>("", [], []);
+     }
+ 
++    /*
++     * Server -> Client (C5c/C5d)
++     * 장치 채널 → 논리 Data 매핑 (ju_data_channel_map). devCd 가 없으면 전체.
++     * 매핑이 없는 장치는 빈 목록 → CollectionPlanBuilder 가 TAG_ID=CH<n> 임시 변환을 쓴다.
++     */
++    public async Task<SyncResult<DataChannelMapSync>> GetDataMapAsync(
++        string? devCd = null,
++        CancellationToken cancellationToken = default
++    )
++    {
++        string path = string.IsNullOrWhiteSpace(devCd)
++            ? "api/core/sync/data-map"
++            : $"api/core/sync/data-map?devCd={Uri.EscapeDataString(devCd.Trim())}";
++
++        using HttpResponseMessage response =
++            await _httpClient.GetAsync(path, cancellationToken);
++
++        response.EnsureSuccessStatusCode();
++
++        return await response.Content
++            .ReadFromJsonAsync<SyncResult<DataChannelMapSync>>(
++                _jsonOptions,
++                cancellationToken
++            ) ?? new SyncResult<DataChannelMapSync>("", [], []);
++    }
++
+     /*
+      * User 로그인 (JU-1c)
+      * POST api/auth/login
+diff --git a/desktop/lib/juprovider.lib.protocol/Rules/ExpectRule.cs b/desktop/lib/juprovider.lib.protocol/Rules/ExpectRule.cs
+new file mode 100644
+index 0000000..15f3d90
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Rules/ExpectRule.cs
+@@ -0,0 +1,57 @@
++using System.Text.Json;
++using JuProvider.Lib.Protocol.Scheduling;
++
++namespace JuProvider.Lib.Protocol.Rules;
++
++/// <summary>
++/// 응답 판정 규칙 (C5d, 서버 ju_protocol.EXPECT_RULE): {"startsWith":".."} 또는 {"regex":".."} — 키 1개, 빈 값 불가.
++/// 서버(Java ProtocolRules.validateExpectRule)와 같은 형식. regex 는 .NET 으로 다시 컴파일한다 (Java·.NET 문법 차이는 공통 벡터로 확인).
++/// </summary>
++public static class ExpectRule
++{
++    /// <summary>해석 성공이면 true. 실패면 false + error (예외 없음)</summary>
++    public static bool TryRead(string? text, out ResponseMatcher? matcher, out string? error)
++    {
++        matcher = null;
++        error = null;
++        if (string.IsNullOrWhiteSpace(text))
++        {
++            error = "비어 있음";
++            return false;
++        }
++        try
++        {
++            using JsonDocument doc = JsonDocument.Parse(text);
++            JsonElement r = doc.RootElement;
++            if (r.ValueKind != JsonValueKind.Object)
++            {
++                error = "JSON 객체가 아님";
++                return false;
++            }
++            List<JsonProperty> props = r.EnumerateObject().ToList();
++            if (props.Count != 1 || props[0].Value.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(props[0].Value.GetString()))
++            {
++                error = "키 1개(startsWith 또는 regex)와 빈 값이 아닌 문자열이어야 함";
++                return false;
++            }
++            string v = props[0].Value.GetString()!;
++            switch (props[0].Name)
++            {
++                case "startsWith":
++                    matcher = ResponseMatcher.StartsWith(v);
++                    return true;
++                case "regex":
++                    matcher = ResponseMatcher.Regex(v);
++                    return true;
++                default:
++                    error = "알 수 없는 키 " + props[0].Name;
++                    return false;
++            }
++        }
++        catch (Exception ex) when (ex is JsonException or ArgumentException)
++        {
++            error = ex.Message;
++            return false;
++        }
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs b/desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs
+index c92241d..cb7d933 100644
+--- a/desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs
++++ b/desktop/lib/juprovider.lib.protocol/Sync/CollectionPlan.cs
+@@ -7,6 +7,25 @@ using JuProvider.Lib.Protocol.Transport;
+ 
+ namespace JuProvider.Lib.Protocol.Sync;
+ 
++/// <summary>설정 출처 (C5d)</summary>
++public static class PlanSource
++{
++    /// <summary>서버 내려받기 값 (ju_protocol_group·ju_protocol·ju_protocol_packet·ju_data_channel_map)</summary>
++    public const string Server = "server";
++
++    /// <summary>Desktop 내장 수집 설정 (BuiltInCollectionProfiles)</summary>
++    public const string BuiltIn = "builtin";
++
++    /// <summary>호출자가 넘긴 수집 설정</summary>
++    public const string Profile = "profile";
++
++    /// <summary>기본값 (설정 없음)</summary>
++    public const string Default = "default";
++
++    /// <summary>데이터 태그 TAG_ID=CH&lt;n&gt; 임시 변환</summary>
++    public const string LegacyTagId = "legacy-tagid";
++}
++
+ /// <summary>DeviceSession 생성에 필요한 것 전부 (서버 정의 + 수집 설정 결합 결과)</summary>
+ public sealed record CollectionPlan(
+     string DevCd,
+@@ -18,6 +37,12 @@ public sealed record CollectionPlan(
+     IReadOnlyList<ChannelMapEntry> MapEntries,
+     IReadOnlyList<string> Warnings)
+ {
++    /// <summary>
++    /// 항목별 설정 출처 (C5d). 키: frame, cmdGapMs, initDelayMs, initRoutine, map, {PTL_CD}.pattern|roles|action|expect|idempotent|tx|parse.
++    /// 값: <see cref="PlanSource"/>.
++    /// </summary>
++    public IReadOnlyDictionary<string, string> Sources { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
++
+     public IDataMapper CreateMapper() => new DataMapper(MapEntries);
+ 
+     public DeviceSession CreateSession(ITransport transport) =>
+@@ -25,28 +50,87 @@ public sealed record CollectionPlan(
+ }
+ 
+ /// <summary>
+-/// 서버 내려받기(ProtocolGroupSync·DataTagSync) + 그룹별 CollectionProfile → CollectionPlan (C4).
++/// 서버 내려받기(ProtocolGroupSync·DataTagSync·DataChannelMapSync) + 수집 설정 → CollectionPlan.
++/// C5d 우선순위: <b>서버 설정 → 내장(또는 지정) 수집 설정 → 기본값</b>. 항목별 출처는 <see cref="CollectionPlan.Sources"/>,
++/// 서버 값 누락·오류로 다음 단계로 넘어간 경우는 <see cref="CollectionPlan.Warnings"/> 에 남긴다. 서버 값 오류는 예외가 아니라 경고 + 대체값.
+ /// <list type="bullet">
+-/// <item>프로토콜 목록은 서버가 기준. 수집 설정에만 있는 PTL_CD 는 경고 후 무시</item>
+-/// <item>송신: 설정 tx → TX 패킷 PACKET_EXPR → PTL_VAL</item>
+-/// <item>교환 방식: 설정 pattern → PTL_TYPE(PROT 코드)</item>
+-/// <item>해석 규칙: 설정 parse → RX 패킷 PARSE_RULE(JSON 만, 그 외는 경고 후 무시)</item>
+-/// <item>타임아웃: 설정 → 그룹 TIMEOUT_MS, 재시도: 그룹 RETRY_CNT (Idempotent 명령만 적용됨)</item>
+-/// <item>매핑: 장치의 데이터 태그 TAG_ID=CH&lt;n&gt; 임시 변환 (매핑 테이블은 C5)</item>
++/// <item>그룹: frameRule(JSON 이 맞으면) / cmdGapMs·initDelayMs(서버 그룹 수집 설정이 있을 때) / initRoutine(서버 목록이 있을 때)</item>
++/// <item>서버 그룹 수집 설정 있음 = frameRule 또는 initRoutine 이 있거나 cmdGapMs &gt; 0 (DB 기본값 0·500 만 있으면 미설정)</item>
++/// <item>프로토콜: 서버 roles 가 있으면 "서버 설정됨" → PTL_TYPE·roles 서버 값. 없으면(미설정·과거 데이터) 내장 보정 → PTL_TYPE</item>
++/// <item>action·expect·idempotent: 서버 값 → 내장 보정 → 기본(None·없음·null)</item>
++/// <item>송신: TX 패킷 PACKET_EXPR → PTL_VAL → 내장 tx. 해석: RX 패킷 PARSE_RULE(JSON) → 내장 parse</item>
++/// <item>타임아웃: 내장 → 그룹 TIMEOUT_MS, 재시도: 그룹 RETRY_CNT (Idempotent 명령만 적용됨)</item>
++/// <item>매핑: data-map 행이 있으면 그것 → 없으면 데이터 태그 TAG_ID=CH&lt;n&gt; 임시 변환</item>
+ /// </list>
+ /// </summary>
+ public static class CollectionPlanBuilder
+ {
+-    public static CollectionPlan Build(string devCd, ProtocolGroupSync group, IEnumerable<DataTagSync> tags, CollectionProfile? profile = null)
++    public static CollectionPlan Build(
++        string devCd,
++        ProtocolGroupSync group,
++        IEnumerable<DataTagSync> tags,
++        CollectionProfile? profile = null,
++        IEnumerable<DataChannelMapSync>? dataMap = null)
+     {
+         ArgumentException.ThrowIfNullOrEmpty(devCd);
+         ArgumentNullException.ThrowIfNull(group);
+         ArgumentNullException.ThrowIfNull(tags);
+-        profile ??= BuiltInCollectionProfiles.Get(group.PtlGrpCd) ?? CollectionProfile.Empty(group.PtlGrpCd);
++
++        string fallback;
++        if (profile is not null) fallback = PlanSource.Profile;
++        else if (BuiltInCollectionProfiles.Get(group.PtlGrpCd) is { } builtIn)
++        {
++            profile = builtIn;
++            fallback = PlanSource.BuiltIn;
++        }
++        else
++        {
++            profile = CollectionProfile.Empty(group.PtlGrpCd);
++            fallback = PlanSource.Default;
++        }
+         if (profile.PtlGrpCd != group.PtlGrpCd)
+             throw new ArgumentException($"수집 설정 그룹({profile.PtlGrpCd})과 서버 그룹({group.PtlGrpCd})이 다름", nameof(profile));
+ 
+         var warnings = new List<string>();
++        var sources = new Dictionary<string, string>(StringComparer.Ordinal);
++
++        // ----- 그룹 수집 설정 -----
++        bool serverGroup = !string.IsNullOrWhiteSpace(group.FrameRule) || (group.InitRoutine?.Count ?? 0) > 0 || (group.CmdGapMs ?? 0) > 0;
++        if (!serverGroup && fallback != PlanSource.Default)
++            warnings.Add($"그룹 {group.PtlGrpCd}: 서버 수집 설정 없음 → {fallback} 설정 사용");
++
++        FrameRule frame = profile.Frame;
++        sources["frame"] = fallback;
++        if (!string.IsNullOrWhiteSpace(group.FrameRule))
++        {
++            try
++            {
++                frame = RuleReader.ReadFrameRule(group.FrameRule) ?? profile.Frame;
++                sources["frame"] = PlanSource.Server;
++            }
++            catch (RuleFormatException ex)
++            {
++                warnings.Add($"그룹 {group.PtlGrpCd}: 서버 FRAME_RULE 오류 → {fallback} 사용 ({ex.Message})");
++            }
++        }
++
++        int gap = profile.InterCommandGapMs;
++        sources["cmdGapMs"] = fallback;
++        if (serverGroup && group.CmdGapMs is int g)
++        {
++            if (g >= 0) { gap = g; sources["cmdGapMs"] = PlanSource.Server; }
++            else warnings.Add($"그룹 {group.PtlGrpCd}: 서버 CMD_GAP_MS {g} 음수 → {fallback} 사용");
++        }
++
++        int delay = profile.InitDelayMs;
++        sources["initDelayMs"] = fallback;
++        if (serverGroup && group.InitDelayMs is int d)
++        {
++            if (d >= 0) { delay = d; sources["initDelayMs"] = PlanSource.Server; }
++            else warnings.Add($"그룹 {group.PtlGrpCd}: 서버 INIT_DELAY_MS {d} 음수 → {fallback} 사용");
++        }
++
++        // ----- 프로토콜 -----
+         var protocols = new List<ProtocolDefinition>();
+         var known = new HashSet<string>(StringComparer.Ordinal);
+ 
+@@ -54,92 +138,264 @@ public static class CollectionPlanBuilder
+         {
+             known.Add(p.PtlCd);
+             profile.Protocols.TryGetValue(p.PtlCd, out ProtocolOverlay? o);
++            string ofb = o is null ? PlanSource.Default : fallback;
+ 
++            ProtocolRole serverRoles = ReadRoles(p, warnings);
++            bool serverProtocol = serverRoles != ProtocolRole.None;
++            if (!serverProtocol && o is not null)
++                warnings.Add($"{p.PtlCd}: 서버 역할 미설정 → {fallback} 설정 사용");
++
++            // 교환 방식
+             ExchangePattern pattern;
+-            if (o?.Pattern is { } op) pattern = op;
++            string patternSource;
++            if (serverProtocol && TryPattern(p.PtlType, out ExchangePattern sp))
++            {
++                pattern = sp;
++                patternSource = PlanSource.Server;
++            }
++            else if (o?.Pattern is { } op)
++            {
++                if (serverProtocol) warnings.Add($"{p.PtlCd}: 서버 PTL_TYPE '{p.PtlType}' 해석 불가 → {fallback} 사용");
++                pattern = op;
++                patternSource = fallback;
++            }
++            else if (TryPattern(p.PtlType, out ExchangePattern tp))
++            {
++                pattern = tp;
++                patternSource = PlanSource.Server;
++            }
+             else
+             {
+-                try { pattern = ProtocolModel.FromPtlType(p.PtlType); }
+-                catch (ArgumentException)
+-                {
+-                    warnings.Add($"{p.PtlCd}: PTL_TYPE '{p.PtlType}' 해석 불가 → 제외");
+-                    continue;
+-                }
++                warnings.Add($"{p.PtlCd}: PTL_TYPE '{p.PtlType}' 해석 불가 → 제외");
++                continue;
+             }
+ 
+-            string? tx = pattern == ExchangePattern.RxStream ? null : FirstNonEmpty(
+-                o?.Tx,
++            // 송신
++            string? serverTx = FirstNonEmpty(
+                 (p.Packets ?? []).Where(k => string.Equals(k.Direction, "TX", StringComparison.OrdinalIgnoreCase))
+                     .OrderBy(k => k.PacketSeq).Select(k => k.PacketExpr).FirstOrDefault(x => !string.IsNullOrEmpty(x)),
+                 p.PtlVal);
+-            if (pattern != ExchangePattern.RxStream && tx is null)
++            string? tx = null;
++            if (pattern != ExchangePattern.RxStream)
+             {
+-                warnings.Add($"{p.PtlCd}: 송신 표현식 없음 → 제외");
+-                continue;
++                tx = serverTx ?? o?.Tx;
++                if (tx is null)
++                {
++                    warnings.Add($"{p.PtlCd}: 송신 표현식 없음 → 제외");
++                    continue;
++                }
++                sources[p.PtlCd + ".tx"] = serverTx is not null ? PlanSource.Server : fallback;
+             }
+ 
+-            ParseRule? parse = o?.Parse;
+-            if (parse is null)
++            // 해석 규칙
++            ParseRule? parse = null;
++            string? parseSource = null;
++            string? ruleText = (p.Packets ?? []).Where(k => string.Equals(k.Direction, "RX", StringComparison.OrdinalIgnoreCase))
++                .OrderBy(k => k.PacketSeq).Select(k => k.ParseRule).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
++            if (ruleText is not null)
+             {
+-                string? text = (p.Packets ?? []).Where(k => string.Equals(k.Direction, "RX", StringComparison.OrdinalIgnoreCase))
+-                    .OrderBy(k => k.PacketSeq).Select(k => k.ParseRule).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+-                if (text is not null)
++                if (ruleText.TrimStart().StartsWith('{'))
+                 {
+-                    if (text.TrimStart().StartsWith('{'))
+-                    {
+-                        try { parse = RuleReader.ReadParseRule(text); }
+-                        catch (RuleFormatException ex) { warnings.Add($"{p.PtlCd}: PARSE_RULE 오류 → 무시 ({ex.Message})"); }
+-                    }
+-                    else warnings.Add($"{p.PtlCd}: PARSE_RULE 이 JSON 규칙이 아님 → 무시");
++                    try { parse = RuleReader.ReadParseRule(ruleText); parseSource = PlanSource.Server; }
++                    catch (RuleFormatException ex) { warnings.Add($"{p.PtlCd}: PARSE_RULE 오류 → 무시 ({ex.Message})"); }
+                 }
++                else warnings.Add($"{p.PtlCd}: PARSE_RULE 이 JSON 규칙이 아님 → 무시");
+             }
++            if (parse is null && o?.Parse is { } opr)
++            {
++                parse = opr;
++                parseSource = fallback;
++            }
++            if (parseSource is not null) sources[p.PtlCd + ".parse"] = parseSource;
+ 
+             if (pattern == ExchangePattern.RxStream && parse is null)
+                 warnings.Add($"{p.PtlCd}: RX_STREAM 인데 해석 규칙 없음 → 수신만");
+ 
+-            if (o is null && p.PtlType == "PROT0000")
+-                warnings.Add($"{p.PtlCd}: 수집 설정 없음, PTL_TYPE POLLING 그대로 사용");
++            if (!serverProtocol && o is null && p.PtlType == "PROT0000")
++                warnings.Add($"{p.PtlCd}: 서버 역할·수집 설정 없음, PTL_TYPE POLLING 그대로 사용");
++
++            // 역할
++            ProtocolRole roles;
++            if (serverProtocol) { roles = serverRoles; sources[p.PtlCd + ".roles"] = PlanSource.Server; }
++            else if (o?.Roles is { } orl) { roles = orl; sources[p.PtlCd + ".roles"] = fallback; }
++            else
++            {
++                roles = pattern == ExchangePattern.RxStream ? ProtocolRole.Data : ProtocolRole.Info;
++                sources[p.PtlCd + ".roles"] = PlanSource.Default;
++            }
++
++            // 실험 동작
++            CommandAction action = CommandAction.None;
++            sources[p.PtlCd + ".action"] = PlanSource.Default;
++            if (TryAction(p, warnings, out CommandAction sa)) { action = sa; sources[p.PtlCd + ".action"] = PlanSource.Server; }
++            else if (o?.Action is { } oa) { action = oa; sources[p.PtlCd + ".action"] = ofb; }
++
++            // 응답 판정
++            ResponseMatcher? expect = null;
++            if (TryExpect(p, warnings, out ResponseMatcher? se)) { expect = se; sources[p.PtlCd + ".expect"] = PlanSource.Server; }
++            else if (o?.Expect is { } oe) { expect = oe; sources[p.PtlCd + ".expect"] = ofb; }
++
++            // 멱등 (명령별 명시값, 없으면 Scheduler 기본 규칙)
++            bool? idempotent = null;
++            if (p.Idempotent is bool si) { idempotent = si; sources[p.PtlCd + ".idempotent"] = PlanSource.Server; }
++            else if (o?.Idempotent is bool oi) { idempotent = oi; sources[p.PtlCd + ".idempotent"] = ofb; }
++
++            sources[p.PtlCd + ".pattern"] = patternSource;
+ 
+             protocols.Add(new ProtocolDefinition
+             {
+                 PtlCd = p.PtlCd,
+                 Pattern = pattern,
+-                Roles = o?.Roles ?? (pattern == ExchangePattern.RxStream ? ProtocolRole.Data : ProtocolRole.Info),
+-                Action = o?.Action ?? CommandAction.None,
++                Roles = roles,
++                Action = action,
+                 Tx = tx,
+-                Expect = o?.Expect,
++                Expect = expect,
+                 Parse = parse,
+                 TimeoutMs = o?.TimeoutMs ?? group.TimeoutMs,
+                 RetryCount = Math.Max(0, group.RetryCnt),
+-                Idempotent = o?.Idempotent
++                Idempotent = idempotent
+             });
+         }
+ 
+         foreach (string extra in profile.Protocols.Keys.Where(k => !known.Contains(k)).OrderBy(k => k, StringComparer.Ordinal))
+             warnings.Add($"{extra}: 수집 설정에만 있음(서버 정의 없음) → 무시");
+ 
++        // ----- 초기화 루틴 -----
++        IReadOnlyList<string> steps = profile.InitRoutine;
++        sources["initRoutine"] = fallback;
++        if ((group.InitRoutine?.Count ?? 0) > 0)
++        {
++            steps = group.InitRoutine!;
++            sources["initRoutine"] = PlanSource.Server;
++        }
+         var defined = protocols.ToDictionary(x => x.PtlCd, StringComparer.Ordinal);
+         var routine = new List<string>();
+-        foreach (string step in profile.InitRoutine)
++        foreach (string step in steps)
+         {
+-            if (defined.TryGetValue(step, out ProtocolDefinition? d) && d.Pattern != ExchangePattern.RxStream) routine.Add(step);
++            if (defined.TryGetValue(step, out ProtocolDefinition? def) && def.Pattern != ExchangePattern.RxStream) routine.Add(step);
+             else warnings.Add($"초기화 루틴 {step}: 사용할 수 있는 프로토콜 없음 → 제외");
+         }
+ 
+-        var tagWarnings = new List<string>();
+-        IReadOnlyList<ChannelMapEntry> map = LegacyTagIdMapping.ToEntries(
+-            tags.Where(t => t.DevCd == devCd)
+-                .Select(t => new LegacyDataTag(t.DevCd, t.DatGrCd, t.DatCd, t.DatIdx, t.TagId, NullIfEmpty(t.DatUnit),
+-                    (double?)t.DatMin, (double?)t.DatMax)),
+-            tagWarnings);
+-        warnings.AddRange(tagWarnings);
++        // ----- 채널 매핑 -----
++        IReadOnlyList<ChannelMapEntry> map = BuildMap(devCd, tags, dataMap, warnings, out string mapSource);
++        sources["map"] = mapSource;
+ 
+         var scheduler = new SchedulerOptions(
+             DefaultTimeoutMs: group.TimeoutMs > 0 ? group.TimeoutMs : 1000,
+-            InterCommandGapMs: profile.InterCommandGapMs);
+-        var session = new DeviceSessionOptions(routine, profile.InitDelayMs);
++            InterCommandGapMs: gap);
++        var session = new DeviceSessionOptions(routine, delay);
++
++        return new CollectionPlan(devCd, group.PtlGrpCd, frame, protocols, scheduler, session, map, warnings)
++        {
++            Sources = sources
++        };
++    }
++
++    // ----- 서버 값 해석 (오류는 경고 + 대체값) -----
++
++    private static ProtocolRole ReadRoles(ProtocolSync p, List<string> warnings)
++    {
++        ProtocolRole acc = ProtocolRole.None;
++        foreach (string r in p.Roles ?? [])
++        {
++            switch ((r ?? "").Trim().ToUpperInvariant())
++            {
++                case "INFO": acc |= ProtocolRole.Info; break;
++                case "CONTROL": acc |= ProtocolRole.Control; break;
++                case "DATA": acc |= ProtocolRole.Data; break;
++                default: warnings.Add($"{p.PtlCd}: 서버 역할 '{r}' 알 수 없음 → 무시"); break;
++            }
++        }
++        return acc;
++    }
++
++    private static bool TryPattern(string? ptlType, out ExchangePattern pattern)
++    {
++        try
++        {
++            pattern = ProtocolModel.FromPtlType(ptlType);
++            return true;
++        }
++        catch (ArgumentException)
++        {
++            pattern = default;
++            return false;
++        }
++    }
++
++    private static bool TryAction(ProtocolSync p, List<string> warnings, out CommandAction action)
++    {
++        action = CommandAction.None;
++        if (string.IsNullOrWhiteSpace(p.Action)) return false;
++        switch (p.Action.Trim().ToUpperInvariant())
++        {
++            case "NONE": action = CommandAction.None; return true;
++            case "START": action = CommandAction.Start; return true;
++            case "PAUSE": action = CommandAction.Pause; return true;
++            case "STOP": action = CommandAction.Stop; return true;
++            default:
++                warnings.Add($"{p.PtlCd}: 서버 동작 '{p.Action}' 알 수 없음 → 무시");
++                return false;
++        }
++    }
++
++    /// <summary>서버 EXPECT_RULE (<see cref="ExpectRule"/>). 오류면 경고 후 false</summary>
++    private static bool TryExpect(ProtocolSync p, List<string> warnings, out ResponseMatcher? matcher)
++    {
++        matcher = null;
++        if (string.IsNullOrWhiteSpace(p.Expect)) return false;
++        if (ExpectRule.TryRead(p.Expect, out matcher, out string? error)) return true;
++        warnings.Add($"{p.PtlCd}: 서버 EXPECT_RULE 오류 → 무시 ({error})");
++        return false;
++    }
++
++    private static IReadOnlyList<ChannelMapEntry> BuildMap(
++        string devCd,
++        IEnumerable<DataTagSync> tags,
++        IEnumerable<DataChannelMapSync>? dataMap,
++        List<string> warnings,
++        out string source)
++    {
++        List<DataTagSync> devTags = tags.Where(t => t.DevCd == devCd).ToList();
++        List<DataChannelMapSync> rows = (dataMap ?? []).Where(m => m.DevCd == devCd).ToList();
++
++        if (rows.Count > 0)
++        {
++            source = PlanSource.Server;
++            var byKey = devTags.GroupBy(t => (t.DatGrCd, t.DatCd, t.DatIdx)).ToDictionary(x => x.Key, x => x.First());
++            var entries = new List<ChannelMapEntry>();
++            foreach (DataChannelMapSync m in rows.OrderBy(m => m.SortOrd).ThenBy(m => m.ChannelKey, StringComparer.Ordinal))
++            {
++                if (string.IsNullOrEmpty(m.ChannelKey) || string.IsNullOrEmpty(m.DatGrCd) || string.IsNullOrEmpty(m.DatCd))
++                {
++                    warnings.Add($"data-map 행 불완전 → 제외 ({m.ChannelKey}→{m.DatGrCd}/{m.DatCd}/{m.DatIdx})");
++                    continue;
++                }
++                byKey.TryGetValue((m.DatGrCd, m.DatCd, m.DatIdx), out DataTagSync? tag);
++                if (tag is null) warnings.Add($"data-map {m.ChannelKey}→{m.DatGrCd}/{m.DatCd}/{m.DatIdx}: 장치 데이터 태그에 없음 → 단위·범위 없이 사용");
++                bool identity = m.Scale == 1 && m.Offset == 0;
++                entries.Add(new ChannelMapEntry(
++                    devCd,
++                    m.ChannelKey,
++                    new LogicalDataRef(m.DatGrCd, m.DatCd, m.DatIdx),
++                    string.IsNullOrEmpty(m.PtlCd) ? null : m.PtlCd,
++                    identity ? null : new ValueTransform(m.Scale, m.Offset),
++                    NullIfEmpty(tag?.DatUnit),
++                    (double?)tag?.DatMin,
++                    (double?)tag?.DatMax));
++            }
++            return entries;
++        }
+ 
+-        return new CollectionPlan(devCd, group.PtlGrpCd, profile.Frame, protocols, scheduler, session, map, warnings);
++        source = PlanSource.LegacyTagId;
++        if (devTags.Count > 0) warnings.Add($"장치 {devCd}: 서버 채널 매핑(data-map) 없음 → TAG_ID=CH<n> 임시 변환");
++        var tagWarnings = new List<string>();
++        IReadOnlyList<ChannelMapEntry> legacy = LegacyTagIdMapping.ToEntries(
++            devTags.Select(t => new LegacyDataTag(t.DevCd, t.DatGrCd, t.DatCd, t.DatIdx, t.TagId, NullIfEmpty(t.DatUnit),
++                (double?)t.DatMin, (double?)t.DatMax)),
++            tagWarnings);
++        warnings.AddRange(tagWarnings);
++        return legacy;
+     }
+ 
+     private static string? FirstNonEmpty(params string?[] values) => values.FirstOrDefault(v => !string.IsNullOrEmpty(v));
+diff --git a/desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs b/desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs
+index bac22b1..151ddef 100644
+--- a/desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs
++++ b/desktop/lib/juprovider.lib.protocol/Sync/SyncModels.cs
+@@ -6,7 +6,10 @@ namespace JuProvider.Lib.Protocol.Sync;
+ /// </summary>
+ public sealed record SyncResult<T>(string Revision, IReadOnlyList<T> Items, IReadOnlyList<string> Removed);
+ 
+-/// <summary>GET /api/core/sync/protocols — ju_protocol_group + detail</summary>
++/// <summary>
++/// GET /api/core/sync/protocols — ju_protocol_group + detail.
++/// C5c 수집 설정(FrameRule JSON v1 원문, CmdGapMs, InitRoutine, InitDelayMs)은 C5c 이전 서버 응답에 없으므로 null 허용.
++/// </summary>
+ public sealed record ProtocolGroupSync(
+     string PtlGrpCd,
+     string? PtlGrpNm,
+@@ -14,9 +17,16 @@ public sealed record ProtocolGroupSync(
+     int TimeoutMs,
+     int RetryCnt,
+     int SortOrd,
+-    IReadOnlyList<ProtocolSync> Protocols);
++    IReadOnlyList<ProtocolSync> Protocols,
++    string? FrameRule = null,
++    int? CmdGapMs = null,
++    IReadOnlyList<string>? InitRoutine = null,
++    int? InitDelayMs = null);
+ 
+-/// <summary>ju_protocol + detail</summary>
++/// <summary>
++/// ju_protocol + detail.
++/// C5c: Roles(INFO/CONTROL/DATA, 미설정이면 빈 목록), Action(NONE/START/PAUSE/STOP), Expect(응답 판정 JSON 원문), Idempotent(명시값).
++/// </summary>
+ public sealed record ProtocolSync(
+     string PtlCd,
+     string? PtlType,
+@@ -24,7 +34,11 @@ public sealed record ProtocolSync(
+     string? PtlVal,
+     string? PtlNm,
+     string? PtlDesc,
+-    IReadOnlyList<ProtocolPacketSync> Packets);
++    IReadOnlyList<ProtocolPacketSync> Packets,
++    IReadOnlyList<string>? Roles = null,
++    string? Action = null,
++    string? Expect = null,
++    bool? Idempotent = null);
+ 
+ /// <summary>ju_protocol_packet</summary>
+ public sealed record ProtocolPacketSync(
+@@ -51,3 +65,18 @@ public sealed record DataTagSync(
+     decimal? DatMin,
+     decimal? DatMax,
+     int SortOrd);
++
++/// <summary>
++/// GET /api/core/sync/data-map?devCd= (C5c) — ju_data_channel_map. 값 환산: value × Scale + Offset.
++/// PtlCd 가 null 이면 모든 프로토콜에 적용. 매핑이 없는 장치는 TAG_ID=CH&lt;n&gt; 임시 변환을 쓴다.
++/// </summary>
++public sealed record DataChannelMapSync(
++    string DevCd,
++    string ChannelKey,
++    string? PtlCd,
++    string DatGrCd,
++    string DatCd,
++    int DatIdx,
++    double Scale = 1,
++    double Offset = 0,
++    int SortOrd = 0);
+diff --git a/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs b/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+index 9d4e9ca..a0887bf 100644
+--- a/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
++++ b/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+@@ -39,4 +39,27 @@ public class RuleVectorTests
+               + Verify(root.GetProperty("expression"), "expr", s => ProtocolExpression.ToBytes(s));
+         Assert.True(n >= 40, $"벡터 수 {n}");
+     }
++
++    /// <summary>C5d: 응답 판정 regex — .NET 판정이 벡터의 dotnet 값과 같고, 일치 결과는 Java 와 같아야 한다</summary>
++    [Fact]
++    public void Expect_And_Match_Vectors_Match_Server()
++    {
++        JsonElement root = Vectors();
++        int n = 0;
++        foreach (JsonElement v in root.GetProperty("expect").EnumerateArray())
++        {
++            string rule = v.GetProperty("rule").GetString()!;
++            bool ok = ExpectRule.TryRead(rule, out _, out string? error);
++            Assert.True(ok == v.GetProperty("dotnet").GetBoolean(), $"expect '{rule}': 기대 {v.GetProperty("dotnet").GetBoolean()}, 실제 {ok} {error}");
++            n++;
++        }
++        foreach (JsonElement v in root.GetProperty("match").EnumerateArray())
++        {
++            string regex = v.GetProperty("regex").GetString()!, input = v.GetProperty("input").GetString()!;
++            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(input, regex, System.Text.RegularExpressions.RegexOptions.CultureInvariant) == v.GetProperty("match").GetBoolean(),
++                $"match '{regex}' / '{input}'");
++            n++;
++        }
++        Assert.True(n >= 20, $"벡터 수 {n}");
++    }
+ }
+diff --git a/desktop/tests/juprovider.tests.protocol/ServerPlanTests.cs b/desktop/tests/juprovider.tests.protocol/ServerPlanTests.cs
+new file mode 100644
+index 0000000..090cf08
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/ServerPlanTests.cs
+@@ -0,0 +1,345 @@
++using System.Collections.Concurrent;
++using System.Text;
++using System.Text.Json;
++using JuProvider.Lib.Protocol.Framing;
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Parsing;
++using JuProvider.Lib.Protocol.Rules;
++using JuProvider.Lib.Protocol.Scheduling;
++using JuProvider.Lib.Protocol.Session;
++using JuProvider.Lib.Protocol.Sync;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>
++/// C5d: 서버 설정 우선 (서버 → 내장 → 기본), 출처·누락 경고, data-map 매핑, 서버 값 오류 시 안전한 대체.
++/// 서버 JSON 은 C5c 서버 + migration 08 적용 DB 의 GET /api/core/sync/protocols/GTEC · data-map 응답 형태.
++/// </summary>
++public class ServerPlanTests
++{
++    private const string Dev = "SDEV_GTEC01";
++
++    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
++
++    internal const string ServerProtocolsJson = """
++    { "revision": "r2", "removed": [], "items": [ {
++        "ptlGrpCd": "GTEC", "ptlGrpNm": "그린테크", "pollingIntval": 1000, "timeoutMs": 3000, "retryCnt": 3, "sortOrd": 0,
++        "frameRule": "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}",
++        "cmdGapMs": 200, "initRoutine": ["GTEC0301","GTEC0001","GTEC0002","GTEC0100"], "initDelayMs": 500,
++        "protocols": [
++          { "ptlCd": "GTEC0000", "ptlType": "PROT0003", "ptlVal": "S{TEST}[CR][LF]", "ptlNm": "장치확인(가상)",
++            "roles": ["INFO"], "action": null, "expect": "{\"startsWith\":\"{OK\"}", "idempotent": null,
++            "packets": [
++              { "packetSeq": 1, "direction": "TX", "packetExpr": "S{TEST}[CR][LF]", "parseRule": "", "dataCount": 0 },
++              { "packetSeq": 2, "direction": "RX", "packetExpr": "{OK}[CR][LF]", "parseRule": "패킷길이|STX DLE|ETX|ETX DLE", "dataCount": 0 } ] },
++          { "ptlCd": "GTEC0001", "ptlType": "PROT0003", "ptlVal": "S{10,3}", "roles": ["INFO"], "action": null,
++            "expect": "{\"regex\":\"^[{][A-Za-z]\"}", "idempotent": null,
++            "packets": [ { "packetSeq": 1, "direction": "TX", "packetExpr": "S{10,3}", "parseRule": "", "dataCount": 0 } ] },
++          { "ptlCd": "GTEC0002", "ptlType": "PROT0003", "ptlVal": "S{20}", "roles": ["INFO"],
++            "expect": "{\"regex\":\"^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$\"}",
++            "packets": [ { "packetSeq": 1, "packetType": "RX_PACKET", "direction": "RX",
++              "parseRule": "{\"v\":1,\"kind\":\"INFO\",\"trim\":\"{}\",\"fields\":[\"CH1\",\"CH2\",\"CH3\",\"CH4\"],\"absent\":\"000\"}", "dataCount": 0 } ] },
++          { "ptlCd": "GTEC0100", "ptlType": "PROT0001", "ptlVal": "S{11,1}", "roles": ["CONTROL"], "idempotent": true, "packets": [] },
++          { "ptlCd": "GTEC0101", "ptlType": "PROT0000", "ptlVal": "S{11,2}", "roles": [], "action": null, "expect": null, "idempotent": null, "packets": [] },
++          { "ptlCd": "GTEC0300", "ptlType": "PROT0001", "ptlVal": "S{10,1}", "roles": ["CONTROL"], "action": "START", "packets": [] },
++          { "ptlCd": "GTEC0301", "ptlType": "PROT0001", "ptlVal": "S{10,0}", "roles": ["CONTROL"], "action": "STOP", "idempotent": true, "packets": [] },
++          { "ptlCd": "GTEC0400", "ptlType": "PROT0002", "ptlVal": "", "roles": ["DATA"],
++            "packets": [ { "packetSeq": 1, "packetType": "RX_PACKET", "direction": "RX",
++              "parseRule": "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{}\",\"sep\":\"SPACE\",\"count\":3}", "dataCount": 3 } ] },
++          { "ptlCd": "GTEC0401", "ptlType": "PROT0000", "ptlVal": "", "roles": [], "packets": [] }
++        ] } ] }
++    """;
++
++    internal const string DataMapJson = """
++    { "revision": "m1", "removed": [], "items": [
++      { "devCd": "SDEV_GTEC01", "channelKey": "1", "ptlCd": null, "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-01", "datIdx": 1, "scale": 1.0, "offset": 0.0, "sortOrd": 1 },
++      { "devCd": "SDEV_GTEC01", "channelKey": "2", "ptlCd": null, "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-02", "datIdx": 2, "scale": 1.0, "offset": 0.0, "sortOrd": 2 },
++      { "devCd": "SDEV_GTEC01", "channelKey": "3", "ptlCd": null, "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-03", "datIdx": 3, "scale": 1.0, "offset": 0.0, "sortOrd": 3 },
++      { "devCd": "SDEV_GTEC01", "channelKey": "4", "ptlCd": null, "datGrCd": "DG_GTEC01", "datCd": "GTEC-DATA-04", "datIdx": 4, "scale": 1.0, "offset": 0.0, "sortOrd": 4 }
++    ] }
++    """;
++
++    internal static ProtocolGroupSync ServerGroup() => JsonSerializer.Deserialize<SyncResult<ProtocolGroupSync>>(ServerProtocolsJson, Web)!.Items[0];
++
++    internal static IReadOnlyList<DataChannelMapSync> DataMap() => JsonSerializer.Deserialize<SyncResult<DataChannelMapSync>>(DataMapJson, Web)!.Items;
++
++    /// <summary>내장 설정 없이 서버 값만으로 만든 계획</summary>
++    private static CollectionPlan ServerOnly(ProtocolGroupSync? g = null, IEnumerable<DataChannelMapSync>? map = null) =>
++        CollectionPlanBuilder.Build(Dev, g ?? ServerGroup(), CollectionTests.Tags(), CollectionProfile.Empty("GTEC"), map ?? DataMap());
++
++    private static Frame F(string body) => new(Encoding.ASCII.GetBytes(body), Encoding.ASCII.GetBytes(body));
++
++    private static ProtocolGroupSync WithProtocol(ProtocolGroupSync g, string ptlCd, Func<ProtocolSync, ProtocolSync> change) =>
++        g with { Protocols = g.Protocols.Select(p => p.PtlCd == ptlCd ? change(p) : p).ToList() };
++
++    // ---------- 우선순위 · 출처 ----------
++
++    [Fact]
++    public void Server_Json_With_C5c_Fields_Deserializes()
++    {
++        ProtocolGroupSync g = ServerGroup();
++        Assert.Equal(200, g.CmdGapMs);
++        Assert.Equal(new[] { "GTEC0301", "GTEC0001", "GTEC0002", "GTEC0100" }, g.InitRoutine);
++        Assert.Equal(new[] { "CONTROL" }, g.Protocols.Single(p => p.PtlCd == "GTEC0301").Roles);
++        Assert.True(g.Protocols.Single(p => p.PtlCd == "GTEC0301").Idempotent);
++        Assert.Empty(g.Protocols.Single(p => p.PtlCd == "GTEC0101").Roles!);
++        Assert.Equal(4, DataMap().Count);
++        // C5c 이전 서버 응답(필드 없음)도 그대로 읽힘
++        Assert.Null(CollectionTests.Group().CmdGapMs);
++        Assert.Null(CollectionTests.Group().Protocols[0].Roles);
++    }
++
++    [Fact] // 내장 설정 없이 서버 값만으로 C4(내장 설정) 계획과 같은 수집 동작
++    public void Server_Only_Plan_Matches_BuiltIn_Plan()
++    {
++        CollectionPlan s = ServerOnly();
++        CollectionPlan b = CollectionPlanBuilder.Build(Dev, CollectionTests.Group(), CollectionTests.Tags());
++        var sp = s.Protocols.ToDictionary(p => p.PtlCd);
++        var bp = b.Protocols.ToDictionary(p => p.PtlCd);
++
++        foreach (string cd in new[] { "GTEC0000", "GTEC0001", "GTEC0002", "GTEC0100", "GTEC0300", "GTEC0301", "GTEC0400" })
++        {
++            Assert.Equal(bp[cd].Pattern, sp[cd].Pattern);
++            Assert.Equal(bp[cd].Roles, sp[cd].Roles);
++            Assert.Equal(bp[cd].Action, sp[cd].Action);
++            Assert.Equal(bp[cd].Tx, sp[cd].Tx);
++            Assert.Equal(bp[cd].Parse?.Kind, sp[cd].Parse?.Kind);
++            Assert.Equal(bp[cd].Expect is null, sp[cd].Expect is null);
++            Assert.Equal("server", s.Sources[cd + ".pattern"]);
++            Assert.Equal("server", s.Sources[cd + ".roles"]);
++        }
++        Assert.Equal(b.Scheduler.InterCommandGapMs, s.Scheduler.InterCommandGapMs);
++        Assert.Equal(b.Session.InitRoutine, s.Session.InitRoutine);
++        Assert.Equal(b.Session.InitDelayMs, s.Session.InitDelayMs);
++        Assert.Equal(b.Frame.Start, s.Frame.Start);
++        Assert.Equal(b.Frame.End, s.Frame.End);
++        Assert.Equal(b.Frame.MaxLength, s.Frame.MaxLength);
++        Assert.Equal(b.MapEntries.Select(e => (e.ChannelKey, e.Target)), s.MapEntries.Select(e => (e.ChannelKey, e.Target)));
++
++        // 응답 판정은 서버 표기([{]·[0-9])로도 실장비 응답과 같게 맞는다
++        Assert.True(sp["GTEC0001"].Expect!.IsMatch(F("{Science Cube Lite II Memory}")));
++        Assert.False(sp["GTEC0001"].Expect!.IsMatch(F("{008,000,000,000}")));
++        Assert.True(sp["GTEC0002"].Expect!.IsMatch(F("{008,000,000,000}")));
++        Assert.True(sp["GTEC0000"].Expect!.IsMatch(F("{OK}")));
++
++        // 멱등은 서버 명시값 (STOP 자동 규칙 없음): 0301 은 서버만 명시
++        Assert.True(sp["GTEC0100"].Idempotent);
++        Assert.True(sp["GTEC0301"].Idempotent);
++        Assert.Null(sp["GTEC0300"].Idempotent);
++        Assert.Null(bp["GTEC0301"].Idempotent);
++
++        foreach (string k in new[] { "frame", "cmdGapMs", "initDelayMs", "initRoutine", "map" })
++            Assert.Equal("server", s.Sources[k]);
++        Assert.DoesNotContain(s.Warnings, w => w.Contains("서버 수집 설정 없음"));
++    }
++
++    [Fact] // 서버와 내장 값이 다르면 서버 값
++    public void Server_Value_Wins_Over_BuiltIn()
++    {
++        ProtocolGroupSync g = ServerGroup() with { CmdGapMs = 250, InitRoutine = ["GTEC0301", "GTEC0001"], InitDelayMs = 100 };
++        g = WithProtocol(g, "GTEC0300", p => p with { Idempotent = false, Action = "PAUSE" });
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, g, CollectionTests.Tags(), null, DataMap());
++        var by = plan.Protocols.ToDictionary(p => p.PtlCd);
++
++        Assert.Equal(250, plan.Scheduler.InterCommandGapMs);
++        Assert.Equal(new[] { "GTEC0301", "GTEC0001" }, plan.Session.InitRoutine);
++        Assert.Equal(100, plan.Session.InitDelayMs);
++        Assert.Equal(CommandAction.Pause, by["GTEC0300"].Action);
++        Assert.False(by["GTEC0300"].Idempotent);
++        Assert.Equal("server", plan.Sources["GTEC0300.idempotent"]);
++    }
++
++    [Fact] // C5c 이전 서버(필드 없음): 내장 설정, 출처·경고 기록
++    public void Old_Server_Response_Uses_BuiltIn_With_Sources_And_Warnings()
++    {
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, CollectionTests.Group(), CollectionTests.Tags());
++
++        Assert.Equal(200, plan.Scheduler.InterCommandGapMs);
++        Assert.Equal("builtin", plan.Sources["cmdGapMs"]);
++        Assert.Equal("builtin", plan.Sources["frame"]);
++        Assert.Equal("builtin", plan.Sources["initRoutine"]);
++        Assert.Equal("builtin", plan.Sources["GTEC0301.roles"]);
++        Assert.Equal("builtin", plan.Sources["GTEC0301.action"]);
++        Assert.Equal("legacy-tagid", plan.Sources["map"]);
++        Assert.Contains(plan.Warnings, w => w.Contains("서버 수집 설정 없음"));
++        Assert.Contains(plan.Warnings, w => w.Contains("GTEC0301") && w.Contains("서버 역할 미설정"));
++        Assert.Contains(plan.Warnings, w => w.Contains("data-map") && w.Contains("CH<n>"));
++    }
++
++    [Fact] // 서버도 내장도 없으면 기본값
++    public void No_Server_No_BuiltIn_Uses_Defaults()
++    {
++        ProtocolGroupSync g = CollectionTests.Group() with { PtlGrpCd = "OTHER" };
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, g, CollectionTests.Tags());
++        Assert.Equal("default", plan.Sources["frame"]);
++        Assert.Equal("default", plan.Sources["cmdGapMs"]);
++        Assert.Equal(0, plan.Scheduler.InterCommandGapMs);
++        Assert.Equal("default", plan.Sources["GTEC0001.roles"]);
++    }
++
++    [Fact] // 역할 없는(미설정) 프로토콜은 서버 PTL_TYPE 이 아니라 내장 보정 → 없으면 PTL_TYPE
++    public void Unconfigured_Protocol_Uses_BuiltIn_Then_PtlType()
++    {
++        ProtocolGroupSync g = WithProtocol(ServerGroup(), "GTEC0301", p => p with { Roles = [], PtlType = "PROT0000" });
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, g, CollectionTests.Tags(), null, DataMap());
++        var by = plan.Protocols.ToDictionary(p => p.PtlCd);
++        Assert.Equal(ExchangePattern.TxOnly, by["GTEC0301"].Pattern);
++        Assert.Equal("builtin", plan.Sources["GTEC0301.pattern"]);
++        Assert.Equal(ExchangePattern.Poll, by["GTEC0101"].Pattern);
++        Assert.Equal("server", plan.Sources["GTEC0101.pattern"]);
++        Assert.Contains(plan.Warnings, w => w.Contains("GTEC0101") && w.Contains("POLLING"));
++    }
++
++    // ---------- 서버 값 누락·오류 → 안전한 대체 (예외 없음) ----------
++
++    [Fact]
++    public void Invalid_Server_Values_Fall_Back_Safely()
++    {
++        ProtocolGroupSync g = ServerGroup() with { FrameRule = "{\"v\":1,\"kind\":\"SLIP\"}", CmdGapMs = -5, InitRoutine = ["GTEC0301", "NOPE", "GTEC0400"] };
++        g = WithProtocol(g, "GTEC0001", p => p with { Expect = "{\"regex\":\"[\"}" });
++        g = WithProtocol(g, "GTEC0002", p => p with { Expect = "not json" });
++        g = WithProtocol(g, "GTEC0300", p => p with { Action = "LAUNCH", Roles = ["CONTROL", "BOSS"] });
++        g = WithProtocol(g, "GTEC0100", p => p with { Roles = ["BOSS"] });
++
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, g, CollectionTests.Tags(), null, DataMap());
++        var by = plan.Protocols.ToDictionary(p => p.PtlCd);
++
++        Assert.Equal(new byte[] { (byte)'{' }, plan.Frame.Start);          // 내장 Frame
++        Assert.Equal("builtin", plan.Sources["frame"]);
++        Assert.Equal(200, plan.Scheduler.InterCommandGapMs);                 // 음수 → 내장 200
++        Assert.Equal(new[] { "GTEC0301" }, plan.Session.InitRoutine);         // 없는 코드·RX_STREAM 제외
++        Assert.Equal("builtin", plan.Sources["GTEC0001.expect"]);           // regex 오류 → 내장 expect
++        Assert.True(by["GTEC0001"].Expect!.IsMatch(F("{Science}")));
++        Assert.Equal("builtin", plan.Sources["GTEC0002.expect"]);
++        Assert.Equal(CommandAction.Start, by["GTEC0300"].Action);           // 알 수 없는 동작 → 내장 START
++        Assert.Equal(ProtocolRole.Control, by["GTEC0300"].Roles);           // 알 수 없는 역할만 무시
++        Assert.Equal("builtin", plan.Sources["GTEC0100.roles"]);            // 유효 역할 0개 → 미설정 취급
++        foreach (string key in new[] { "FRAME_RULE", "CMD_GAP_MS", "NOPE", "GTEC0400", "EXPECT_RULE", "LAUNCH", "BOSS" })
++            Assert.Contains(plan.Warnings, w => w.Contains(key));
++    }
++
++    [Fact] // 서버 PARSE_RULE 오류면 내장 parse, 내장도 없으면 수신만 경고
++    public void Invalid_Server_Parse_Rule_Falls_Back()
++    {
++        ProtocolGroupSync g = WithProtocol(ServerGroup(), "GTEC0400", p => p with
++        {
++            Packets = [p.Packets[0] with { ParseRule = "{\"v\":1,\"kind\":\"CSV\"}" }]
++        });
++        CollectionPlan plan = CollectionPlanBuilder.Build(Dev, g, CollectionTests.Tags(), null, DataMap());
++        Assert.Equal(ParseKind.Text, plan.Protocols.Single(p => p.PtlCd == "GTEC0400").Parse!.Kind);
++        Assert.Equal("builtin", plan.Sources["GTEC0400.parse"]);
++
++        CollectionPlan bare = ServerOnly(g);
++        Assert.Null(bare.Protocols.Single(p => p.PtlCd == "GTEC0400").Parse);
++        Assert.Contains(bare.Warnings, w => w.Contains("GTEC0400") && w.Contains("수신만"));
++    }
++
++    // ---------- data-map ----------
++
++    [Fact]
++    public void Data_Map_Applies_Transform_PtlCd_And_Tag_Range()
++    {
++        var rows = new List<DataChannelMapSync>(DataMap())
++        {
++            new("SDEV_GTEC01", "1", "GTEC0400", "DG_GTEC01", "GTEC-DATA-04", 4, 10, -1, 5),
++            new("SDEV_GTEC01", "9", null, "DG_X", "NOPE", 1),
++            new("VDEV_GTEC01", "1", null, "DG_GTECV01", "VGTEC-DATA-01", 1)
++        };
++        CollectionPlan plan = ServerOnly(map: rows);
++
++        Assert.Equal(6, plan.MapEntries.Count); // 다른 장치 제외
++        ChannelMapEntry scaled = plan.MapEntries.Single(e => e.PtlCd == "GTEC0400");
++        Assert.Equal(new ValueTransform(10, -1), scaled.Transform);
++        Assert.Equal(1.0, scaled.Max);           // 태그 범위
++        Assert.Null(plan.MapEntries.First(e => e.ChannelKey == "1" && e.PtlCd is null).Transform);
++        Assert.Contains(plan.Warnings, w => w.Contains("NOPE") && w.Contains("태그에 없음"));
++
++        IDataMapper mapper = plan.CreateMapper();
++        var values = mapper.Map(Dev, "GTEC0400", [new RawValue("1", 0, 2.0, "2.0", false)], DateTimeOffset.Now);
++        Assert.Contains(values, v => v.Data == new LogicalDataRef("DG_GTEC01", "GTEC-DATA-04", 4) && v.Value == 19.0);
++        Assert.Contains(values, v => v.Data == new LogicalDataRef("DG_GTEC01", "GTEC-DATA-01", 1) && v.Value == 2.0);
++    }
++
++    [Fact] // data-map 이 비면 CH<n> 임시 호환 그대로
++    public void Empty_Data_Map_Keeps_Legacy_TagId()
++    {
++        CollectionPlan plan = ServerOnly(map: []);
++        Assert.Equal("legacy-tagid", plan.Sources["map"]);
++        Assert.Equal(4, plan.MapEntries.Count);
++        Assert.Equal(new LogicalDataRef("DG_GTEC01", "GTEC-DATA-01", 1), plan.MapEntries.Single(e => e.ChannelKey == "1").Target);
++    }
++
++    // ---------- 응답 판정 (Java·.NET 공통 벡터) ----------
++
++    [Fact]
++    public void Expect_Rule_Reader()
++    {
++        Assert.True(ExpectRule.TryRead("{\"startsWith\":\"{OK\"}", out ResponseMatcher? m, out _));
++        Assert.True(m!.IsMatch(F("{OK}")));
++        foreach (string bad in new[] { "", "x", "[]", "{}", "{\"startsWith\":\"\"}", "{\"contains\":\"a\"}", "{\"startsWith\":\"a\",\"regex\":\"b\"}", "{\"regex\":\"[\"}" })
++            Assert.False(ExpectRule.TryRead(bad, out _, out _), bad);
++    }
++
++    // ---------- 가상 장치 자동 회귀 (서버 값만) ----------
++
++    private static async Task<(DeviceSession S, VirtualTransport T, ConcurrentQueue<LogicalValue> V, ConcurrentQueue<InitRoutineResult> I)> StartAsync(
++        CollectionPlan plan, GtecLikeDevice device)
++    {
++        var t = new VirtualTransport(device);
++        await t.OpenAsync();
++        DeviceSession s = plan.CreateSession(t);
++        var values = new ConcurrentQueue<LogicalValue>();
++        var inits = new ConcurrentQueue<InitRoutineResult>();
++        s.Values += (_, e) => { foreach (LogicalValue v in e.Values) values.Enqueue(v); };
++        s.InitCompleted += (_, r) => inits.Enqueue(r);
++        await s.StartAsync();
++        return (s, t, values, inits);
++    }
++
++    [Fact] // 측정 중 장비 → 초기화(STOP 먼저) → START → 수집·매핑 → STOP → 분리 → 재연결(루틴 재실행) → 수집 → STOP
++    public async Task Virtual_Gtec_Full_Cycle_With_Server_Values_Only()
++    {
++        CollectionPlan plan = ServerOnly() with { Session = new DeviceSessionOptions(ServerOnly().Session.InitRoutine, 50) };
++        var device = new GtecLikeDevice { Running = true };
++        var (s, t, values, inits) = await StartAsync(plan, device);
++        await using var _s = s;
++        await using var _t = t;
++
++        Assert.True(await Wait.UntilAsync(() => inits.Count == 1, 5000));
++        Assert.True(inits.Single().AllOk, string.Join(",", inits.Single().Steps.Select(x => $"{x.Key}:{x.Value.Status}")));
++        Assert.Equal(new[] { "S{10,0}", "S{10,3}", "S{20}", "S{11,1}" }, device.Accepted.ToArray());
++        Assert.Equal(DeviceSessionState.Ready, s.State);
++
++        Assert.True((await s.ExecuteAsync("GTEC0300")).Ok);
++        Assert.True(await Wait.UntilAsync(() => values.Count >= 9, 3000), $"values {values.Count}");
++        Assert.All(values, v => Assert.Equal(DataQuality.Good, v.Quality));
++        Assert.Equal(
++            new[] { "DG_GTEC01/GTEC-DATA-01/1", "DG_GTEC01/GTEC-DATA-02/2", "DG_GTEC01/GTEC-DATA-03/3" },
++            values.Select(v => v.Data!.Key).Distinct().OrderBy(x => x, StringComparer.Ordinal));
++
++        Assert.True((await s.ExecuteAsync("GTEC0301")).Ok);
++        await Task.Delay(300);
++        int n = values.Count;
++        await Task.Delay(300);
++        Assert.Equal(n, values.Count);
++        Assert.False(device.Running);
++
++        // 측정 중 분리 → 재연결
++        Assert.True((await s.ExecuteAsync("GTEC0300")).Ok);
++        Assert.True(await Wait.UntilAsync(() => values.Count > n, 3000));
++        t.ForceDisconnect();
++        Assert.True(await Wait.UntilAsync(() => s.State == DeviceSessionState.Suspended, 2000));
++        Assert.True(device.Running);
++        await t.OpenAsync();
++        Assert.True(await Wait.UntilAsync(() => inits.Count == 2, 5000));
++        Assert.True(inits.Last().AllOk);
++        Assert.False(device.Running);
++
++        while (values.TryDequeue(out _)) { }
++        Assert.True((await s.ExecuteAsync("GTEC0300")).Ok);
++        Assert.True(await Wait.UntilAsync(() => values.Count >= 6, 3000), "재연결 후 데이터");
++        Assert.True((await s.ExecuteAsync("GTEC0301")).Ok);
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json b/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+index 76f64b8..0d75d83 100644
+--- a/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
++++ b/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+@@ -185,5 +185,132 @@
+    "expr": "[123]",
+    "ok": false
+   }
++ ],
++ "_comment_expect": "expect: 응답 판정 규칙(EXPECT_RULE). java/dotnet = 각 쪽 통과 여부. 둘이 다른 항목은 문법 차이 기록용(note). match: 같은 regex·입력의 일치 결과가 양쪽 같아야 함.",
++ "expect": [
++  {
++   "rule": "{\"startsWith\":\"{OK\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"^[{][A-Za-z]\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"^\\\\{\\\\d{3}\\\\}$\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"(?i)^ok\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"^\\\\p{L}+$\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"^(?<v>[0-9]+)$\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"[\"}",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "{\"regex\":\"(\"}",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "{\"regex\":\"a{2,1}\"}",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "{\"regex\":\"\\\\\"}",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "{\"regex\":\"\"}",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "{\"contains\":\"a\"}",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "{\"startsWith\":\"a\",\"regex\":\"b\"}",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "not json",
++   "java": false,
++   "dotnet": false
++  },
++  {
++   "rule": "{\"regex\":\"a++\"}",
++   "java": true,
++   "dotnet": false,
++   "note": "소유 수량자: Java 만 지원 → Desktop 은 경고 후 내장/없음"
++  },
++  {
++   "rule": "{\"regex\":\"(?<b>x)(?<a-b>y)\"}",
++   "java": false,
++   "dotnet": true,
++   "note": "균형 그룹: .NET 만 지원 → 서버가 저장 거부"
++  }
++ ],
++ "match": [
++  {
++   "regex": "^[{][A-Za-z]",
++   "input": "{Science Cube Lite II Memory}",
++   "match": true
++  },
++  {
++   "regex": "^[{][A-Za-z]",
++   "input": "{008,000,000,000}",
++   "match": false
++  },
++  {
++   "regex": "^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$",
++   "input": "{008,000,000,000}",
++   "match": true
++  },
++  {
++   "regex": "^\\{\\d{3}",
++   "input": "{12a",
++   "match": false
++  },
++  {
++   "regex": "(?i)^ok",
++   "input": "OK",
++   "match": true
++  },
++  {
++   "regex": "end$",
++   "input": "x end\n",
++   "match": true
++  },
++  {
++   "regex": "^\\p{L}+$",
++   "input": "측정",
++   "match": true
++  }
+  ]
+ }
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+index 91639ea..477fb8d 100644
+--- a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+@@ -56,6 +56,31 @@ class ProtocolRulesTest {
+         assertTrue(n >= 40, "벡터 수 " + n);
+     }
+ 
++    /** C5d: 응답 판정 regex — Java 판정이 벡터의 java 값과 같고, 일치 결과는 .NET 과 같아야 한다 */
++    @Test
++    void expectAndMatchVectors() throws Exception {
++        JsonNode root = new ObjectMapper().readTree(Files.readString(VECTORS));
++        int n = 0;
++        for (JsonNode v : root.get("expect")) {
++            String rule = v.get("rule").asText();
++            boolean ok;
++            try {
++                ProtocolRules.validateExpectRule(rule);
++                ok = true;
++            } catch (ProtocolRules.RuleException e) {
++                ok = false;
++            }
++            assertEquals(v.get("java").asBoolean(), ok, rule);
++            n++;
++        }
++        for (JsonNode v : root.get("match")) {
++            boolean m = java.util.regex.Pattern.compile(v.get("regex").asText()).matcher(v.get("input").asText()).find();
++            assertEquals(v.get("match").asBoolean(), m, v.get("regex").asText() + " / " + v.get("input").asText());
++            n++;
++        }
++        assertTrue(n >= 20, "벡터 수 " + n);
++    }
++
+     @Test
+     void gtecVerifiedValuesPass() {
+         assertDoesNotThrow(() -> ProtocolRules.validateFrameRule("{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}"));
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java
+index 4d2cde0..b80036c 100644
+--- a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java
+@@ -87,6 +87,11 @@ class ProtocolServiceC5cTest {
+                 m("ptlGrpCd", "GTEC", "ptlCd", "GTEC0400", "ptlType", "PROT0002", "ptlRoles", "PROL0003"));
+         when(dao.selectPackets("GTEC", "GTEC0400")).thenReturn(List.of(
+                 m("packetSeq", 1, "direction", "RX", "parseRule", TEXT_PARSE)));
++        // GTEC0003: 과거 데이터 (역할 없음, PTL_VAL 이 현재 표현식 문법에 맞지 않음)
++        when(dao.selectProtocol(eq("GTEC"), eq("GTEC0003"), anyString())).thenReturn(
++                m("ptlGrpCd", "GTEC", "ptlCd", "GTEC0003", "ptlType", "PROT0000", "ptlVal", "S{가}[CR][LF]"));
++        when(dao.selectPackets("GTEC", "GTEC0003")).thenReturn(List.of(
++                m("packetSeq", 1, "direction", "TX", "packetExpr", "S{가}[XX]")));
+         when(dao.selectProtocol(eq("GTEC"), eq("GTEC0001"), anyString())).thenReturn(
+                 m("ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "ptlType", "PROT0003", "ptlVal", "S{10,3}[CR][LF]", "ptlRoles", "PROL0001"));
+     }
+@@ -254,4 +259,44 @@ class ProtocolServiceC5cTest {
+         service.deleteProtocol(in(ProtocolContracts.DELETE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0400"));
+         verify(dao).softDeleteProtocol("GTEC", "GTEC0400");
+     }
++
++    // ----- C5d 추가 확인: 역할 없는 프로토콜의 신규 설정 경계 -----
++
++    @Test
++    void legacyProtocolGainsRolesThenConsistencyApplies() {
++        // 역할을 처음 넣으면 저장 후 상태로 연계 검사: 송신 표현식 있음 → 통과
++        service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "ptlRoles", "PROL0001"));
++        verify(dao).updateProtocol(argThat(p -> "PROL0001".equals(p.get("ptlRoles"))));
++        // RX_STREAM + DATA 로 바꾸는데 기존 RX 패킷 해석 규칙이 JSON 이 아님 → 400 (과거 규칙은 수집 규칙으로 인정 안 함)
++        assertEquals("packets", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "ptlType", "PROT0002", "ptlRoles", "PROL0003"))).field());
++        // 역할 없이 유형만 바꾸면 (미설정 유지) 연계 검사 없음
++        service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "ptlType", "PROT0002"));
++    }
++
++    // ----- C5d 추가 확인: 변경되지 않은 기존 필드의 검사 생략 범위 -----
++
++    @Test
++    void unchangedLegacyExpressionsAreNotRechecked() {
++        // 같은 PTL_VAL·같은 순번 같은 PACKET_EXPR 재전송 → 문법 검사 생략 (역할을 새로 넣어도 '있음'만 확인)
++        service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0003",
++                "ptlVal", "S{가}[CR][LF]", "ptlRoles", "PROL0002",
++                "packets", List.of(m("packetSeq", 1, "direction", "TX", "packetExpr", "S{가}[XX]"))));
++        // 값을 바꾸면 검사
++        assertEquals("ptlVal", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0003", "ptlVal", "S{나}[CR][LF]"))).field());
++        // 같은 값이라도 다른 순번이면 검사
++        assertEquals("packets[0].packetExpr", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0003",
++                "packets", List.of(m("packetSeq", 2, "direction", "TX", "packetExpr", "S{가}[XX]"))))).field());
++    }
++
++    @Test
++    void groupSettingsAndRoleFieldsAreAlwaysChecked() {
++        // 생략 대상은 ptlVal·packetExpr·parseRule 뿐. initRoutine·frameRule·ptlRoles·expectRule 은 같은 값이어도 매번 검사
++        assertEquals("initRoutine", error(() -> service.updateGroup(in(ProtocolContracts.GRP_UPDATE,
++                "ptlGrpCd", "GTEC", "initRoutine", "GTEC0301,GTEC0999"))).field());
++        assertEquals("expectRule", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "expectRule", "{\"regex\":\"a{2,1}\"}"))).field());
++    }
+ }
+-- 
+2.36.1.windows.1
+

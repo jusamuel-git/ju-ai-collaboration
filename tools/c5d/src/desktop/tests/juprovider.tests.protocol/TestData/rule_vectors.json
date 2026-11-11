@@ -1,0 +1,316 @@
+{
+ "_comment": "C5c 서버(Java ProtocolRules)·Desktop(C# RuleReader/ProtocolExpression) 공통 판정 벡터. ok=true 면 양쪽 모두 통과, false 면 양쪽 모두 오류.",
+ "frame": [
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"STXETX\",\"escape\":\"[DLE]\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"FIXED\",\"len\":8,\"checksum\":{\"type\":\"SUM8\",\"from\":1,\"to\":6}}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"lenfield\",\"offset\":2,\"size\":2,\"endian\":\"LE\",\"adjust\":-1,\"includesHeader\":true}",
+   "ok": true
+  },
+  {
+   "rule": "{\"kind\":\"DELIM\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":2,\"kind\":\"DELIM\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"SLIP\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"end\":\"[XX]\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"maxLen\":0}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"maxLen\":1.5}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"STXETX\",\"stx\":\"AB\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"FIXED\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"LENFIELD\",\"offset\":0,\"size\":3}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"checksum\":{\"type\":\"CRC32\"}}",
+   "ok": false
+  },
+  {
+   "rule": "[1,2]",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",}",
+   "ok": false
+  },
+  {
+   "rule": "not json",
+   "ok": false
+  }
+ ],
+ "parse": [
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{}\",\"sep\":\"SPACE\",\"count\":3}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"INFO\",\"trim\":\"{}\",\"fields\":[\"CH1\",\"CH2\",\"CH3\",\"CH4\"],\"absent\":\"000\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"map\":\"samples\",\"sep\":\"comma\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"u16\",\"endian\":\"BE\",\"scale\":0.1}]}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"count\":-1}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"sep\":\"PIPE\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"map\":\"ROWS\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"INFO\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"INFO\",\"fields\":[\"CH1\",\"CH1\"]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"U24\"}]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"U8\"},{\"key\":\"a\",\"offset\":1,\"type\":\"U8\"}]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"CSV\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"count\":\"3\"}",
+   "ok": false
+  }
+ ],
+ "expression": [
+  {
+   "expr": "S{10,1}[CR][LF]",
+   "ok": true
+  },
+  {
+   "expr": "[STX]ABC[00][ETX]",
+   "ok": true
+  },
+  {
+   "expr": "[cr][lf]",
+   "ok": true
+  },
+  {
+   "expr": "[ 0d ]",
+   "ok": true
+  },
+  {
+   "expr": "",
+   "ok": true
+  },
+  {
+   "expr": "[CR",
+   "ok": false
+  },
+  {
+   "expr": "[XYZ]",
+   "ok": false
+  },
+  {
+   "expr": "[0G]",
+   "ok": false
+  },
+  {
+   "expr": "가",
+   "ok": false
+  },
+  {
+   "expr": "[123]",
+   "ok": false
+  }
+ ],
+ "_comment_expect": "expect: 응답 판정 규칙(EXPECT_RULE). java/dotnet = 각 쪽 통과 여부. 둘이 다른 항목은 문법 차이 기록용(note). match: 같은 regex·입력의 일치 결과가 양쪽 같아야 함.",
+ "expect": [
+  {
+   "rule": "{\"startsWith\":\"{OK\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^[{][A-Za-z]\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^\\\\{\\\\d{3}\\\\}$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"(?i)^ok\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^\\\\p{L}+$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^(?<v>[0-9]+)$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"[\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"(\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"a{2,1}\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"\\\\\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"contains\":\"a\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"startsWith\":\"a\",\"regex\":\"b\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "not json",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"a++\"}",
+   "java": true,
+   "dotnet": false,
+   "note": "소유 수량자: Java 만 지원 → Desktop 은 경고 후 내장/없음"
+  },
+  {
+   "rule": "{\"regex\":\"(?<b>x)(?<a-b>y)\"}",
+   "java": false,
+   "dotnet": true,
+   "note": "균형 그룹: .NET 만 지원 → 서버가 저장 거부"
+  }
+ ],
+ "match": [
+  {
+   "regex": "^[{][A-Za-z]",
+   "input": "{Science Cube Lite II Memory}",
+   "match": true
+  },
+  {
+   "regex": "^[{][A-Za-z]",
+   "input": "{008,000,000,000}",
+   "match": false
+  },
+  {
+   "regex": "^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$",
+   "input": "{008,000,000,000}",
+   "match": true
+  },
+  {
+   "regex": "^\\{\\d{3}",
+   "input": "{12a",
+   "match": false
+  },
+  {
+   "regex": "(?i)^ok",
+   "input": "OK",
+   "match": true
+  },
+  {
+   "regex": "end$",
+   "input": "x end\n",
+   "match": true
+  },
+  {
+   "regex": "^\\p{L}+$",
+   "input": "측정",
+   "match": true
+  }
+ ]
+}

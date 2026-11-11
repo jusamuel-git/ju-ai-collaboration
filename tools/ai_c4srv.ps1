@@ -1,6 +1,7 @@
 ﻿# C4 실서버 검증: feature/collect-c4 WAR + 테스트 DB(실제 DB 덤프 사본) 18081. 실제 DB는 mysqldump(읽기)만, 변경 검증은 테스트 DB의 테스트 데이터로.
 # 비밀 값(DB 비밀번호·JWT·Client Key·사용자 비밀번호)은 로그에 쓰지 않는다. 제품 저장소 변경 없음.
-param([switch]$Fix, [switch]$Merge, [switch]$Mig08, [switch]$C5c)
+param([switch]$Fix, [switch]$Merge, [switch]$Mig08, [switch]$C5c, [switch]$C5d)
+if ($C5d) { $C5c = $true }
 if ($C5c) { $Mig08 = $true }
 if ($Mig08) { $Merge = $true }
 if ($Merge) { $Fix = $true }
@@ -8,7 +9,7 @@ $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ws  = 'C:\MyData\MyDev\workspace'
 $src = Join-Path $ws 'ai_changes\c4srv'
-$log = Join-Path $ws ($(if ($C5c) {'ai_c5c_srv_{0}.log'} elseif ($Mig08) {'ai_c5b_srv_{0}.log'} elseif ($Merge) {'ai_c5a_srv_{0}.log'} elseif ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
+$log = Join-Path $ws ($(if ($C5d) {'ai_c5d_srv_{0}.log'} elseif ($C5c) {'ai_c5c_srv_{0}.log'} elseif ($Mig08) {'ai_c5b_srv_{0}.log'} elseif ($Merge) {'ai_c5a_srv_{0}.log'} elseif ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
 $enc = New-Object System.Text.UTF8Encoding($false)
 New-Item -ItemType Directory -Force -Path $src | Out-Null
 [IO.File]::WriteAllText($log, '', $enc)
@@ -27,7 +28,7 @@ $b = (& git -C $jp rev-parse --abbrev-ref HEAD); $h = (& git -C $jp log -1 --for
 Log "  branch $b @ $h"
 $war = Join-Path $jp 'juprovider.backend\target\juprovider.war'
 if ($Fix) {
-    if ($b -ne $(if ($C5c) {'feature/collect-c5c'} elseif ($Mig08) {'feature/collect-c5b'} elseif ($Merge) {'feature/collect-c5'} else {'feature/collect-c4'})) { Stop "예상 브랜치 아님: $b" }
+    if ($b -ne $(if ($C5d) {'feature/collect-c5d'} elseif ($C5c) {'feature/collect-c5c'} elseif ($Mig08) {'feature/collect-c5b'} elseif ($Merge) {'feature/collect-c5'} else {'feature/collect-c4'})) { Stop "예상 브랜치 아님: $b" }
     if (-not (Test-Path $war) -or (Get-Item $war).LastWriteTime -lt (Get-Date).AddMinutes(-30)) { Stop '방금 빌드한 WAR 없음' }
     $ct = (Get-Item $war).LastWriteTime
 } else {
@@ -188,7 +189,7 @@ if ($ready) {
     foreach ($x in $o) { if ($x -match 'error|오류 [1-9]') { Log ('    ' + $x) } }
     if ($bc -eq 0) {
         $env:C4_CLIENT_ID = $CID; $env:C4_CLIENT_KEY = $ck
-        $po = & dotnet run --project $prj -c Debug --no-build -- $api SDEV_GTEC01 2>&1; $pc6 = $LASTEXITCODE
+        $po = & dotnet run --project $prj -c Debug --no-build -- $api SDEV_GTEC01 $(if ($C5d) {'c5d'} else {''}) 2>&1; $pc6 = $LASTEXITCODE
         $env:C4_CLIENT_ID = $null; $env:C4_CLIENT_KEY = $null
         foreach ($x in $po) { Log ('    ' + $x) }
         $passN = @($po | Where-Object { $_ -match '^\[PASS\]' }).Count; $failN = @($po | Where-Object { $_ -match '^\[FAIL\]' }).Count
@@ -239,6 +240,15 @@ if ($ready) {
 
     if ($C5c) {
         Log '  --- 11. C5c 수집 설정·역할 응답, data-map, 저장 검사 ---'
+        if ($C5d) {
+            # C5d 실장비 회귀용: 실제 서버 응답(비밀 값 없음)을 파일로 저장 → 실장비 도구가 서버 값만으로 계획을 만든다
+            $sd = Join-Path $ws 'ai_changes\c5d\server'; New-Item -ItemType Directory -Force -Path $sd | Out-Null
+            foreach ($pair in @(@('protocols_GTEC.json', '/api/core/sync/protocols/GTEC'), @('data_tags.json', '/api/core/sync/data-tags?devCd=SDEV_GTEC01'), @('data_map.json', '/api/core/sync/data-map?devCd=SDEV_GTEC01'))) {
+                $x = C 'GET' $pair[1] $CID $ck '' ''
+                [IO.File]::WriteAllText((Join-Path $sd $pair[0]), $x.body, $enc)
+                Log ("  서버 응답 저장 " + $pair[0] + " HTTP " + $x.code + " " + $x.body.Length + "자")
+            }
+        }
         function A([string]$act, [string]$params) { return (C 'POST' "/api/action/M02010100/$act" '' '' $ta ('{"contractVersion":1,"parameters":' + $params + '}')) }
         function ErrOf($r) { if ($r.json -and $r.json.errors) { return ([string]$r.json.code + ' ' + [string]$r.json.errors[0].field + ' ' + [string]$r.json.errors[0].code) } return [string]$r.json.code }
         # 11-1~3 내려받기 응답 확장

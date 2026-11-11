@@ -38,6 +38,36 @@ try
     int chTags = tags.Items.Count(t => t.TagId is { } id && System.Text.RegularExpressions.Regex.IsMatch(id, "^CH[0-9]{1,4}$"));
     var ch1 = plan.MapEntries.FirstOrDefault(e => e.ChannelKey == "1");
     Check(plan.MapEntries.Count == chTags && ch1 is not null, $"매핑 {plan.MapEntries.Count} = CH 태그 {chTags}, CH1 → {ch1?.Target.Key}");
+
+    // ----- C5d: 서버 값만으로 계획 (내장 설정 없음) + data-map -----
+    if (args.Length > 2 && args[2] == "c5d")
+    {
+        var dm = await api.GetDataMapAsync(devCd);
+        Check(dm.Items.Count == 4 && dm.Revision.Length == 64 && string.Join(",", dm.Items.Select(m => m.ChannelKey)) == "1,2,3,4",
+            $"data-map 역직렬화 ({string.Join(",", dm.Items.Select(m => m.ChannelKey + ">" + m.DatCd))})");
+        CollectionPlan s = CollectionPlanBuilder.Build(devCd, g, tags.Items, CollectionProfile.Empty("GTEC"), dm.Items);
+        foreach (string w in s.Warnings) Console.WriteLine("       서버값 계획 경고: " + w);
+        string[] seven = ["GTEC0000", "GTEC0001", "GTEC0002", "GTEC0100", "GTEC0300", "GTEC0301", "GTEC0400"];
+        Check(new[] { "frame", "cmdGapMs", "initDelayMs", "initRoutine", "map" }.All(k => s.Sources.GetValueOrDefault(k) == "server")
+              && seven.All(cd => s.Sources.GetValueOrDefault(cd + ".pattern") == "server" && s.Sources.GetValueOrDefault(cd + ".roles") == "server"),
+            "출처: 그룹 설정·매핑·검증 7개 프로토콜 모두 server");
+        Check(s.Scheduler.InterCommandGapMs == 200 && s.Session.InitRoutine is { Count: 4 } rr && rr[0] == "GTEC0301" && s.Frame.Start is [(byte)'{'] && s.Session.InitDelayMs == 500,
+            $"서버값: 간격 {s.Scheduler.InterCommandGapMs}, 루틴 {string.Join("→", s.Session.InitRoutine ?? [])}, 시작문자, 대기 {s.Session.InitDelayMs}");
+        // C4 동작(내장 설정)과 같은지: 서버 C5c 필드를 지운 응답 + 내장 설정
+        ProtocolGroupSync old = g with
+        {
+            FrameRule = null, CmdGapMs = null, InitRoutine = null, InitDelayMs = null,
+            Protocols = g.Protocols.Select(p => p with { Roles = null, Action = null, Expect = null, Idempotent = null }).ToList()
+        };
+        CollectionPlan b = CollectionPlanBuilder.Build(devCd, old, tags.Items);
+        var sp = s.Protocols.ToDictionary(p => p.PtlCd);
+        var bp = b.Protocols.ToDictionary(p => p.PtlCd);
+        var diff = seven.Where(cd => !sp.ContainsKey(cd) || !bp.ContainsKey(cd) || sp[cd].Pattern != bp[cd].Pattern || sp[cd].Roles != bp[cd].Roles
+            || sp[cd].Action != bp[cd].Action || sp[cd].Tx != bp[cd].Tx || sp[cd].Parse?.Kind != bp[cd].Parse?.Kind || (sp[cd].Expect is null) != (bp[cd].Expect is null)).ToList();
+        Check(diff.Count == 0, "서버값 계획 = 내장 설정 계획 (검증 7개: 교환·역할·동작·송신·해석·응답판정)" + (diff.Count == 0 ? "" : " 차이 " + string.Join(",", diff)));
+        Check(sp["GTEC0301"].Idempotent == true && sp["GTEC0100"].Idempotent == true && sp["GTEC0300"].Idempotent is null, "멱등 서버 명시값 (0100·0301 true, 0300 미지정)");
+        Check(s.MapEntries.Count == 4 && s.MapEntries.Single(e => e.ChannelKey == "1").Target.Key == "DG_GTEC01/GTEC-DATA-01/1", "매핑 = data-map 4개");
+    }
 }
 catch (Exception ex)
 {

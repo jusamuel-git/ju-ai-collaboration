@@ -1,0 +1,16 @@
+feat(desktop): server-first collection plan and data-map channel mapping (C5d)
+
+- CollectionPlanBuilder: priority server -> built-in (or given) profile -> default for frameRule,
+  cmdGapMs, initDelayMs, initRoutine, PTL_TYPE/roles (when server roles set), action, expect,
+  idempotent, tx, parse. Per-item source in CollectionPlan.Sources; missing or invalid server values
+  fall back with a warning (no exception).
+- Channel mapping from GET /api/core/sync/data-map (scale/offset, PTL_CD filter, unit/range from tag);
+  TAG_ID=CH<n> temporary mapping kept when the device has no map rows.
+- SyncModels: C5c fields (nullable, old server responses still read), DataChannelMapSync;
+  JuProviderApiClient.GetDataMapAsync; Rules/ExpectRule shared with the builder.
+- Tests: server-only plan equals built-in plan, virtual GTEC full cycle with server values only
+  (init/START/data/STOP/disconnect/reconnect), fallback cases, Java/.NET regex vectors,
+  server-side boundary tests (roles-less protocols, unchanged-field skip scope).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
