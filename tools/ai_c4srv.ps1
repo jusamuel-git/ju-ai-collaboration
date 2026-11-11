@@ -1,13 +1,14 @@
 ﻿# C4 실서버 검증: feature/collect-c4 WAR + 테스트 DB(실제 DB 덤프 사본) 18081. 실제 DB는 mysqldump(읽기)만, 변경 검증은 테스트 DB의 테스트 데이터로.
 # 비밀 값(DB 비밀번호·JWT·Client Key·사용자 비밀번호)은 로그에 쓰지 않는다. 제품 저장소 변경 없음.
-param([switch]$Fix, [switch]$Merge, [switch]$Mig08)
+param([switch]$Fix, [switch]$Merge, [switch]$Mig08, [switch]$C5c)
+if ($C5c) { $Mig08 = $true }
 if ($Mig08) { $Merge = $true }
 if ($Merge) { $Fix = $true }
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ws  = 'C:\MyData\MyDev\workspace'
 $src = Join-Path $ws 'ai_changes\c4srv'
-$log = Join-Path $ws ($(if ($Mig08) {'ai_c5b_srv_{0}.log'} elseif ($Merge) {'ai_c5a_srv_{0}.log'} elseif ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
+$log = Join-Path $ws ($(if ($C5c) {'ai_c5c_srv_{0}.log'} elseif ($Mig08) {'ai_c5b_srv_{0}.log'} elseif ($Merge) {'ai_c5a_srv_{0}.log'} elseif ($Fix) {'ai_c4b_srv_{0}.log'} else {'ai_c4srv_{0}.log'}) -f $env:COMPUTERNAME)
 $enc = New-Object System.Text.UTF8Encoding($false)
 New-Item -ItemType Directory -Force -Path $src | Out-Null
 [IO.File]::WriteAllText($log, '', $enc)
@@ -26,7 +27,7 @@ $b = (& git -C $jp rev-parse --abbrev-ref HEAD); $h = (& git -C $jp log -1 --for
 Log "  branch $b @ $h"
 $war = Join-Path $jp 'juprovider.backend\target\juprovider.war'
 if ($Fix) {
-    if ($b -ne $(if ($Mig08) {'feature/collect-c5b'} elseif ($Merge) {'feature/collect-c5'} else {'feature/collect-c4'})) { Stop "예상 브랜치 아님: $b" }
+    if ($b -ne $(if ($C5c) {'feature/collect-c5c'} elseif ($Mig08) {'feature/collect-c5b'} elseif ($Merge) {'feature/collect-c5'} else {'feature/collect-c4'})) { Stop "예상 브랜치 아님: $b" }
     if (-not (Test-Path $war) -or (Get-Item $war).LastWriteTime -lt (Get-Date).AddMinutes(-30)) { Stop '방금 빌드한 WAR 없음' }
     $ct = (Get-Item $war).LastWriteTime
 } else {
@@ -233,6 +234,92 @@ if ($ready) {
         $r = C 'POST' '/api/action/M02010100/GRP_DELETE' '' '' $ta '{"contractVersion":1,"parameters":{"ptlGrpCd":"GTEC"}}'
         Check '10-8' '참조 중 그룹(GTEC) 삭제 → 409 (PR-2 규칙 유지)' ($r.code -eq '409') ("HTTP " + $r.code)
         $r = C 'GET' '/api/action/M02010100/GRP_SEARCH' '' '' $ta ''; Check '10-9' 'Action 경로 GET → 405 (C4b)' ($r.code -eq '405') ("HTTP " + $r.code + ", " + $r.json.code)
+    }
+
+
+    if ($C5c) {
+        Log '  --- 11. C5c 수집 설정·역할 응답, data-map, 저장 검사 ---'
+        function A([string]$act, [string]$params) { return (C 'POST' "/api/action/M02010100/$act" '' '' $ta ('{"contractVersion":1,"parameters":' + $params + '}')) }
+        function ErrOf($r) { if ($r.json -and $r.json.errors) { return ([string]$r.json.code + ' ' + [string]$r.json.errors[0].field + ' ' + [string]$r.json.errors[0].code) } return [string]$r.json.code }
+        # 11-1~3 내려받기 응답 확장
+        $r = C 'GET' '/api/core/sync/protocols/GTEC' $CID $ck '' ''
+        $g = $r.json.items[0]
+        Check '11-1' 'GTEC 그룹 수집 설정 (frameRule·cmdGapMs·initRoutine·initDelayMs)' (($r.code -eq '200') -and ($g.frameRule -match '"start":"\{"') -and ($g.cmdGapMs -eq 200) -and ((@($g.initRoutine) -join ',') -eq 'GTEC0301,GTEC0001,GTEC0002,GTEC0100') -and ($g.initDelayMs -eq 500)) ("HTTP " + $r.code + ", gap " + $g.cmdGapMs + ", init " + (@($g.initRoutine) -join ',') + ", delay " + $g.initDelayMs)
+        $pp = @{}; foreach ($x in @($g.protocols)) { $pp[$x.ptlCd] = $x }
+        $p301 = $pp['GTEC0301']; $p001 = $pp['GTEC0001']; $p400 = $pp['GTEC0400']; $p101 = $pp['GTEC0101']
+        $ok2 = ((@($p301.roles) -join ',') -eq 'CONTROL') -and ($p301.action -eq 'STOP') -and ($p301.idempotent -eq $true) -and ($p001.expect -match 'regex') -and ((@($p400.roles) -join ',') -eq 'DATA') -and ($p400.idempotent -eq $null) -and ($p101 -ne $null) -and (@($p101.roles).Count -eq 0) -and ($p101.action -eq $null) -and ($p101.idempotent -eq $null)
+        Check '11-2' '프로토콜 roles·action·expect·idempotent (정정 7개 / 미정정 기본값)' $ok2 ("0301 " + (@($p301.roles) -join ',') + "/" + $p301.action + "/" + $p301.idempotent + ", 0400 " + (@($p400.roles) -join ',') + ", 0101 roles " + @($p101.roles).Count)
+        $legacy = V "SELECT PARSE_RULE FROM ju_protocol_packet WHERE PTL_GRP_CD='GTEC' AND PTL_CD='GTEC0000' AND DIRECTION='RX' AND USE_YN='YENO0001' ORDER BY PACKET_SEQ LIMIT 1"
+        $sp = @($pp['GTEC0000'].packets | Where-Object { $_.direction -eq 'RX' })
+        Check '11-3' 'GTEC0000 과거 비JSON PARSE_RULE 그대로 내려받기' (($legacy -ne '') -and ($legacy -notmatch '^\s*\{') -and ($sp.Count -ge 1) -and ($sp[0].parseRule -eq $legacy)) ("RX 패킷 " + $sp.Count + ", JSON 아님 " + ($legacy -notmatch '^\s*\{'))
+
+        # 11-4~8 data-map
+        $r = C 'GET' '/api/core/sync/data-map?devCd=SDEV_GTEC01' $CID $ck '' ''
+        $mi = @($r.json.items); $rev0 = $r.json.revision
+        Check '11-4' 'GET /sync/data-map?devCd=SDEV_GTEC01' (($r.code -eq '200') -and ((($mi | ForEach-Object { $_.channelKey + '>' + $_.datCd }) -join ',') -eq '1>GTEC-DATA-01,2>GTEC-DATA-02,3>GTEC-DATA-03,4>GTEC-DATA-04') -and ($mi[0].scale -eq 1) -and ($mi[0].offset -eq 0) -and ($mi[0].ptlCd -eq $null) -and ($rev0.Length -eq 64)) ("HTTP " + $r.code + ", " + (($mi | ForEach-Object { $_.channelKey + '>' + $_.datCd }) -join ','))
+        $mN = V "SELECT COUNT(*) FROM ju_data_channel_map m JOIN ju_data_tag t ON t.DAT_GR_CD=m.DAT_GR_CD AND t.DAT_CD=m.DAT_CD AND t.DAT_IDX=m.DAT_IDX AND t.USE_YN='YENO0001' JOIN ju_data_group g ON g.DAT_GR_CD=t.DAT_GR_CD AND g.USE_YN='YENO0001' WHERE m.USE_YN='YENO0001'"
+        $r = C 'GET' '/api/core/sync/data-map' $CID $ck '' ''; $r2 = C 'GET' '/api/core/sync/data-map?devCd=NO_SUCH_DEV' $CID $ck '' ''
+        Check '11-5' 'data-map 전체 / 없는 장치' (($r.code -eq '200') -and ([string]@($r.json.items).Count -eq $mN) -and ($r2.code -eq '200') -and (@($r2.json.items).Count -eq 0)) ("전체 " + @($r.json.items).Count + "/DB $mN, 없는 장치 " + $r2.code + " " + @($r2.json.items).Count)
+        $a1 = (C 'GET' '/api/core/sync/data-map' '' '' '' '').code
+        $a2 = (C 'GET' '/api/core/sync/data-map' $CID 'wrong-key-000' '' '').code
+        $a3 = (C 'GET' '/api/core/sync/data-map' '' '' $ta '').code
+        $a4 = (C 'POST' '/api/core/sync/data-map' $CID $ck '' '{}').code
+        Check '11-6' 'data-map 인증 (무헤더·잘못된 키·JWT만 401, POST 403)' (($a1 -eq '401') -and ($a2 -eq '401') -and ($a3 -eq '401') -and ($a4 -eq '403')) "$a1/$a2/$a3/$a4"
+        Ed $T "UPDATE ju_data_channel_map SET USE_YN='YENO0002' WHERE DEV_CD='SDEV_GTEC01' AND CHANNEL_KEY='4'" | Out-Null
+        Ed $T "UPDATE ju_data_tag SET USE_YN='YENO0002' WHERE DAT_GR_CD='DG_GTEC01' AND DAT_CD='GTEC-DATA-03' AND DAT_IDX=3" | Out-Null
+        $r = C 'GET' '/api/core/sync/data-map?devCd=SDEV_GTEC01' $CID $ck '' ''
+        $keys1 = (@($r.json.items) | ForEach-Object { $_.channelKey }) -join ','; $rev1 = $r.json.revision
+        Ed $T "UPDATE ju_data_channel_map SET USE_YN='YENO0001' WHERE DEV_CD='SDEV_GTEC01' AND CHANNEL_KEY='4'" | Out-Null
+        Ed $T "UPDATE ju_data_tag SET USE_YN='YENO0001' WHERE DAT_GR_CD='DG_GTEC01' AND DAT_CD='GTEC-DATA-03' AND DAT_IDX=3" | Out-Null
+        $rev2 = (C 'GET' '/api/core/sync/data-map?devCd=SDEV_GTEC01' $CID $ck '' '').json.revision
+        Check '11-7' 'data-map 논리삭제 (매핑 4·태그 3 제외), revision 변경·원복' (($keys1 -eq '1,2') -and ($rev1 -ne $rev0) -and ($rev2 -eq $rev0)) ("삭제 중 $keys1, revision 변경 " + ($rev1 -ne $rev0) + ", 원복 " + ($rev2 -eq $rev0))
+
+        # 11-8~ Action CRUD (v1 계약, 관리자)
+        $r = A 'GRP_GET' '{"ptlGrpCd":"GTEC"}'
+        Check '11-8' 'GRP_GET 수집 설정 출력' (($r.code -eq '200') -and ($r.json.data.cmdGapMs -eq 200) -and ($r.json.data.initRoutine -eq 'GTEC0301,GTEC0001,GTEC0002,GTEC0100') -and ($r.json.data.frameRule -match 'DELIM')) ("HTTP " + $r.code + ", gap " + $r.json.data.cmdGapMs)
+        $r = A 'GET' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0301"}'
+        Check '11-9' 'GET 역할 출력 (GTEC0301)' (($r.code -eq '200') -and ($r.json.data.ptlRoles -eq 'PROL0002') -and ($r.json.data.ptlAction -eq 'PACT0003') -and ($r.json.data.idempotentYn -eq 'YENO0001')) ("HTTP " + $r.code + ", " + $r.json.data.ptlRoles + "/" + $r.json.data.ptlAction + "/" + $r.json.data.idempotentYn)
+        $r0 = A 'GET' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0000"}'
+        $pk = @($r0.json.data.packets | ForEach-Object { $o = [ordered]@{}; foreach ($n in 'packetSeq','packetType','direction','packetExpr','responsePtlCd','parseRule','dataCount','dataType','dataPosition') { if ($_.$n -ne $null -and [string]$_.$n -ne '') { $o[$n] = $_.$n } }; $o })
+        $pkJson = ConvertTo-Json -InputObject @($pk) -Depth 5 -Compress
+        $u1 = A 'UPDATE' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0000","ptlNm":"장치확인 C5c"}'
+        $u2 = A 'UPDATE' ('{"ptlGrpCd":"GTEC","ptlCd":"GTEC0000","packets":' + $pkJson + '}')
+        $after = V "SELECT PARSE_RULE FROM ju_protocol_packet WHERE PTL_GRP_CD='GTEC' AND PTL_CD='GTEC0000' AND DIRECTION='RX' AND USE_YN='YENO0001' ORDER BY PACKET_SEQ LIMIT 1"
+        Check '11-10' 'GTEC0000 v1 수정 호환 (이름만 / 패킷 그대로 재전송)' (($u1.code -eq '200') -and ($u2.code -eq '200') -and ($after -eq $legacy)) ("이름 " + $u1.code + " " + (ErrOf $u1) + ", 패킷 재전송 " + $u2.code + " " + (ErrOf $u2) + ", PARSE_RULE 유지 " + ($after -eq $legacy))
+        $bad = @($pk | ForEach-Object { $o = [ordered]@{}; foreach ($k in $_.Keys) { $o[$k] = $_[$k] }; if ($o['direction'] -eq 'RX') { $o['parseRule'] = '패킷길이|STX' }; $o })
+        $u3 = A 'UPDATE' ('{"ptlGrpCd":"GTEC","ptlCd":"GTEC0000","packets":' + (ConvertTo-Json -InputObject @($bad) -Depth 5 -Compress) + '}')
+        Check '11-11' '바꾼 비JSON PARSE_RULE → 400' (($u3.code -eq '400') -and ((ErrOf $u3) -match 'parseRule')) ("HTTP " + $u3.code + ", " + (ErrOf $u3))
+        $e1 = A 'GRP_UPDATE' '{"ptlGrpCd":"GTEC","frameRule":"{\"v\":1,\"kind\":\"SLIP\"}"}'
+        $e2 = A 'GRP_UPDATE' '{"ptlGrpCd":"GTEC","initRoutine":"GTEC0301,GTEC0400"}'
+        $e3 = A 'GRP_UPDATE' '{"ptlGrpCd":"GTEC","cmdGapMs":-1}'
+        $e4 = A 'GRP_UPDATE' '{"ptlGrpCd":"GTEC","initRoutine":"GTEC0301,NO_SUCH"}'
+        Check '11-12' '그룹 검사: FRAME_RULE·INIT_ROUTINE(RX_STREAM·없는 코드)·음수 간격 → 400' (($e1.code -eq '400') -and ($e2.code -eq '400') -and ($e3.code -eq '400') -and ($e4.code -eq '400')) ((ErrOf $e1) + " / " + (ErrOf $e2) + " / " + (ErrOf $e3) + " / " + (ErrOf $e4))
+        $e1 = A 'UPDATE' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0001","ptlRoles":"PROL9999"}'
+        $e2 = A 'UPDATE' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0001","ptlAction":"PACT9999"}'
+        $e3 = A 'UPDATE' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0001","expectRule":"{\"regex\":\"[\"}"}'
+        $e4 = A 'UPDATE' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0001","idempotentYn":"YENO0000"}'
+        $e5 = A 'UPDATE' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0001","ptlVal":"S{10,3}[XYZ]"}'
+        $e6 = A 'UPDATE' '{"ptlGrpCd":"GTEC","ptlCd":"GTEC0001","roles":"INFO"}'
+        Check '11-13' '프로토콜 검사: 역할·동작 코드, 응답판정, 멱등, 표현식, 미정의 필드 → 400' ((@($e1, $e2, $e3, $e4, $e5, $e6) | Where-Object { $_.code -ne '400' }).Count -eq 0) ((@($e1, $e2, $e3, $e4, $e5, $e6) | ForEach-Object { ErrOf $_ }) -join ' / ')
+        # 임시 그룹
+        $c0 = A 'GRP_CREATE' '{"ptlGrpCd":"C5C_G","ptlGrpNm":"c5c","frameRule":"{\"v\":1,\"kind\":\"DELIM\",\"end\":\"[LF]\"}","cmdGapMs":50,"initRoutine":"C5C_G0000","initDelayMs":100}'
+        $c1 = A 'CREATE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_RX","ptlType":"PROT0002","ptlNm":"rx","ptlRoles":"PROL0003"}'
+        $c2 = A 'CREATE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_RX","ptlType":"PROT0002","ptlNm":"rx","ptlRoles":"PROL0001","packets":[{"packetSeq":1,"direction":"RX","parseRule":"{\"v\":1,\"kind\":\"TEXT\",\"count\":2}"}]}'
+        $c3 = A 'CREATE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_TX","ptlType":"PROT0001","ptlNm":"tx","ptlRoles":"PROL0002"}'
+        Check '11-14' '역할 연계 검사: RX_STREAM 해석규칙·DATA 역할, 송신 표현식 → 400' (($c0.code -eq '200') -and ($c1.code -eq '400') -and ($c2.code -eq '400') -and ($c3.code -eq '400')) ("GRP_CREATE " + $c0.code + ", " + (ErrOf $c1) + " / " + (ErrOf $c2) + " / " + (ErrOf $c3))
+        $c4 = A 'CREATE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_RX","ptlType":"PROT0002","ptlNm":"rx","ptlRoles":"PROL0003","packets":[{"packetSeq":1,"direction":"RX","parseRule":"{\"v\":1,\"kind\":\"TEXT\",\"count\":2}"}]}'
+        $c5 = A 'CREATE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_TX","ptlType":"PROT0001","ptlNm":"tx","ptlRoles":"PROL0002,PROL0001","ptlAction":"PACT0001","ptlVal":"[STX]GO[ETX]","idempotentYn":"YENO0002","expectRule":"{\"startsWith\":\"OK\"}"}'
+        $c6 = A 'GRP_UPDATE' '{"ptlGrpCd":"C5C_G","initRoutine":"C5C_TX, C5C_G0000"}'
+        $s = C 'GET' '/api/core/sync/protocols/C5C_G' $CID $ck '' ''
+        $sg = $s.json.items[0]; $st = @($sg.protocols | Where-Object { $_.ptlCd -eq 'C5C_TX' })[0]; $sr = @($sg.protocols | Where-Object { $_.ptlCd -eq 'C5C_RX' })[0]
+        Check '11-15' '정상 저장 → 내려받기 반영 (역할 정렬·이름 변환)' (($c4.code -eq '200') -and ($c5.code -eq '200') -and ($c6.code -eq '200') -and ((@($sg.initRoutine) -join ',') -eq 'C5C_TX,C5C_G0000') -and ($sg.cmdGapMs -eq 50) -and ($sg.initDelayMs -eq 100) -and ((@($st.roles) -join ',') -eq 'INFO,CONTROL') -and ($st.action -eq 'START') -and ($st.idempotent -eq $false) -and ((@($sr.roles) -join ',') -eq 'DATA')) ("CREATE " + $c4.code + "/" + $c5.code + ", GRP_UPDATE " + $c6.code + ", init " + (@($sg.initRoutine) -join ',') + ", TX roles " + (@($st.roles) -join ',') + " " + $st.action + " " + $st.idempotent)
+        $d1 = A 'DELETE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_TX"}'
+        $d2 = A 'UPDATE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_TX","ptlType":"PROT0002","ptlRoles":"PROL0003","packets":[{"packetSeq":1,"direction":"RX","parseRule":"{\"v\":1,\"kind\":\"TEXT\"}"}]}'
+        $d3 = A 'DELETE' '{"ptlGrpCd":"C5C_G","ptlCd":"C5C_RX"}'
+        Check '11-16' '초기화 루틴 참조: 삭제 409 · RX_STREAM 변경 400, 미참조 삭제 200' (($d1.code -eq '409') -and ($d2.code -eq '400') -and ($d3.code -eq '200')) ("$($d1.code) / $($d2.code) " + (ErrOf $d2) + " / $($d3.code)")
+        $x = A 'GRP_DELETE' '{"ptlGrpCd":"C5C_G"}'
+        $legacyAll = V "SELECT COUNT(*) FROM ju_protocol p WHERE p.PTL_ROLES IS NULL AND p.USE_YN='YENO0001'"
+        Check '11-17' '임시 그룹 정리 · 미설정(역할 없음) 프로토콜 유지' (($x.code -eq '200') -and ([int]$legacyAll -gt 0)) ("GRP_DELETE " + $x.code + ", 역할 없는 프로토콜 $legacyAll")
     }
 
     Log ''; Log '===== 6. 서버 로그 오류 ====='

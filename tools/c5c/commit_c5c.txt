@@ -1,0 +1,14 @@
+feat(collect): protocol save validation, sync collect settings and data-map API (C5c)
+
+- ProtocolRules: expression, FRAME_RULE / PARSE_RULE JSON v1, EXPECT_RULE checks (same rules as
+  Desktop RuleReader; shared vectors desktop/tests/.../TestData/rule_vectors.json tested on both sides)
+- Protocol CRUD (Action v1, optional fields only): group frameRule/cmdGapMs/initRoutine/initDelayMs,
+  protocol ptlRoles/ptlAction/expectRule/idempotentYn. Roles/type consistency checked only when roles
+  are set; values re-sent unchanged are not re-checked (GTEC0000 legacy non-JSON PARSE_RULE keeps working).
+  Protocol referenced by group INIT_ROUTINE: delete 409, change to RX_STREAM 400.
+- Sync response: group frameRule/cmdGapMs/initRoutine[]/initDelayMs, protocol roles[]/action/expect/idempotent
+- GET /api/core/sync/data-map?devCd= (Client chain, GET only)
+- Requires migration 08 (C5b) in the DB. No DB change, no new dependency.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

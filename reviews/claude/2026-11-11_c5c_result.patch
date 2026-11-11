@@ -1,0 +1,2428 @@
+From b1c23e5d67232425e04ca6fda7bdd42a0743faed Mon Sep 17 00:00:00 2001
+From: JU <jusamuel@gmail.com>
+Date: Wed, 11 Nov 2026 21:13:57 +0900
+Subject: [PATCH] feat(collect): protocol save validation, sync collect
+ settings and data-map API (C5c)
+
+- ProtocolRules: expression, FRAME_RULE / PARSE_RULE JSON v1, EXPECT_RULE checks (same rules as
+  Desktop RuleReader; shared vectors desktop/tests/.../TestData/rule_vectors.json tested on both sides)
+- Protocol CRUD (Action v1, optional fields only): group frameRule/cmdGapMs/initRoutine/initDelayMs,
+  protocol ptlRoles/ptlAction/expectRule/idempotentYn. Roles/type consistency checked only when roles
+  are set; values re-sent unchanged are not re-checked (GTEC0000 legacy non-JSON PARSE_RULE keeps working).
+  Protocol referenced by group INIT_ROUTINE: delete 409, change to RX_STREAM 400.
+- Sync response: group frameRule/cmdGapMs/initRoutine[]/initDelayMs, protocol roles[]/action/expect/idempotent
+- GET /api/core/sync/data-map?devCd= (Client chain, GET only)
+- Requires migration 08 (C5b) in the DB. No DB change, no new dependency.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../RuleVectorTests.cs                        |  42 ++
+ .../TestData/rule_vectors.json                | 189 +++++++++
+ .../controller/ProtocolSyncController.java    |  10 +
+ .../action/ProtocolContractTest.java          |  28 +-
+ .../core/protocol/ProtocolRulesTest.java      |  84 ++++
+ .../core/protocol/ProtocolServiceC5cTest.java | 257 ++++++++++++
+ .../protocolsync/ProtocolSyncServiceTest.java |  76 ++++
+ .../protocol/action/ProtocolContracts.java    |  45 +-
+ .../core/protocol/dao/ProtocolDao.java        |   6 +
+ .../core/protocol/rule/MiniJson.java          | 232 +++++++++++
+ .../core/protocol/rule/ProtocolRules.java     | 386 ++++++++++++++++++
+ .../protocol/service/ProtocolService.java     | 318 ++++++++++++++-
+ .../protocolsync/dao/ProtocolSyncDao.java     |   6 +
+ .../protocolsync/dto/DataChannelMapSync.java  |  17 +
+ .../protocolsync/dto/ProtocolGroupSync.java   |   9 +-
+ .../core/protocolsync/dto/ProtocolSync.java   |  10 +-
+ .../service/ProtocolSyncService.java          |  83 ++++
+ .../main/resources/mapper/ProtocolMapper.xml  |  45 +-
+ .../resources/mapper/ProtocolSyncMapper.xml   |  47 ++-
+ 19 files changed, 1865 insertions(+), 25 deletions(-)
+ create mode 100644 desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+ create mode 100644 desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+ create mode 100644 juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+ create mode 100644 juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/MiniJson.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java
+ create mode 100644 juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataChannelMapSync.java
+
+diff --git a/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs b/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+new file mode 100644
+index 0000000..9d4e9ca
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+@@ -0,0 +1,42 @@
++using System.Text.Json;
++using JuProvider.Lib.Protocol.Expression;
++using JuProvider.Lib.Protocol.Rules;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>C5c 서버(Java ProtocolRules)와 같은 공통 판정 벡터 (TestData/rule_vectors.json)</summary>
++public class RuleVectorTests
++{
++    private static JsonElement Vectors()
++    {
++        string path = Path.Combine(AppContext.BaseDirectory, "TestData", "rule_vectors.json");
++        using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(path));
++        return doc.RootElement.Clone();
++    }
++
++    private static int Verify(JsonElement list, string key, Action<string> check)
++    {
++        int n = 0;
++        foreach (JsonElement v in list.EnumerateArray())
++        {
++            string value = v.GetProperty(key).GetString()!;
++            bool ok = v.GetProperty("ok").GetBoolean();
++            Exception? error = null;
++            try { check(value); }
++            catch (FormatException ex) { error = ex; }
++            Assert.True(ok == (error is null), $"{key} '{value}': 기대 {(ok ? "통과" : "오류")}, 실제 {(error is null ? "통과" : error.Message)}");
++            n++;
++        }
++        return n;
++    }
++
++    [Fact]
++    public void Shared_Vectors_Match_Server()
++    {
++        JsonElement root = Vectors();
++        int n = Verify(root.GetProperty("frame"), "rule", s => RuleReader.ReadFrameRule(s))
++              + Verify(root.GetProperty("parse"), "rule", s => RuleReader.ReadParseRule(s))
++              + Verify(root.GetProperty("expression"), "expr", s => ProtocolExpression.ToBytes(s));
++        Assert.True(n >= 40, $"벡터 수 {n}");
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json b/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+new file mode 100644
+index 0000000..76f64b8
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+@@ -0,0 +1,189 @@
++{
++ "_comment": "C5c 서버(Java ProtocolRules)·Desktop(C# RuleReader/ProtocolExpression) 공통 판정 벡터. ok=true 면 양쪽 모두 통과, false 면 양쪽 모두 오류.",
++ "frame": [
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\"}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"STXETX\",\"escape\":\"[DLE]\"}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"FIXED\",\"len\":8,\"checksum\":{\"type\":\"SUM8\",\"from\":1,\"to\":6}}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"lenfield\",\"offset\":2,\"size\":2,\"endian\":\"LE\",\"adjust\":-1,\"includesHeader\":true}",
++   "ok": true
++  },
++  {
++   "rule": "{\"kind\":\"DELIM\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":2,\"kind\":\"DELIM\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"SLIP\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"end\":\"[XX]\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"maxLen\":0}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"maxLen\":1.5}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"STXETX\",\"stx\":\"AB\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"FIXED\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"LENFIELD\",\"offset\":0,\"size\":3}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"checksum\":{\"type\":\"CRC32\"}}",
++   "ok": false
++  },
++  {
++   "rule": "[1,2]",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"DELIM\",}",
++   "ok": false
++  },
++  {
++   "rule": "not json",
++   "ok": false
++  }
++ ],
++ "parse": [
++  {
++   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{}\",\"sep\":\"SPACE\",\"count\":3}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"INFO\",\"trim\":\"{}\",\"fields\":[\"CH1\",\"CH2\",\"CH3\",\"CH4\"],\"absent\":\"000\"}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"map\":\"samples\",\"sep\":\"comma\"}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"u16\",\"endian\":\"BE\",\"scale\":0.1}]}",
++   "ok": true
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"count\":-1}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"sep\":\"PIPE\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"map\":\"ROWS\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"INFO\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"INFO\",\"fields\":[\"CH1\",\"CH1\"]}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[]}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"U24\"}]}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"U8\"},{\"key\":\"a\",\"offset\":1,\"type\":\"U8\"}]}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"CSV\"}",
++   "ok": false
++  },
++  {
++   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"count\":\"3\"}",
++   "ok": false
++  }
++ ],
++ "expression": [
++  {
++   "expr": "S{10,1}[CR][LF]",
++   "ok": true
++  },
++  {
++   "expr": "[STX]ABC[00][ETX]",
++   "ok": true
++  },
++  {
++   "expr": "[cr][lf]",
++   "ok": true
++  },
++  {
++   "expr": "[ 0d ]",
++   "ok": true
++  },
++  {
++   "expr": "",
++   "ok": true
++  },
++  {
++   "expr": "[CR",
++   "ok": false
++  },
++  {
++   "expr": "[XYZ]",
++   "ok": false
++  },
++  {
++   "expr": "[0G]",
++   "ok": false
++  },
++  {
++   "expr": "가",
++   "ok": false
++  },
++  {
++   "expr": "[123]",
++   "ok": false
++  }
++ ]
++}
+diff --git a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java
+index 4330638..c34a276 100644
+--- a/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java
++++ b/juprovider.backend/src/main/java/com/asdp/juprovider/controller/ProtocolSyncController.java
+@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
+ import org.springframework.web.bind.annotation.RequestParam;
+ import org.springframework.web.bind.annotation.RestController;
+ 
++import com.asdp.juprovider.core.protocolsync.dto.DataChannelMapSync;
+ import com.asdp.juprovider.core.protocolsync.dto.DataTagSync;
+ import com.asdp.juprovider.core.protocolsync.dto.ProtocolGroupSync;
+ import com.asdp.juprovider.core.protocolsync.dto.SyncResult;
+@@ -16,6 +17,7 @@ import com.asdp.juprovider.core.protocolsync.service.ProtocolSyncService;
+  * C4 프로토콜·데이터 태그 내려받기 (Client 체인: X-JU-Client-Id / X-JU-Client-Key, GET 만).
+  *
+  * 응답: { revision, items, removed }
++ * C5c: GET /data-map 채널 매핑 추가 (같은 Client 체인·GET 만).
+  */
+ @RestController
+ @RequestMapping("/api/core/sync")
+@@ -50,4 +52,12 @@ public class ProtocolSyncController {
+         String dev = devCd == null || devCd.isBlank() ? null : devCd.trim();
+         return ResponseEntity.ok(protocolSyncService.getDataTags(dev));
+     }
++
++    /** C5c 장치 채널 → 논리 Data 매핑 (devCd 없으면 전체). 매핑이 없는 장치는 빈 목록 */
++    @GetMapping("/data-map")
++    public ResponseEntity<SyncResult<DataChannelMapSync>> getDataMap(
++            @RequestParam(name = "devCd", required = false) String devCd) {
++        String dev = devCd == null || devCd.isBlank() ? null : devCd.trim();
++        return ResponseEntity.ok(protocolSyncService.getDataMap(dev));
++    }
+ }
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/action/ProtocolContractTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/action/ProtocolContractTest.java
+index 9304c4b..cab2b2c 100644
+--- a/juprovider.backend/src/test/java/com/asdp/juprovider/action/ProtocolContractTest.java
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/action/ProtocolContractTest.java
+@@ -79,7 +79,8 @@ class ProtocolContractTest {
+         raw.put("packets", List.of(new java.util.HashMap<>(Map.of("direction", "TX", "packetSeq", 1, "secret", 1))));
+         Map<String, Object> out = (Map<String, Object>) ActionOutputNormalizer.normalize(ProtocolContracts.GET, raw);
+         assertEquals(List.of("ptlGrpCd", "ptlCd", "ptlType", "ptlTypeNm", "ptlLen", "ptlNm", "ptlDesc", "useYn",
+-                "ptlVal", "ptlNmKey", "ptlDescKey", "packets"), List.copyOf(out.keySet()));
++                "ptlVal", "ptlNmKey", "ptlDescKey", "ptlRoles", "ptlAction", "expectRule", "idempotentYn", "packets"),
++                List.copyOf(out.keySet()));
+         assertTrue(out.containsKey("ptlLen") && out.get("ptlLen") == null);
+         Map<String, Object> packet = (Map<String, Object>) ((List<?>) out.get("packets")).get(0);
+         assertTrue(!packet.containsKey("secret") && packet.containsKey("dataPosition"));
+@@ -89,4 +90,29 @@ class ProtocolContractTest {
+         assertEquals(1, list.total());
+         assertEquals(9, ((Map<?, ?>) list.items().get(0)).size());
+     }
++
++    /** C5c: 수집 설정·역할은 선택 입력 (기존 v1 호출 그대로 통과), 상세 출력에 추가 */
++    @Test
++    void c5cOptionalCollectFields() {
++        ActionInputValidator v = new ActionInputValidator(grp -> switch (grp) {
++            case "PROT" -> Set.of("PROT0000", "PROT0002");
++            case "PACT" -> Set.of("PACT0000", "PACT0003");
++            default -> Set.of("YENO0000", "YENO0001", "YENO0002");
++        });
++        v.validate(ProtocolContracts.GRP_CREATE, Map.of("ptlGrpCd", "SMK", "ptlGrpNm", "n"));
++        v.validate(ProtocolContracts.GRP_CREATE, Map.of("ptlGrpCd", "SMK", "ptlGrpNm", "n",
++                "frameRule", "{\"v\":1,\"kind\":\"DELIM\"}", "cmdGapMs", 200, "initRoutine", "SMK0000", "initDelayMs", 500));
++        v.validate(ProtocolContracts.GRP_UPDATE, Map.of("ptlGrpCd", "SMK", "cmdGapMs", 0));
++        v.validate(ProtocolContracts.UPDATE, Map.of("ptlGrpCd", "SMK", "ptlCd", "SMK0001",
++                "ptlRoles", "PROL0001", "ptlAction", "PACT0003", "expectRule", "{\"startsWith\":\"{\"}", "idempotentYn", "YENO0001"));
++        ActionValidationException e = assertThrows(ActionValidationException.class,
++                () -> v.validate(ProtocolContracts.UPDATE, Map.of("ptlGrpCd", "SMK", "ptlCd", "SMK0001", "ptlAction", "PACT9999")));
++        assertEquals("INVALID_CODE", e.getErrors().get(0).code());
++
++        @SuppressWarnings("unchecked")
++        Map<String, Object> group = (Map<String, Object>) ActionOutputNormalizer.normalize(ProtocolContracts.GRP_GET,
++                new java.util.HashMap<>(Map.of("ptlGrpCd", "GTEC", "cmdGapMs", 200)));
++        assertTrue(group.containsKey("frameRule") && group.containsKey("initRoutine") && group.containsKey("initDelayMs"));
++        assertEquals(200, ((Number) group.get("cmdGapMs")).intValue());
++    }
+ }
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+new file mode 100644
+index 0000000..91639ea
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+@@ -0,0 +1,84 @@
++package com.asdp.juprovider.core.protocol;
++
++import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.junit.jupiter.api.Assertions.fail;
++
++import java.nio.file.Files;
++import java.nio.file.Path;
++
++import org.junit.jupiter.api.Test;
++
++import com.asdp.juprovider.core.protocol.rule.ProtocolRules;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++
++/** C5c 규칙 검사 — Desktop 과 같은 공통 벡터 + 응답 판정 */
++class ProtocolRulesTest {
++
++    /** Desktop 테스트(RuleVectorTests)와 같은 파일 */
++    private static final Path VECTORS = Path.of("..", "desktop", "tests", "juprovider.tests.protocol", "TestData", "rule_vectors.json");
++
++    private interface Check {
++        void run(String value);
++    }
++
++    private static int verify(JsonNode list, String key, Check check) {
++        int n = 0;
++        for (JsonNode v : list) {
++            String value = v.get(key).asText();
++            boolean ok = v.get("ok").asBoolean();
++            try {
++                check.run(value);
++                if (!ok) {
++                    fail("통과하면 안 됨: " + value);
++                }
++            } catch (ProtocolRules.RuleException e) {
++                if (ok) {
++                    fail("통과해야 함: " + value + " → " + e.getMessage());
++                }
++            }
++            n++;
++        }
++        return n;
++    }
++
++    @Test
++    void sharedVectorsMatchDesktop() throws Exception {
++        assertTrue(Files.exists(VECTORS), VECTORS.toAbsolutePath().toString());
++        JsonNode root = new ObjectMapper().readTree(Files.readString(VECTORS));
++        int n = verify(root.get("frame"), "rule", ProtocolRules::validateFrameRule)
++                + verify(root.get("parse"), "rule", ProtocolRules::validateParseRule)
++                + verify(root.get("expression"), "expr", ProtocolRules::validateExpression);
++        assertTrue(n >= 40, "벡터 수 " + n);
++    }
++
++    @Test
++    void gtecVerifiedValuesPass() {
++        assertDoesNotThrow(() -> ProtocolRules.validateFrameRule("{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}"));
++        assertDoesNotThrow(() -> ProtocolRules.validateParseRule("{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{}\",\"sep\":\"SPACE\",\"count\":3}"));
++        assertDoesNotThrow(() -> ProtocolRules.validateExpectRule("{\"startsWith\":\"{OK\"}"));
++        assertDoesNotThrow(() -> ProtocolRules.validateExpectRule("{\"regex\":\"^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$\"}"));
++        assertDoesNotThrow(() -> ProtocolRules.validateExpectRule("{\"regex\":\"^\\\\{[A-Za-z]\"}"));
++        assertEquals(9, ProtocolRules.expressionLength("S{10,1}[CR][LF]"));
++    }
++
++    @Test
++    void gtec0000LegacyParseRuleIsNotJson() {
++        String legacy = "패킷길이|STX DLE|ETX|ETX DLE";
++        assertFalse(ProtocolRules.isJsonRule(legacy));
++        assertThrows(ProtocolRules.RuleException.class, () -> ProtocolRules.validateParseRule(legacy));
++    }
++
++    @Test
++    void expectRuleErrors() {
++        for (String bad : new String[] {
++                "", "x", "[]", "{}", "{\"startsWith\":\"\"}", "{\"startsWith\":1}", "{\"contains\":\"a\"}",
++                "{\"startsWith\":\"a\",\"regex\":\"b\"}", "{\"regex\":\"[\"}" }) {
++            assertThrows(ProtocolRules.RuleException.class, () -> ProtocolRules.validateExpectRule(bad), bad);
++        }
++    }
++}
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java
+new file mode 100644
+index 0000000..4d2cde0
+--- /dev/null
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolServiceC5cTest.java
+@@ -0,0 +1,257 @@
++package com.asdp.juprovider.core.protocol;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.argThat;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++import com.asdp.juprovider.core.action.contract.ActionContract;
++import com.asdp.juprovider.core.action.contract.ActionFieldError;
++import com.asdp.juprovider.core.action.contract.ActionInput;
++import com.asdp.juprovider.core.action.contract.ActionInputValidator;
++import com.asdp.juprovider.core.action.dao.ActionCodeDao;
++import com.asdp.juprovider.core.action.exception.ActionConflictException;
++import com.asdp.juprovider.core.action.exception.ActionValidationException;
++import com.asdp.juprovider.core.protocol.action.ProtocolContracts;
++import com.asdp.juprovider.core.protocol.dao.ProtocolDao;
++import com.asdp.juprovider.core.protocol.service.ProtocolService;
++
++/** C5c Protocol CRUD 저장 검사 (DB 없이 mock DAO) */
++class ProtocolServiceC5cTest {
++
++    private static final String LEGACY_PARSE = "패킷길이|STX DLE|ETX|ETX DLE";
++
++    private static final String TEXT_PARSE = "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{}\",\"sep\":\"SPACE\",\"count\":3}";
++
++    private final ActionInputValidator validator = new ActionInputValidator(grp -> switch (grp) {
++        case "PROT" -> Set.of("PROT0000", "PROT0001", "PROT0002", "PROT0003");
++        case "PACT" -> Set.of("PACT0000", "PACT0001", "PACT0002", "PACT0003");
++        default -> Set.of("YENO0000", "YENO0001", "YENO0002");
++    });
++
++    private ProtocolDao dao;
++
++    private ProtocolService service;
++
++    private static Map<String, Object> m(Object... kv) {
++        Map<String, Object> r = new HashMap<>();
++        for (int i = 0; i < kv.length; i += 2) {
++            r.put((String) kv[i], kv[i + 1]);
++        }
++        return r;
++    }
++
++    private ActionInput in(ActionContract contract, Object... kv) {
++        return validator.validate(contract, m(kv));
++    }
++
++    @BeforeEach
++    void setUp() {
++        dao = mock(ProtocolDao.class);
++        ActionCodeDao codes = mock(ActionCodeDao.class);
++        when(codes.selectActiveCodes("PROL")).thenReturn(List.of("PROL0001", "PROL0002", "PROL0003"));
++        service = new ProtocolService(dao, codes);
++
++        when(dao.selectGroupUseYn("GTEC")).thenReturn("YENO0001");
++        when(dao.selectProtocolUseYn(eq("GTEC"), anyString())).thenReturn("YENO0001");
++        when(dao.selectProtocolUseYn("GTEC", "GTEC9999")).thenReturn(null);
++        when(dao.selectGroupInitRoutine("GTEC")).thenReturn("GTEC0301,GTEC0001");
++        when(dao.selectProtocolStates("GTEC")).thenReturn(List.of(
++                m("ptlCd", "GTEC0000", "ptlType", "PROT0003", "useYn", "YENO0001"),
++                m("ptlCd", "GTEC0001", "ptlType", "PROT0003", "useYn", "YENO0001"),
++                m("ptlCd", "GTEC0301", "ptlType", "PROT0001", "useYn", "YENO0001"),
++                m("ptlCd", "GTEC0400", "ptlType", "PROT0002", "useYn", "YENO0001"),
++                m("ptlCd", "GTEC0999", "ptlType", "PROT0001", "useYn", "YENO0002")));
++        // GTEC0000: 과거 데이터 (역할 없음, RX 패킷 PARSE_RULE 이 JSON 아님)
++        when(dao.selectProtocol(eq("GTEC"), eq("GTEC0000"), anyString())).thenReturn(
++                m("ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "ptlType", "PROT0000", "ptlVal", "S{TEST}[CR][LF]"));
++        when(dao.selectPackets("GTEC", "GTEC0000")).thenReturn(List.of(
++                m("packetSeq", 1, "direction", "TX", "packetExpr", "S{TEST}[CR][LF]"),
++                m("packetSeq", 2, "direction", "RX", "packetExpr", "{OK}[CR][LF]", "parseRule", LEGACY_PARSE)));
++        when(dao.selectProtocol(eq("GTEC"), eq("GTEC0400"), anyString())).thenReturn(
++                m("ptlGrpCd", "GTEC", "ptlCd", "GTEC0400", "ptlType", "PROT0002", "ptlRoles", "PROL0003"));
++        when(dao.selectPackets("GTEC", "GTEC0400")).thenReturn(List.of(
++                m("packetSeq", 1, "direction", "RX", "parseRule", TEXT_PARSE)));
++        when(dao.selectProtocol(eq("GTEC"), eq("GTEC0001"), anyString())).thenReturn(
++                m("ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "ptlType", "PROT0003", "ptlVal", "S{10,3}[CR][LF]", "ptlRoles", "PROL0001"));
++    }
++
++    private static ActionFieldError error(Runnable r) {
++        ActionValidationException e = assertThrows(ActionValidationException.class, r::run);
++        return e.getErrors().get(0);
++    }
++
++    // ----- GTEC0000 과거 데이터 호환 -----
++
++    @Test
++    void legacyProtocolNameOnlyUpdatePasses() {
++        service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0000", "ptlNm", "장치확인"));
++        verify(dao).updateProtocol(any());
++    }
++
++    @Test
++    void legacyParseRuleResentUnchangedPasses() {
++        service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0000",
++                "ptlVal", "S{TEST}[CR][LF]",
++                "packets", List.of(
++                        m("packetSeq", 1, "direction", "TX", "packetExpr", "S{TEST}[CR][LF]"),
++                        m("packetSeq", 2, "direction", "RX", "packetExpr", "{OK}[CR][LF]", "parseRule", LEGACY_PARSE))));
++        verify(dao).deletePackets("GTEC", "GTEC0000");
++    }
++
++    @Test
++    void changedNonJsonParseRuleRejected() {
++        ActionFieldError e = error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0000",
++                "packets", List.of(m("packetSeq", 2, "direction", "RX", "parseRule", "패킷길이|STX")))));
++        assertEquals("packets[0].parseRule", e.field());
++        verify(dao, never()).updateProtocol(any());
++    }
++
++    @Test
++    void legacyParseRuleMovedToOtherSeqIsChecked() {
++        ActionFieldError e = error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0000",
++                "packets", List.of(m("packetSeq", 3, "direction", "RX", "parseRule", LEGACY_PARSE)))));
++        assertEquals("packets[0].parseRule", e.field());
++    }
++
++    // ----- 역할 · 유형 -----
++
++    @Test
++    void rolesMustBeProlCodes() {
++        ActionFieldError e = error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001",
++                "ptlRoles", "PROL0001,INFO")));
++        assertEquals("ptlRoles", e.field());
++        assertEquals(ActionFieldError.INVALID_CODE, e.code());
++        assertEquals(ActionFieldError.DUPLICATE, error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "ptlRoles", "PROL0001,PROL0001"))).code());
++    }
++
++    @Test
++    void rolesStoredSortedWithCollectFields() {
++        service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001",
++                "ptlRoles", "PROL0002, PROL0001", "ptlAction", "PACT0000", "expectRule", " {\"regex\":\"^[{][A-Za-z]\"} ",
++                "idempotentYn", "YENO0002"));
++        verify(dao).updateProtocol(argThat(p -> "PROL0001,PROL0002".equals(p.get("ptlRoles"))
++                && "PACT0000".equals(p.get("ptlAction"))
++                && "{\"regex\":\"^[{][A-Za-z]\"}".equals(p.get("expectRule"))
++                && "YENO0002".equals(p.get("idempotentYn"))));
++    }
++
++    @Test
++    void idempotentMustBeYesOrNo() {
++        assertEquals("idempotentYn", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "idempotentYn", "YENO0000"))).field());
++    }
++
++    @Test
++    void expectRuleChecked() {
++        assertEquals("expectRule", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "expectRule", "{\"regex\":\"[\"}"))).field());
++    }
++
++    @Test
++    void rxStreamNeedsDataRoleAndJsonParseRule() {
++        assertEquals("ptlRoles", error(() -> service.createProtocol(in(ProtocolContracts.CREATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC9999", "ptlType", "PROT0002", "ptlNm", "n", "ptlRoles", "PROL0001",
++                "packets", List.of(m("packetSeq", 1, "direction", "RX", "parseRule", TEXT_PARSE))))).field());
++        assertEquals("packets", error(() -> service.createProtocol(in(ProtocolContracts.CREATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC9999", "ptlType", "PROT0002", "ptlNm", "n", "ptlRoles", "PROL0003"))).field());
++        service.createProtocol(in(ProtocolContracts.CREATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC9999", "ptlType", "PROT0002", "ptlNm", "n", "ptlRoles", "PROL0003",
++                "packets", List.of(m("packetSeq", 1, "direction", "RX", "parseRule", TEXT_PARSE))));
++        verify(dao).insertProtocol(argThat(p -> "PROL0003".equals(p.get("ptlRoles"))));
++    }
++
++    @Test
++    void rxStreamUpdateUsesExistingPacketsWhenNotSent() {
++        service.updateProtocol(in(ProtocolContracts.UPDATE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0400", "ptlNm", "저속"));
++        verify(dao).updateProtocol(any());
++    }
++
++    @Test
++    void sendProtocolWithRolesNeedsTxExpression() {
++        assertEquals("ptlVal", error(() -> service.createProtocol(in(ProtocolContracts.CREATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC9999", "ptlType", "PROT0001", "ptlNm", "n", "ptlRoles", "PROL0002"))).field());
++        // 역할 없음(v1 호출) → 연계 검사 없음
++        service.createProtocol(in(ProtocolContracts.CREATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC9999", "ptlType", "PROT0001", "ptlNm", "n"));
++    }
++
++    @Test
++    void routineProtocolCannotBecomeRxStream() {
++        assertEquals("ptlType", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "ptlType", "PROT0002", "ptlRoles", "PROL0003",
++                "packets", List.of(m("packetSeq", 1, "direction", "RX", "parseRule", TEXT_PARSE))))).field());
++    }
++
++    @Test
++    void expressionSyntaxChecked() {
++        ActionFieldError e = error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001", "ptlVal", "S{10,3}[XYZ]")));
++        assertEquals("ptlVal", e.field());
++        assertTrue(e.message().contains("[XYZ]"));
++        assertEquals("packets[0].packetExpr", error(() -> service.updateProtocol(in(ProtocolContracts.UPDATE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0001",
++                "packets", List.of(m("packetSeq", 1, "direction", "TX", "packetExpr", "[CR")))))
++                .field());
++    }
++
++    // ----- 그룹 -----
++
++    @Test
++    void groupFrameRuleAndRoutineChecked() {
++        assertEquals("frameRule", error(() -> service.updateGroup(in(ProtocolContracts.GRP_UPDATE,
++                "ptlGrpCd", "GTEC", "frameRule", "{\"v\":1,\"kind\":\"SLIP\"}"))).field());
++        assertTrue(error(() -> service.updateGroup(in(ProtocolContracts.GRP_UPDATE,
++                "ptlGrpCd", "GTEC", "initRoutine", "GTEC0301,GTEC0400"))).message().contains("RX_STREAM"));
++        assertTrue(error(() -> service.updateGroup(in(ProtocolContracts.GRP_UPDATE,
++                "ptlGrpCd", "GTEC", "initRoutine", "GTEC0301,GTEC0999"))).message().contains("GTEC0999"));
++        assertEquals("initRoutine", error(() -> service.updateGroup(in(ProtocolContracts.GRP_UPDATE,
++                "ptlGrpCd", "GTEC", "initRoutine", "GTEC0301,,GTEC0001"))).field());
++        assertEquals("cmdGapMs", error(() -> service.updateGroup(in(ProtocolContracts.GRP_UPDATE,
++                "ptlGrpCd", "GTEC", "cmdGapMs", -1))).field());
++
++        service.updateGroup(in(ProtocolContracts.GRP_UPDATE, "ptlGrpCd", "GTEC",
++                "frameRule", "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}",
++                "cmdGapMs", 200, "initRoutine", " GTEC0301 , GTEC0001 ", "initDelayMs", 500));
++        verify(dao).updateGroup(argThat(g -> "GTEC0301,GTEC0001".equals(g.get("initRoutine"))
++                && Integer.valueOf(200).equals(g.get("cmdGapMs"))));
++    }
++
++    @Test
++    void groupCreateDefaults() {
++        when(dao.selectGroupUseYn("NEW")).thenReturn(null);
++        service.createGroup(in(ProtocolContracts.GRP_CREATE, "ptlGrpCd", "NEW", "ptlGrpNm", "새 그룹"));
++        verify(dao).insertGroup(argThat(g -> Integer.valueOf(0).equals(g.get("cmdGapMs"))
++                && Integer.valueOf(500).equals(g.get("initDelayMs")) && g.get("frameRule") == null));
++        // 새 그룹의 초기화 루틴은 기본 프로토콜만
++        assertEquals("initRoutine", error(() -> service.createGroup(in(ProtocolContracts.GRP_CREATE,
++                "ptlGrpCd", "NEW", "ptlGrpNm", "n", "initRoutine", "GTEC0001"))).field());
++        when(dao.selectGroupUseYn("NEW2")).thenReturn(null);
++        service.createGroup(in(ProtocolContracts.GRP_CREATE, "ptlGrpCd", "NEW2", "ptlGrpNm", "n", "initRoutine", "NEW20000"));
++    }
++
++    @Test
++    void deleteProtocolInRoutineConflicts() {
++        assertThrows(ActionConflictException.class, () -> service.deleteProtocol(in(ProtocolContracts.DELETE,
++                "ptlGrpCd", "GTEC", "ptlCd", "GTEC0301")));
++        verify(dao, never()).softDeleteProtocol(anyString(), anyString());
++        service.deleteProtocol(in(ProtocolContracts.DELETE, "ptlGrpCd", "GTEC", "ptlCd", "GTEC0400"));
++        verify(dao).softDeleteProtocol("GTEC", "GTEC0400");
++    }
++}
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java
+index 1d7021b..c46ee6f 100644
+--- a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocolsync/ProtocolSyncServiceTest.java
+@@ -14,6 +14,7 @@ import java.util.Map;
+ import org.junit.jupiter.api.Test;
+ 
+ import com.asdp.juprovider.core.protocolsync.dao.ProtocolSyncDao;
++import com.asdp.juprovider.core.protocolsync.dto.DataChannelMapSync;
+ import com.asdp.juprovider.core.protocolsync.dto.DataTagSync;
+ import com.asdp.juprovider.core.protocolsync.dto.ProtocolGroupSync;
+ import com.asdp.juprovider.core.protocolsync.dto.SyncResult;
+@@ -35,6 +36,8 @@ class ProtocolSyncServiceTest {
+         final List<Map<String, Object>> protocols = new ArrayList<>();
+         final List<Map<String, Object>> packets = new ArrayList<>();
+         final List<Map<String, Object>> tags = new ArrayList<>();
++        final List<Map<String, Object>> maps = new ArrayList<>();
++        final Map<String, List<Map<String, Object>>> codes = new HashMap<>();
+         String lastGroupArg = "unset";
+         String lastDevArg = "unset";
+ 
+@@ -59,6 +62,17 @@ class ProtocolSyncServiceTest {
+             lastDevArg = devCd;
+             return tags.stream().filter(r -> devCd == null || devCd.equals(r.get("devCd"))).toList();
+         }
++
++        @Override
++        public List<Map<String, Object>> selectCodeValues(String grpCd) {
++            return codes.getOrDefault(grpCd, List.of());
++        }
++
++        @Override
++        public List<Map<String, Object>> selectSyncDataMap(String devCd) {
++            lastDevArg = devCd;
++            return maps.stream().filter(r -> devCd == null || devCd.equals(r.get("devCd"))).toList();
++        }
+     }
+ 
+     private static FakeDao gtec() {
+@@ -139,4 +153,66 @@ class ProtocolSyncServiceTest {
+         assertEquals(1500, g.timeoutMs());
+         assertEquals(3, g.retryCnt());
+     }
++
++    /** C5c: 그룹 수집 설정·프로토콜 역할 필드, 미설정 기본값 */
++    @Test
++    void collectSettingsAndRoles() {
++        FakeDao dao = gtec();
++        dao.codes.put("PROL", List.of(row("comCd", "PROL0001", "comVal", "INFO"), row("comCd", "PROL0003", "comVal", "DATA")));
++        dao.codes.put("PACT", List.of(row("comCd", "PACT0003", "comVal", "STOP")));
++        dao.groups.get(0).putAll(row("frameRule", "{\"v\":1,\"kind\":\"DELIM\"}", "cmdGapMs", 200,
++                "initRoutine", "GTEC0001,GTEC0000", "initDelayMs", 500));
++        dao.protocols.get(0).putAll(row("ptlRoles", "PROL0001,PROL0003", "ptlAction", "PACT0003",
++                "expectRule", "{\"startsWith\":\"{OK\"}", "idempotentYn", "YENO0001"));
++        dao.protocols.get(1).put("idempotentYn", "YENO0002");
++
++        List<ProtocolGroupSync> items = new ProtocolSyncService(dao).getProtocolGroups(null).items();
++        ProtocolGroupSync g = items.get(0);
++        assertEquals("{\"v\":1,\"kind\":\"DELIM\"}", g.frameRule());
++        assertEquals(200, g.cmdGapMs());
++        assertEquals(List.of("GTEC0001", "GTEC0000"), g.initRoutine());
++        assertEquals(500, g.initDelayMs());
++        assertEquals(List.of("INFO", "DATA"), g.protocols().get(0).roles());
++        assertEquals("STOP", g.protocols().get(0).action());
++        assertEquals("{\"startsWith\":\"{OK\"}", g.protocols().get(0).expect());
++        assertEquals(Boolean.TRUE, g.protocols().get(0).idempotent());
++        assertEquals(Boolean.FALSE, g.protocols().get(1).idempotent());
++        assertTrue(g.protocols().get(1).roles().isEmpty());
++        assertNull(g.protocols().get(1).action());
++
++        ProtocolGroupSync other = items.get(1);
++        assertNull(other.frameRule());
++        assertEquals(0, other.cmdGapMs());
++        assertTrue(other.initRoutine().isEmpty());
++        assertEquals(500, other.initDelayMs());
++    }
++
++    /** C5c: 채널 매핑 내려받기 */
++    @Test
++    void dataMap() {
++        FakeDao dao = gtec();
++        dao.maps.add(row("devCd", "SDEV_GTEC01", "channelKey", "1", "datGrCd", "DG_GTEC01", "datCd", "GTEC-DATA-01",
++                "datIdx", 1, "scale", 1.0d, "offsetVal", 0.0d, "sortOrd", 1));
++        dao.maps.add(row("devCd", "SDEV_GTEC01", "channelKey", "2", "ptlCd", "GTEC0400", "datGrCd", "DG_GTEC01",
++                "datCd", "GTEC-DATA-02", "datIdx", 2, "scale", 10.0d, "offsetVal", -0.5d, "sortOrd", 2));
++        dao.maps.add(row("devCd", "OTHER", "channelKey", "1", "datGrCd", "G", "datCd", "D", "datIdx", 1));
++
++        ProtocolSyncService service = new ProtocolSyncService(dao);
++        SyncResult<DataChannelMapSync> r = service.getDataMap("SDEV_GTEC01");
++        assertEquals("SDEV_GTEC01", dao.lastDevArg);
++        assertEquals(2, r.items().size());
++        DataChannelMapSync m = r.items().get(1);
++        assertEquals("2", m.channelKey());
++        assertEquals("GTEC0400", m.ptlCd());
++        assertEquals(10.0, m.scale());
++        assertEquals(-0.5, m.offset());
++        assertNull(r.items().get(0).ptlCd());
++        assertEquals(64, r.revision().length());
++        assertEquals(r.revision(), service.getDataMap("SDEV_GTEC01").revision());
++        assertEquals(3, service.getDataMap(null).items().size());
++        DataChannelMapSync d = service.getDataMap("OTHER").items().get(0);
++        assertEquals(1.0, d.scale());
++        assertEquals(0.0, d.offset());
++        assertTrue(service.getDataMap("NONE").items().isEmpty());
++    }
+ }
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolContracts.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolContracts.java
+index e16aeb1..ea56b6b 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolContracts.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/action/ProtocolContracts.java
+@@ -15,6 +15,9 @@ import com.asdp.juprovider.core.action.contract.OutputKind;
+ /**
+  * 프로토콜관리(M02010100) Action 계약 — 모두 contractVersion 1 (결정 AC3·AC4·AC8·AC11)
+  * Designer는 이 계약(필드명·형·필수·출력 kind)에 Binding 한다.
++ *
++ * C5c: 수집 설정(그룹 frameRule·cmdGapMs·initRoutine·initDelayMs)과 프로토콜 역할(ptlRoles·ptlAction·expectRule·idempotentYn)을
++ * 선택 입력·상세 출력에 추가했다. 필드 추가만이라 기존 v1 호출은 그대로 동작한다 (contractVersion 1 유지).
+  */
+ public final class ProtocolContracts {
+ 
+@@ -47,10 +50,29 @@ public final class ProtocolContracts {
+         if (detail) {
+             f.add(string("ptlGrpNmKey", false, 200));
+             f.add(string("ptlGrpDescKey", false, 200));
++            f.addAll(groupCollectFields());
+         }
+         return f;
+     }
+ 
++    /** C5c 그룹 수집 설정 (FRAME_RULE JSON v1, 명령 간격, 초기화 루틴 PTL_CD 쉼표 목록, 초기화 대기) */
++    private static List<FieldSpec> groupCollectFields() {
++        return List.of(
++                string("frameRule", false, 4000),
++                integer("cmdGapMs", false),
++                string("initRoutine", false, 500),
++                integer("initDelayMs", false));
++    }
++
++    /** C5c 프로토콜 역할 (PROL 코드 쉼표 목록, PACT 코드, 응답 판정 JSON, 멱등 YENO) */
++    private static List<FieldSpec> protocolCollectFields() {
++        return List.of(
++                string("ptlRoles", false, 50),
++                code("ptlAction", false, "PACT"),
++                string("expectRule", false, 500),
++                code("idempotentYn", false, "YENO"));
++    }
++
+     private static List<FieldSpec> packetFields() {
+         return List.of(
+                 integer("packetSeq", true),
+@@ -78,6 +100,7 @@ public final class ProtocolContracts {
+             f.add(string("ptlVal", false, 4000));
+             f.add(string("ptlNmKey", false, 200));
+             f.add(string("ptlDescKey", false, 200));
++            f.addAll(protocolCollectFields());
+             List<FieldSpec> packet = new ArrayList<>(packetFields());
+             packet.add(code("useYn", true, "YENO"));
+             f.add(listOf("packets", true, packet));
+@@ -87,6 +110,12 @@ public final class ProtocolContracts {
+         return f;
+     }
+ 
++    private static List<FieldSpec> with(List<FieldSpec> base, List<FieldSpec> extra) {
++        List<FieldSpec> f = new ArrayList<>(base);
++        f.addAll(extra);
++        return List.copyOf(f);
++    }
++
+     private static List<FieldSpec> groupKeyOutput() {
+         return List.of(string("ptlGrpCd", true, 20));
+     }
+@@ -107,18 +136,18 @@ public final class ProtocolContracts {
+ 
+     /** ptlGrpCd는 16자 이하 (기본 프로토콜 {그룹}0000 이 PTL_CD 20자에 들어가야 함) */
+     public static final ActionContract GRP_CREATE = ActionContract.of(VERSION, OutputKind.KEY,
+-            List.of(
++            with(List.of(
+                     string("ptlGrpCd", true, 16),
+                     string("ptlGrpNm", true, 100),
+                     string("ptlGrpDesc", false, 500),
+                     integer("pollingIntval", false),
+                     integer("timeoutMs", false),
+                     integer("retryCnt", false),
+-                    integer("sortOrd", false)),
++                    integer("sortOrd", false)), groupCollectFields()),
+             groupKeyOutput());
+ 
+     public static final ActionContract GRP_UPDATE = ActionContract.of(VERSION, OutputKind.KEY,
+-            List.of(
++            with(List.of(
+                     grpKey(),
+                     string("ptlGrpNm", false, 100),
+                     string("ptlGrpDesc", false, 500),
+@@ -126,7 +155,7 @@ public final class ProtocolContracts {
+                     integer("timeoutMs", false),
+                     integer("retryCnt", false),
+                     integer("sortOrd", false),
+-                    code("useYn", false, "YENO")),
++                    code("useYn", false, "YENO")), groupCollectFields()),
+             groupKeyOutput());
+ 
+     public static final ActionContract GRP_DELETE = ActionContract.of(VERSION, OutputKind.KEY,
+@@ -144,7 +173,7 @@ public final class ProtocolContracts {
+             protocolOutput(true));
+ 
+     public static final ActionContract CREATE = ActionContract.of(VERSION, OutputKind.KEY,
+-            List.of(
++            with(List.of(
+                     grpKey(),
+                     ptlKey(),
+                     code("ptlType", true, "PROT"),
+@@ -152,11 +181,11 @@ public final class ProtocolContracts {
+                     string("ptlVal", false, 4000),
+                     string("ptlNm", true, 100),
+                     string("ptlDesc", false, 500),
+-                    listOf("packets", false, packetFields())),
++                    listOf("packets", false, packetFields())), protocolCollectFields()),
+             protocolKeyOutput());
+ 
+     public static final ActionContract UPDATE = ActionContract.of(VERSION, OutputKind.KEY,
+-            List.of(
++            with(List.of(
+                     grpKey(),
+                     ptlKey(),
+                     code("ptlType", false, "PROT"),
+@@ -165,7 +194,7 @@ public final class ProtocolContracts {
+                     string("ptlNm", false, 100),
+                     string("ptlDesc", false, 500),
+                     code("useYn", false, "YENO"),
+-                    listOf("packets", false, packetFields())),
++                    listOf("packets", false, packetFields())), protocolCollectFields()),
+             protocolKeyOutput());
+ 
+     public static final ActionContract DELETE = ActionContract.of(VERSION, OutputKind.KEY,
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/dao/ProtocolDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/dao/ProtocolDao.java
+index b64f694..3e40bab 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/dao/ProtocolDao.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/dao/ProtocolDao.java
+@@ -56,6 +56,12 @@ public interface ProtocolDao {
+             @Param("ptlGrpCd") String ptlGrpCd,
+             @Param("ptlCd") String ptlCd);
+ 
++    /** C5c: 그룹 INIT_ROUTINE (그룹이 없으면 null) */
++    String selectGroupInitRoutine(@Param("ptlGrpCd") String ptlGrpCd);
++
++    /** C5c: 그룹의 모든 프로토콜 ptlCd · ptlType · useYn */
++    List<Map<String, Object>> selectProtocolStates(@Param("ptlGrpCd") String ptlGrpCd);
++
+     String selectProtocolUseYn(
+             @Param("ptlGrpCd") String ptlGrpCd,
+             @Param("ptlCd") String ptlCd);
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/MiniJson.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/MiniJson.java
+new file mode 100644
+index 0000000..0f5ef51
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/MiniJson.java
+@@ -0,0 +1,232 @@
++package com.asdp.juprovider.core.protocol.rule;
++
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * 규칙 JSON 읽기 전용 최소 파서 (C5c). 의존성 추가 없이 Desktop System.Text.Json 과 같은 엄격 JSON 만 받는다.
++ * 결과: Map(LinkedHashMap) · List · String · BigDecimal · Boolean · null
++ */
++final class MiniJson {
++
++    private final String s;
++
++    private int i;
++
++    private MiniJson(String s) {
++        this.s = s;
++    }
++
++    static Object parse(String text) {
++        MiniJson p = new MiniJson(text);
++        p.ws();
++        Object v = p.value(0);
++        p.ws();
++        if (p.i != p.s.length()) {
++            throw p.error("JSON 뒤에 남은 문자가 있습니다");
++        }
++        return v;
++    }
++
++    private IllegalArgumentException error(String message) {
++        return new IllegalArgumentException(message + " (위치 " + i + ")");
++    }
++
++    private void ws() {
++        while (i < s.length()) {
++            char c = s.charAt(i);
++            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
++                i++;
++            } else {
++                break;
++            }
++        }
++    }
++
++    private Object value(int depth) {
++        if (depth > 32) {
++            throw error("JSON 중첩이 너무 깊습니다");
++        }
++        if (i >= s.length()) {
++            throw error("JSON 이 끝났습니다");
++        }
++        char c = s.charAt(i);
++        switch (c) {
++            case '{':
++                return object(depth);
++            case '[':
++                return array(depth);
++            case '"':
++                return string();
++            case 't':
++                return literal("true", Boolean.TRUE);
++            case 'f':
++                return literal("false", Boolean.FALSE);
++            case 'n':
++                return literal("null", null);
++            default:
++                if (c == '-' || (c >= '0' && c <= '9')) {
++                    return number();
++                }
++                throw error("알 수 없는 JSON 값");
++        }
++    }
++
++    private Object literal(String word, Object v) {
++        if (!s.startsWith(word, i)) {
++            throw error("알 수 없는 JSON 값");
++        }
++        i += word.length();
++        return v;
++    }
++
++    private Map<String, Object> object(int depth) {
++        Map<String, Object> m = new LinkedHashMap<>();
++        i++;
++        ws();
++        if (i < s.length() && s.charAt(i) == '}') {
++            i++;
++            return m;
++        }
++        while (true) {
++            ws();
++            if (i >= s.length() || s.charAt(i) != '"') {
++                throw error("객체 키는 문자열이어야 합니다");
++            }
++            String key = string();
++            ws();
++            if (i >= s.length() || s.charAt(i) != ':') {
++                throw error("':' 가 필요합니다");
++            }
++            i++;
++            ws();
++            m.put(key, value(depth + 1));
++            ws();
++            if (i >= s.length()) {
++                throw error("'}' 가 필요합니다");
++            }
++            char c = s.charAt(i++);
++            if (c == '}') {
++                return m;
++            }
++            if (c != ',') {
++                throw error("',' 또는 '}' 가 필요합니다");
++            }
++        }
++    }
++
++    private List<Object> array(int depth) {
++        List<Object> list = new ArrayList<>();
++        i++;
++        ws();
++        if (i < s.length() && s.charAt(i) == ']') {
++            i++;
++            return list;
++        }
++        while (true) {
++            ws();
++            list.add(value(depth + 1));
++            ws();
++            if (i >= s.length()) {
++                throw error("']' 가 필요합니다");
++            }
++            char c = s.charAt(i++);
++            if (c == ']') {
++                return list;
++            }
++            if (c != ',') {
++                throw error("',' 또는 ']' 가 필요합니다");
++            }
++        }
++    }
++
++    private String string() {
++        StringBuilder b = new StringBuilder();
++        i++;
++        while (true) {
++            if (i >= s.length()) {
++                throw error("문자열이 닫히지 않았습니다");
++            }
++            char c = s.charAt(i++);
++            if (c == '"') {
++                return b.toString();
++            }
++            if (c < 0x20) {
++                throw error("문자열에 제어 문자가 있습니다");
++            }
++            if (c != '\\') {
++                b.append(c);
++                continue;
++            }
++            if (i >= s.length()) {
++                throw error("잘못된 escape");
++            }
++            char e = s.charAt(i++);
++            switch (e) {
++                case '"', '\\', '/' -> b.append(e);
++                case 'b' -> b.append('\b');
++                case 'f' -> b.append('\f');
++                case 'n' -> b.append('\n');
++                case 'r' -> b.append('\r');
++                case 't' -> b.append('\t');
++                case 'u' -> {
++                    if (i + 4 > s.length()) {
++                        throw error("잘못된 \\u escape");
++                    }
++                    try {
++                        b.append((char) Integer.parseInt(s.substring(i, i + 4), 16));
++                    } catch (NumberFormatException ex) {
++                        throw error("잘못된 \\u escape");
++                    }
++                    i += 4;
++                }
++                default -> throw error("잘못된 escape");
++            }
++        }
++    }
++
++    private BigDecimal number() {
++        int start = i;
++        if (s.charAt(i) == '-') {
++            i++;
++        }
++        if (i >= s.length()) {
++            throw error("잘못된 숫자");
++        }
++        if (s.charAt(i) == '0') {
++            i++;
++        } else if (s.charAt(i) >= '1' && s.charAt(i) <= '9') {
++            digits();
++        } else {
++            throw error("잘못된 숫자");
++        }
++        if (i < s.length() && s.charAt(i) == '.') {
++            i++;
++            if (digits() == 0) {
++                throw error("잘못된 숫자");
++            }
++        }
++        if (i < s.length() && (s.charAt(i) == 'e' || s.charAt(i) == 'E')) {
++            i++;
++            if (i < s.length() && (s.charAt(i) == '+' || s.charAt(i) == '-')) {
++                i++;
++            }
++            if (digits() == 0) {
++                throw error("잘못된 숫자");
++            }
++        }
++        return new BigDecimal(s.substring(start, i));
++    }
++
++    private int digits() {
++        int n = 0;
++        while (i < s.length() && s.charAt(i) >= '0' && s.charAt(i) <= '9') {
++            i++;
++            n++;
++        }
++        return n;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java
+new file mode 100644
+index 0000000..dbbc0ed
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java
+@@ -0,0 +1,386 @@
++package com.asdp.juprovider.core.protocol.rule;
++
++import java.math.BigDecimal;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Set;
++import java.util.regex.Pattern;
++import java.util.regex.PatternSyntaxException;
++
++/**
++ * 수집 규칙 저장 검사 (C5c, 설계 §4). Desktop 과 같은 규칙:
++ * - 표현식: lib.protocol Expression/ProtocolExpression.ToBytes
++ * - FRAME_RULE / PARSE_RULE JSON v1: lib.protocol Rules/RuleReader (JSON 부분)
++ * - EXPECT_RULE: Sync/CollectionProfile expect ({"startsWith"} 또는 {"regex"})
++ * 같은 입력의 판정은 공통 테스트 벡터(desktop/tests/.../TestData/rule_vectors.json)로 양쪽에서 확인한다.
++ *
++ * 각 메서드는 오류면 {@link RuleException}(사용자에게 보여 줄 문장) 을 던진다.
++ */
++public final class ProtocolRules {
++
++    /** 규칙 형식 오류 */
++    public static final class RuleException extends RuntimeException {
++
++        private static final long serialVersionUID = 1L;
++
++        public RuleException(String message) {
++            super(message);
++        }
++    }
++
++    private static final Map<String, Integer> NAMES = Map.of(
++            "NUL", 0x00, "STX", 0x02, "ETX", 0x03, "ACK", 0x06, "TAB", 0x09,
++            "LF", 0x0A, "CR", 0x0D, "DLE", 0x10, "NAK", 0x15, "ESC", 0x1B);
++
++    private ProtocolRules() {
++    }
++
++    // ===== 표현식 =====
++
++    /** 표현식 → 바이트 수. 문법: [이름] [16진 2자리], 그 외 ASCII 그대로 */
++    public static int expressionLength(String expression) {
++        String s = expression == null ? "" : expression;
++        int n = 0;
++        for (int i = 0; i < s.length();) {
++            char c = s.charAt(i);
++            if (c == '[') {
++                int end = s.indexOf(']', i + 1);
++                if (end < 0) {
++                    throw new RuleException("닫는 ']'가 없습니다. 위치 " + i);
++                }
++                String token = s.substring(i + 1, end).trim();
++                if (!NAMES.containsKey(token.toUpperCase(Locale.ROOT)) && !isHexByte(token)) {
++                    throw new RuleException("알 수 없는 바이트 표현입니다: [" + token + "] 위치 " + i);
++                }
++                n++;
++                i = end + 1;
++                continue;
++            }
++            if (c > 0x7F) {
++                throw new RuleException("ASCII 범위를 벗어난 문자입니다: '" + c + "' 위치 " + i);
++            }
++            n++;
++            i++;
++        }
++        return n;
++    }
++
++    public static void validateExpression(String expression) {
++        expressionLength(expression);
++    }
++
++    private static boolean isHexByte(String t) {
++        return t.length() == 2 && hex(t.charAt(0)) && hex(t.charAt(1));
++    }
++
++    private static boolean hex(char c) {
++        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
++    }
++
++    // ===== FRAME_RULE =====
++
++    public static void validateFrameRule(String text) {
++        Map<String, Object> r = root(text);
++        String kind = kind(r);
++        Integer maxLen = integer(r, "maxLen");
++        if (maxLen != null && maxLen <= 0) {
++            throw new RuleException("maxLen은 1 이상이어야 합니다.");
++        }
++        checksum(r);
++        switch (kind) {
++            case "DELIM" -> {
++                bytes(str(r, "end") == null ? "[CR][LF]" : str(r, "end"), "end");
++                if (str(r, "start") != null) {
++                    bytes(str(r, "start"), "start");
++                }
++            }
++            case "STXETX" -> {
++                oneByte(str(r, "stx") == null ? "[STX]" : str(r, "stx"), "stx");
++                oneByte(str(r, "etx") == null ? "[ETX]" : str(r, "etx"), "etx");
++                if (str(r, "escape") != null) {
++                    oneByte(str(r, "escape"), "escape");
++                }
++            }
++            case "FIXED" -> {
++                Integer len = integer(r, "len");
++                if (len == null || len <= 0) {
++                    throw new RuleException("FIXED는 len(1 이상)이 필요합니다.");
++                }
++            }
++            case "LENFIELD" -> {
++                Integer offset = integer(r, "offset");
++                if (offset == null) {
++                    throw new RuleException("LENFIELD는 offset이 필요합니다.");
++                }
++                Integer size = integer(r, "size");
++                int sz = size == null ? 1 : size;
++                if (offset < 0) {
++                    throw new RuleException("offset은 0 이상이어야 합니다.");
++                }
++                if (sz != 1 && sz != 2 && sz != 4) {
++                    throw new RuleException("size는 1, 2, 4 중 하나여야 합니다.");
++                }
++                String endian = upper(str(r, "endian"), "BE");
++                if (!endian.equals("BE") && !endian.equals("LE")) {
++                    throw new RuleException("endian은 BE 또는 LE입니다.");
++                }
++                integer(r, "adjust");
++                bool(r, "includesHeader");
++            }
++            default -> throw new RuleException("알 수 없는 frame kind: " + kind);
++        }
++    }
++
++    private static void checksum(Map<String, Object> r) {
++        Object c = r.get("checksum");
++        if (c == null) {
++            return;
++        }
++        if (!(c instanceof Map<?, ?>)) {
++            throw new RuleException("checksum은 객체여야 합니다.");
++        }
++        @SuppressWarnings("unchecked")
++        Map<String, Object> m = (Map<String, Object>) c;
++        String type = upper(str(m, "type"), "NONE");
++        if (!Set.of("NONE", "SUM8", "XOR8", "CRC16_MODBUS").contains(type)) {
++            throw new RuleException("알 수 없는 checksum type: " + type);
++        }
++        Integer from = integer(m, "from");
++        int f = from == null ? 0 : from;
++        if (f < 0) {
++            throw new RuleException("checksum.from은 0 이상이어야 합니다.");
++        }
++        Integer to = integer(m, "to");
++        int t = to == null ? 0 : to;
++        if (t > 0 && t < f) {
++            throw new RuleException("checksum.to는 from 이상이어야 합니다 (양수일 때).");
++        }
++    }
++
++    // ===== PARSE_RULE =====
++
++    public static boolean isJsonRule(String text) {
++        return text != null && text.trim().startsWith("{");
++    }
++
++    /** PARSE_RULE JSON v1 (TEXT · INFO · BINARY) */
++    public static void validateParseRule(String text) {
++        if (!isJsonRule(text)) {
++            throw new RuleException("해석 규칙은 JSON v1이어야 합니다 (예: {\"v\":1,\"kind\":\"TEXT\",...}).");
++        }
++        Map<String, Object> r = root(text);
++        String kind = kind(r);
++        String trim = str(r, "trim");
++        if (trim != null && trim.length() != 2) {
++            throw new RuleException("trim은 앞·뒤 2글자입니다 (예: \"{}\").");
++        }
++        switch (kind) {
++            case "TEXT" -> {
++                Integer count = integer(r, "count");
++                if (count != null && count < 0) {
++                    throw new RuleException("count는 0 이상이어야 합니다.");
++                }
++                sep(str(r, "sep"));
++                String map = upper(str(r, "map"), "CHANNELS");
++                if (!map.equals("CHANNELS") && !map.equals("SAMPLES")) {
++                    throw new RuleException("알 수 없는 map: " + map);
++                }
++            }
++            case "INFO" -> {
++                List<String> fields = strArray(r, "fields");
++                if (fields.isEmpty()) {
++                    throw new RuleException("INFO는 fields가 필요합니다.");
++                }
++                sep(str(r, "sep") == null ? "COMMA" : str(r, "sep"));
++            }
++            case "BINARY" -> binaryFields(r);
++            default -> throw new RuleException("알 수 없는 parse kind: " + kind);
++        }
++    }
++
++    private static void binaryFields(Map<String, Object> r) {
++        Object arr = r.get("fields");
++        if (!(arr instanceof List<?> list) || list.isEmpty()) {
++            throw new RuleException("BINARY는 fields 배열이 필요합니다.");
++        }
++        Set<String> keys = new HashSet<>();
++        Set<String> types = Set.of("U8", "I8", "U16", "I16", "U32", "I32", "F32", "F64");
++        for (Object o : list) {
++            if (!(o instanceof Map<?, ?>)) {
++                throw new RuleException("BINARY 필드에 key가 필요합니다.");
++            }
++            @SuppressWarnings("unchecked")
++            Map<String, Object> f = (Map<String, Object>) o;
++            String key = str(f, "key");
++            if (key == null) {
++                throw new RuleException("BINARY 필드에 key가 필요합니다.");
++            }
++            if (!keys.add(key)) {
++                throw new RuleException("BINARY 필드 key 중복: " + key);
++            }
++            Integer offset = integer(f, "offset");
++            if (offset == null) {
++                throw new RuleException(key + ": offset이 필요합니다.");
++            }
++            if (offset < 0) {
++                throw new RuleException(key + ": offset은 0 이상이어야 합니다.");
++            }
++            String type = str(f, "type");
++            if (type == null) {
++                throw new RuleException(key + ": type이 필요합니다.");
++            }
++            if (!types.contains(type.toUpperCase(Locale.ROOT))) {
++                throw new RuleException(key + ": 알 수 없는 type " + type.toUpperCase(Locale.ROOT));
++            }
++            String endian = upper(str(f, "endian"), "LE");
++            if (!endian.equals("BE") && !endian.equals("LE")) {
++                throw new RuleException(key + ": endian은 BE 또는 LE입니다.");
++            }
++            number(f, "scale");
++            number(f, "valueOffset");
++        }
++    }
++
++    // ===== EXPECT_RULE =====
++
++    /** {"startsWith":"..."} 또는 {"regex":"..."} — 키 1개, 빈 값 불가, regex 컴파일 가능 */
++    public static void validateExpectRule(String text) {
++        Object o;
++        try {
++            o = MiniJson.parse(text == null ? "" : text.trim());
++        } catch (IllegalArgumentException e) {
++            throw new RuleException("응답 판정 JSON 형식 오류: " + e.getMessage());
++        }
++        if (!(o instanceof Map<?, ?> m) || m.size() != 1) {
++            throw new RuleException("응답 판정은 키 1개 객체입니다: {\"startsWith\":\"..\"} 또는 {\"regex\":\"..\"}");
++        }
++        Map.Entry<?, ?> e = m.entrySet().iterator().next();
++        String key = String.valueOf(e.getKey());
++        if (!key.equals("startsWith") && !key.equals("regex")) {
++            throw new RuleException("응답 판정 키는 startsWith 또는 regex 입니다: " + key);
++        }
++        if (!(e.getValue() instanceof String v) || v.isEmpty()) {
++            throw new RuleException(key + ": 빈 값이 아닌 문자열이어야 합니다.");
++        }
++        if (key.equals("regex")) {
++            try {
++                Pattern.compile(v);
++            } catch (PatternSyntaxException ex) {
++                throw new RuleException("regex 오류: " + ex.getDescription());
++            }
++        }
++    }
++
++    // ===== 공통 =====
++
++    private static Map<String, Object> root(String text) {
++        Object o;
++        try {
++            o = MiniJson.parse(text == null ? "" : text.trim());
++        } catch (IllegalArgumentException e) {
++            throw new RuleException("규칙 JSON 형식 오류: " + e.getMessage());
++        }
++        if (!(o instanceof Map<?, ?>)) {
++            throw new RuleException("규칙은 JSON 객체여야 합니다.");
++        }
++        @SuppressWarnings("unchecked")
++        Map<String, Object> r = (Map<String, Object>) o;
++        Object v = r.get("v");
++        int ver = v instanceof BigDecimal d && isInt(d) ? d.intValueExact() : 0;
++        if (ver != 1) {
++            throw new RuleException("지원하지 않는 규칙 버전입니다: v=" + ver);
++        }
++        return r;
++    }
++
++    private static String kind(Map<String, Object> r) {
++        String k = str(r, "kind");
++        if (k == null) {
++            throw new RuleException("kind가 필요합니다.");
++        }
++        return k.toUpperCase(Locale.ROOT);
++    }
++
++    private static void sep(String text) {
++        String s = upper(text, "SPACE");
++        if (!s.equals("SPACE") && !s.equals("COMMA") && !s.equals("TAB")) {
++            throw new RuleException("알 수 없는 sep: " + s);
++        }
++    }
++
++    private static void bytes(String expr, String name) {
++        int n;
++        try {
++            n = expressionLength(expr);
++        } catch (RuleException e) {
++            throw new RuleException(name + ": " + e.getMessage());
++        }
++        if (n < 1) {
++            throw new RuleException(name + ": 1바이트 이상이어야 합니다.");
++        }
++    }
++
++    private static void oneByte(String expr, String name) {
++        bytes(expr, name);
++        if (expressionLength(expr) != 1) {
++            throw new RuleException(name + ": 1바이트여야 합니다.");
++        }
++    }
++
++    /** Desktop Str(): 문자열이 아니면 없는 것으로 본다 */
++    private static String str(Map<String, Object> m, String name) {
++        return m.get(name) instanceof String s ? s : null;
++    }
++
++    private static String upper(String v, String fallback) {
++        return (v == null ? fallback : v).toUpperCase(Locale.ROOT);
++    }
++
++    /** Desktop Int(): 없음·null 이면 null, 정수(int 범위, 소수·지수 표기 없음)가 아니면 오류 */
++    private static Integer integer(Map<String, Object> m, String name) {
++        if (!m.containsKey(name) || m.get(name) == null) {
++            return null;
++        }
++        if (m.get(name) instanceof BigDecimal d && isInt(d)) {
++            return d.intValueExact();
++        }
++        throw new RuleException(name + ": 정수여야 합니다.");
++    }
++
++    private static boolean isInt(BigDecimal d) {
++        return d.scale() == 0 && d.compareTo(BigDecimal.valueOf(Integer.MIN_VALUE)) >= 0
++                && d.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) <= 0;
++    }
++
++    private static void number(Map<String, Object> m, String name) {
++        if (m.containsKey(name) && m.get(name) != null && !(m.get(name) instanceof BigDecimal)) {
++            throw new RuleException(name + ": 숫자여야 합니다.");
++        }
++    }
++
++    private static void bool(Map<String, Object> m, String name) {
++        if (m.containsKey(name) && m.get(name) != null && !(m.get(name) instanceof Boolean)) {
++            throw new RuleException(name + ": true/false여야 합니다.");
++        }
++    }
++
++    private static List<String> strArray(Map<String, Object> m, String name) {
++        if (!(m.get(name) instanceof List<?> list)) {
++            return List.of();
++        }
++        Set<String> seen = new HashSet<>();
++        for (Object x : list) {
++            if (!(x instanceof String s) || s.isEmpty()) {
++                throw new RuleException(name + ": 빈 값이 아닌 문자열 배열이어야 합니다.");
++            }
++            if (!seen.add(s)) {
++                throw new RuleException(name + ": 중복 항목");
++            }
++        }
++        @SuppressWarnings("unchecked")
++        List<String> r = (List<String>) list;
++        return r;
++    }
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/service/ProtocolService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/service/ProtocolService.java
+index 0472742..004c98c 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/service/ProtocolService.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/service/ProtocolService.java
+@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
+ import org.springframework.transaction.annotation.Transactional;
+ 
+ import com.asdp.juprovider.core.action.contract.ActionFieldError;
++import com.asdp.juprovider.core.action.dao.ActionCodeDao;
+ import com.asdp.juprovider.core.action.contract.ActionInput;
+ import com.asdp.juprovider.core.action.contract.ListOutput;
+ import com.asdp.juprovider.core.action.exception.ActionConflictException;
+@@ -19,6 +20,7 @@ import com.asdp.juprovider.core.action.exception.ActionNotFoundException;
+ import com.asdp.juprovider.core.action.exception.ActionValidationException;
+ import com.asdp.juprovider.core.protocol.ProtocolI18nKeys;
+ import com.asdp.juprovider.core.protocol.dao.ProtocolDao;
++import com.asdp.juprovider.core.protocol.rule.ProtocolRules;
+ 
+ /**
+  * Protocol Reference Implementation 업무 Service (결정 AC8·AC9, PR-Q1~Q5)
+@@ -28,6 +30,9 @@ import com.asdp.juprovider.core.protocol.dao.ProtocolDao;
+  * - GRP_CREATE: 그룹 + 기본 프로토콜 {그룹}0000 을 같은 트랜잭션에서 생성 (PR-Q1)
+  * - GRP_DELETE: 장치 + 하위 프로토콜의 실험 참조를 전체 선검사 → 하나라도 사용 중이면 409,
+  *               아니면 Packet → Protocol → Group 순서로 같은 트랜잭션에서 논리 삭제 (PR-Q3)
++ * - C5c 저장 검사(설계 §4): 수집 설정·역할·표현식·FRAME_RULE·PARSE_RULE·EXPECT_RULE·INIT_ROUTINE.
++ *   기존 값을 그대로 다시 보낸 경우(같은 순번 패킷의 같은 값 등)는 검사하지 않는다 → GTEC0000 의 과거 비JSON PARSE_RULE 등 기존 데이터 호환.
++ *   역할(PTL_ROLES)이 없는 프로토콜(미설정, 과거 데이터)은 역할·유형 연계 검사를 하지 않는다.
+  */
+ @Service
+ public class ProtocolService {
+@@ -46,10 +51,23 @@ public class ProtocolService {
+ 
+     private static final Set<String> DIRECTIONS = Set.of("TX", "RX");
+ 
++    /** PTL_TYPE (설계 §2): PROT0000 POLL · 0001 TX_ONLY · 0002 RX_STREAM · 0003 TX_RX */
++    public static final String TYPE_RX_STREAM = "PROT0002";
++
++    /** PROL0003 = DATA (migration 08) */
++    public static final String ROLE_DATA = "PROL0003";
++
++    public static final int DEFAULT_CMD_GAP_MS = 0;
++
++    public static final int DEFAULT_INIT_DELAY_MS = 500;
++
+     private final ProtocolDao protocolDao;
+ 
+-    public ProtocolService(ProtocolDao protocolDao) {
++    private final ActionCodeDao actionCodeDao;
++
++    public ProtocolService(ProtocolDao protocolDao, ActionCodeDao actionCodeDao) {
+         this.protocolDao = protocolDao;
++        this.actionCodeDao = actionCodeDao;
+     }
+ 
+     // ===== Group =====
+@@ -78,6 +96,11 @@ public class ProtocolService {
+         Integer polling = positive(in, "pollingIntval", 1, errors);
+         Integer timeout = positive(in, "timeoutMs", 1, errors);
+         Integer retry = positive(in, "retryCnt", 0, errors);
++        Integer cmdGap = positive(in, "cmdGapMs", 0, errors);
++        Integer initDelay = positive(in, "initDelayMs", 0, errors);
++        String frameRule = frameRule(in, errors);
++        // 새 그룹에서 초기화 루틴에 쓸 수 있는 프로토콜은 자동 생성되는 기본 프로토콜뿐
++        String initRoutine = initRoutine(in, Map.of(grp + DEFAULT_PROTOCOL_SUFFIX, DEFAULT_PROTOCOL_TYPE), errors);
+         failIfAny(errors);
+ 
+         if (protocolDao.selectGroupUseYn(grp) != null) {
+@@ -90,6 +113,10 @@ public class ProtocolService {
+         group.put("timeoutMs", timeout == null ? 3000 : timeout);
+         group.put("retryCnt", retry == null ? 3 : retry);
+         group.put("sortOrd", in.has("sortOrd") ? in.getInteger("sortOrd") : 0);
++        group.put("frameRule", frameRule);
++        group.put("cmdGapMs", cmdGap == null ? DEFAULT_CMD_GAP_MS : cmdGap);
++        group.put("initRoutine", initRoutine);
++        group.put("initDelayMs", initDelay == null ? DEFAULT_INIT_DELAY_MS : initDelay);
+         protocolDao.insertGroup(group);
+ 
+         Map<String, Object> detail = new HashMap<>();
+@@ -107,7 +134,7 @@ public class ProtocolService {
+          */
+         String defaultCd = grp + DEFAULT_PROTOCOL_SUFFIX;
+         insertProtocolRows(grp, defaultCd, DEFAULT_PROTOCOL_TYPE, null, null,
+-                DEFAULT_PROTOCOL_NAME, DEFAULT_PROTOCOL_DESC);
++                DEFAULT_PROTOCOL_NAME, DEFAULT_PROTOCOL_DESC, Map.of());
+ 
+         return key(grp, null);
+     }
+@@ -124,6 +151,10 @@ public class ProtocolService {
+         Integer timeout = positive(in, "timeoutMs", 1, errors);
+         Integer retry = positive(in, "retryCnt", 0, errors);
+         String useYn = reactivateOnly(in, errors);
++        Integer cmdGap = positive(in, "cmdGapMs", 0, errors);
++        Integer initDelay = positive(in, "initDelayMs", 0, errors);
++        String frameRule = frameRule(in, errors);
++        String initRoutine = initRoutine(in, activeProtocolTypes(grp), errors);
+         failIfAny(errors);
+ 
+         Map<String, Object> group = new HashMap<>();
+@@ -133,6 +164,10 @@ public class ProtocolService {
+         group.put("retryCnt", retry);
+         group.put("sortOrd", in.has("sortOrd") ? in.getInteger("sortOrd") : null);
+         group.put("useYn", useYn);
++        group.put("frameRule", frameRule);
++        group.put("cmdGapMs", cmdGap);
++        group.put("initRoutine", initRoutine);
++        group.put("initDelayMs", initDelay);
+         protocolDao.updateGroup(group);
+ 
+         Map<String, Object> detail = new HashMap<>();
+@@ -205,6 +240,7 @@ public class ProtocolService {
+         List<ActionFieldError> errors = new ArrayList<>();
+         Integer len = positive(in, "ptlLen", 0, errors);
+         List<Map<String, Object>> packets = packets(in, grp, cd, errors);
++        Map<String, Object> collect = protocolCollect(in, errors);
+         failIfAny(errors);
+ 
+         requireActiveGroup(grp);
+@@ -212,8 +248,14 @@ public class ProtocolService {
+             throw new ActionConflictException("이미 있는 프로토콜입니다. ptlGrpCd=" + grp + ", ptlCd=" + cd);
+         }
+ 
++        // 새 프로토콜: 기존 값이 없으므로 보낸 표현식·해석 규칙은 모두 검사
++        checkExpressionAndRules(in, null, packets, List.of(), errors);
++        checkRoleConsistency(cd, in.getString("ptlType"), (String) collect.get("ptlRoles"), in.getString("ptlVal"),
++                packets == null ? List.of() : packets, null, errors);
++        failIfAny(errors);
++
+         insertProtocolRows(grp, cd, in.getString("ptlType"), len, in.getString("ptlVal"),
+-                in.getString("ptlNm"), in.getString("ptlDesc"));
++                in.getString("ptlNm"), in.getString("ptlDesc"), collect);
+         if (packets != null) {
+             packets.forEach(protocolDao::insertPacket);
+         }
+@@ -230,6 +272,7 @@ public class ProtocolService {
+         Integer len = positive(in, "ptlLen", 0, errors);
+         String useYn = reactivateOnly(in, errors);
+         List<Map<String, Object>> packets = packets(in, grp, cd, errors);
++        Map<String, Object> collect = protocolCollect(in, errors);
+         failIfAny(errors);
+ 
+         if (protocolDao.selectProtocolUseYn(grp, cd) == null) {
+@@ -237,7 +280,22 @@ public class ProtocolService {
+         }
+         requireActiveGroup(grp);
+ 
+-        Map<String, Object> protocol = new HashMap<>();
++        /*
++         * C5c 검사: 바뀐 값만 형식 검사(기존 값 그대로면 통과), 역할이 있으면 저장 후 상태로 연계 검사
++         */
++        Map<String, Object> existing = protocolDao.selectProtocol(grp, cd, ProtocolI18nKeys.BASE_LANG);
++        List<Map<String, Object>> existingPackets = nullSafe(protocolDao.selectPackets(grp, cd));
++        checkExpressionAndRules(in, existing, packets, existingPackets, errors);
++        checkRoleConsistency(cd,
++                firstNonNull(in.getString("ptlType"), str(existing, "ptlType")),
++                firstNonNull((String) collect.get("ptlRoles"), str(existing, "ptlRoles")),
++                firstNonNull(in.getString("ptlVal"), str(existing, "ptlVal")),
++                packets != null ? packets : existingPackets,
++                protocolDao.selectGroupInitRoutine(grp),
++                errors);
++        failIfAny(errors);
++
++        Map<String, Object> protocol = new HashMap<>(collect);
+         protocol.put("ptlGrpCd", grp);
+         protocol.put("ptlCd", cd);
+         protocol.put("ptlType", in.getString("ptlType"));
+@@ -280,6 +338,10 @@ public class ProtocolService {
+                     "실험에서 사용 중인 프로토콜은 삭제할 수 없습니다. ptlCd=" + cd
+                             + ", 실험(실험ID:프로토콜)=" + experiments);
+         }
++        if (routineItems(protocolDao.selectGroupInitRoutine(grp)).contains(cd)) {
++            throw new ActionConflictException(
++                    "그룹 초기화 루틴(INIT_ROUTINE)에서 사용 중인 프로토콜은 삭제할 수 없습니다. ptlGrpCd=" + grp + ", ptlCd=" + cd);
++        }
+ 
+         protocolDao.softDeletePackets(grp, cd);
+         protocolDao.softDeleteProtocol(grp, cd);
+@@ -296,8 +358,9 @@ public class ProtocolService {
+             Integer len,
+             String val,
+             String name,
+-            String desc) {
+-        Map<String, Object> protocol = new HashMap<>();
++            String desc,
++            Map<String, Object> collect) {
++        Map<String, Object> protocol = new HashMap<>(collect);
+         protocol.put("ptlGrpCd", grp);
+         protocol.put("ptlCd", cd);
+         protocol.put("ptlType", type);
+@@ -405,6 +468,249 @@ public class ProtocolService {
+         return rows;
+     }
+ 
++    // ===== C5c 저장 검사 =====
++
++    private static String frameRule(ActionInput in, List<ActionFieldError> errors) {
++        if (!in.has("frameRule")) {
++            return null;
++        }
++        String text = in.getString("frameRule").trim();
++        try {
++            ProtocolRules.validateFrameRule(text);
++        } catch (ProtocolRules.RuleException e) {
++            errors.add(new ActionFieldError("frameRule", ActionFieldError.INVALID_VALUE, e.getMessage()));
++            return null;
++        }
++        return text;
++    }
++
++    /** 사용 중인 프로토콜 ptlCd → ptlType */
++    private Map<String, String> activeProtocolTypes(String grp) {
++        Map<String, String> types = new HashMap<>();
++        for (Map<String, Object> r : nullSafe(protocolDao.selectProtocolStates(grp))) {
++            if (YES.equals(str(r, "useYn"))) {
++                types.put(str(r, "ptlCd"), str(r, "ptlType"));
++            }
++        }
++        return types;
++    }
++
++    /** INIT_ROUTINE: 같은 그룹의 사용 중 PTL_CD 쉼표 목록, RX_STREAM 불가. 저장 형식 = 공백 없는 쉼표 목록 */
++    private static String initRoutine(ActionInput in, Map<String, String> activeTypes, List<ActionFieldError> errors) {
++        if (!in.has("initRoutine")) {
++            return null;
++        }
++        List<String> items = new ArrayList<>();
++        for (String raw : in.getString("initRoutine").split(",", -1)) {
++            String cd = raw.trim();
++            if (cd.isEmpty()) {
++                errors.add(new ActionFieldError("initRoutine", ActionFieldError.INVALID_VALUE,
++                        "빈 항목이 있습니다. PTL_CD 쉼표 목록이어야 합니다."));
++                return null;
++            }
++            String type = activeTypes.get(cd);
++            if (type == null) {
++                errors.add(new ActionFieldError("initRoutine", ActionFieldError.INVALID_VALUE,
++                        "같은 그룹의 사용 중인 프로토콜이 아닙니다: " + cd));
++                return null;
++            }
++            if (TYPE_RX_STREAM.equals(type)) {
++                errors.add(new ActionFieldError("initRoutine", ActionFieldError.INVALID_VALUE,
++                        "수신 전용(RX_STREAM) 프로토콜은 초기화 루틴에 넣을 수 없습니다: " + cd));
++                return null;
++            }
++            items.add(cd);
++        }
++        return String.join(",", items);
++    }
++
++    private static List<String> routineItems(String routine) {
++        List<String> items = new ArrayList<>();
++        if (routine != null) {
++            for (String s : routine.split(",")) {
++                if (!s.trim().isEmpty()) {
++                    items.add(s.trim());
++                }
++            }
++        }
++        return items;
++    }
++
++    /** ptlRoles(PROL 코드 쉼표 목록, 1개 이상·중복 불가, 정렬 저장)·ptlAction·expectRule·idempotentYn */
++    private Map<String, Object> protocolCollect(ActionInput in, List<ActionFieldError> errors) {
++        Map<String, Object> m = new HashMap<>();
++        if (in.has("ptlRoles")) {
++            Set<String> valid = new HashSet<>(nullSafeStrings(actionCodeDao.selectActiveCodes("PROL")));
++            java.util.TreeSet<String> roles = new java.util.TreeSet<>();
++            boolean ok = true;
++            for (String raw : in.getString("ptlRoles").split(",", -1)) {
++                String code = raw.trim();
++                if (!valid.contains(code)) {
++                    errors.add(new ActionFieldError("ptlRoles", ActionFieldError.INVALID_CODE,
++                            "역할은 PROL 공통코드 쉼표 목록입니다: '" + code + "'"));
++                    ok = false;
++                    break;
++                }
++                if (!roles.add(code)) {
++                    errors.add(new ActionFieldError("ptlRoles", ActionFieldError.DUPLICATE, "역할이 중복됩니다: " + code));
++                    ok = false;
++                    break;
++                }
++            }
++            if (ok) {
++                m.put("ptlRoles", String.join(",", roles));
++            }
++        }
++        if (in.has("ptlAction")) {
++            m.put("ptlAction", in.getString("ptlAction"));
++        }
++        if (in.has("expectRule")) {
++            String text = in.getString("expectRule").trim();
++            try {
++                ProtocolRules.validateExpectRule(text);
++                m.put("expectRule", text);
++            } catch (ProtocolRules.RuleException e) {
++                errors.add(new ActionFieldError("expectRule", ActionFieldError.INVALID_VALUE, e.getMessage()));
++            }
++        }
++        if (in.has("idempotentYn")) {
++            String yn = in.getString("idempotentYn");
++            if (!YES.equals(yn) && !NO.equals(yn)) {
++                errors.add(new ActionFieldError("idempotentYn", ActionFieldError.INVALID_VALUE,
++                        "YENO0001(예) 또는 YENO0002(아니오)만 허용됩니다."));
++            } else {
++                m.put("idempotentYn", yn);
++            }
++        }
++        return m;
++    }
++
++    /**
++     * 표현식(ptlVal, 패킷 packetExpr) 문법과 RX 해석 규칙(parseRule = JSON v1) 검사.
++     * 기존 값과 같은 값(ptlVal, 같은 순번 패킷의 같은 값)은 검사하지 않는다 → 과거 데이터 호환.
++     */
++    private static void checkExpressionAndRules(
++            ActionInput in,
++            Map<String, Object> existing,
++            List<Map<String, Object>> packets,
++            List<Map<String, Object>> existingPackets,
++            List<ActionFieldError> errors) {
++        if (in.has("ptlVal") && !in.getString("ptlVal").equals(str(existing, "ptlVal"))) {
++            expression(in.getString("ptlVal"), "ptlVal", errors);
++        }
++        if (packets == null) {
++            return;
++        }
++        Map<Long, Map<String, Object>> old = new HashMap<>();
++        for (Map<String, Object> p : existingPackets) {
++            Object seq = p.get("packetSeq");
++            if (seq instanceof Number n) {
++                old.put(n.longValue(), p);
++            }
++        }
++        for (int i = 0; i < packets.size(); i++) {
++            Map<String, Object> p = packets.get(i);
++            Map<String, Object> before = p.get("packetSeq") instanceof Number n ? old.get(n.longValue()) : null;
++            String expr = (String) p.get("packetExpr");
++            if (expr != null && !expr.equals(str(before, "packetExpr"))) {
++                expression(expr, "packets[" + i + "].packetExpr", errors);
++            }
++            String rule = (String) p.get("parseRule");
++            if (rule != null && !rule.equals(str(before, "parseRule"))) {
++                try {
++                    ProtocolRules.validateParseRule(rule);
++                } catch (ProtocolRules.RuleException e) {
++                    errors.add(new ActionFieldError("packets[" + i + "].parseRule", ActionFieldError.INVALID_VALUE, e.getMessage()));
++                }
++            }
++        }
++    }
++
++    private static void expression(String value, String field, List<ActionFieldError> errors) {
++        try {
++            ProtocolRules.validateExpression(value);
++        } catch (ProtocolRules.RuleException e) {
++            errors.add(new ActionFieldError(field, ActionFieldError.INVALID_VALUE, "표현식 오류: " + e.getMessage()));
++        }
++    }
++
++    /**
++     * 역할이 설정된 프로토콜의 저장 후 상태 검사 (역할 없음 = 미설정 → 검사 안 함):
++     * - RX_STREAM: DATA 역할 + 사용할 수 있는 RX 패킷 PARSE_RULE(JSON v1) 필수, 그룹 초기화 루틴에 있으면 불가
++     * - 그 외(POLL·TX_ONLY·TX_RX): 송신 표현식(PTL_VAL 또는 TX 패킷 PACKET_EXPR) 필수
++     */
++    private static void checkRoleConsistency(
++            String cd,
++            String type,
++            String roles,
++            String ptlVal,
++            List<Map<String, Object>> packets,
++            String groupInitRoutine,
++            List<ActionFieldError> errors) {
++        if (roles == null || roles.isBlank() || type == null) {
++            return;
++        }
++        if (TYPE_RX_STREAM.equals(type)) {
++            if (!routineItems(roles).contains(ROLE_DATA)) {
++                errors.add(new ActionFieldError("ptlRoles", ActionFieldError.INVALID_VALUE,
++                        "수신 전용(RX_STREAM) 프로토콜은 DATA 역할(" + ROLE_DATA + ")이 필요합니다."));
++            }
++            boolean parse = false;
++            for (Map<String, Object> p : packets) {
++                String rule = str(p, "parseRule");
++                if ("RX".equals(str(p, "direction")) && ProtocolRules.isJsonRule(rule)) {
++                    try {
++                        ProtocolRules.validateParseRule(rule);
++                        parse = true;
++                        break;
++                    } catch (ProtocolRules.RuleException e) {
++                        // 다음 RX 패킷 확인
++                    }
++                }
++            }
++            if (!parse) {
++                errors.add(new ActionFieldError("packets", ActionFieldError.REQUIRED,
++                        "수신 전용(RX_STREAM) 프로토콜은 해석 규칙(JSON v1)이 있는 RX 패킷이 필요합니다."));
++            }
++            if (routineItems(groupInitRoutine).contains(cd)) {
++                errors.add(new ActionFieldError("ptlType", ActionFieldError.INVALID_VALUE,
++                        "그룹 초기화 루틴에 있는 프로토콜은 수신 전용(RX_STREAM)으로 바꿀 수 없습니다."));
++            }
++            return;
++        }
++        boolean tx = ptlVal != null && !ptlVal.isBlank();
++        for (Map<String, Object> p : packets) {
++            String expr = str(p, "packetExpr");
++            if ("TX".equals(str(p, "direction")) && expr != null && !expr.isBlank()) {
++                tx = true;
++            }
++        }
++        if (!tx) {
++            errors.add(new ActionFieldError("ptlVal", ActionFieldError.REQUIRED,
++                    "송신 프로토콜은 송신 표현식(ptlVal 또는 TX 패킷 packetExpr)이 필요합니다."));
++        }
++    }
++
++    private static String str(Map<String, Object> m, String key) {
++        if (m == null) {
++            return null;
++        }
++        Object v = m.get(key);
++        return v == null ? null : v.toString();
++    }
++
++    private static String firstNonNull(String a, String b) {
++        return a != null ? a : b;
++    }
++
++    private static List<Map<String, Object>> nullSafe(List<Map<String, Object>> rows) {
++        return rows == null ? List.of() : rows;
++    }
++
++    private static List<String> nullSafeStrings(List<String> rows) {
++        return rows == null ? List.of() : rows;
++    }
++
+     private static void failIfAny(List<ActionFieldError> errors) {
+         if (!errors.isEmpty()) {
+             throw new ActionValidationException(errors);
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java
+index 83b3b8e..bccde5c 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dao/ProtocolSyncDao.java
+@@ -20,4 +20,10 @@ public interface ProtocolSyncDao {
+     List<Map<String, Object>> selectSyncPackets(@Param("ptlGrpCd") String ptlGrpCd);
+ 
+     List<Map<String, Object>> selectSyncDataTags(@Param("devCd") String devCd);
++
++    /** C5c: 공통코드 COM_CD → COM_VAL (comCd, comVal) */
++    List<Map<String, Object>> selectCodeValues(@Param("grpCd") String grpCd);
++
++    /** C5c: 채널 매핑 (devCd 가 null 이면 전체) */
++    List<Map<String, Object>> selectSyncDataMap(@Param("devCd") String devCd);
+ }
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataChannelMapSync.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataChannelMapSync.java
+new file mode 100644
+index 0000000..3fe88a7
+--- /dev/null
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/DataChannelMapSync.java
+@@ -0,0 +1,17 @@
++package com.asdp.juprovider.core.protocolsync.dto;
++
++/**
++ * C5c 채널 매핑 내려받기 (ju_data_channel_map, 사용 중인 매핑·태그·데이터 그룹만).
++ * 값 환산: value × scale + offset. ptlCd 가 null 이면 모든 프로토콜에 적용.
++ */
++public record DataChannelMapSync(
++        String devCd,
++        String channelKey,
++        String ptlCd,
++        String datGrCd,
++        String datCd,
++        int datIdx,
++        double scale,
++        double offset,
++        int sortOrd) {
++}
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java
+index 408f4a7..82c9c65 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolGroupSync.java
+@@ -2,7 +2,10 @@ package com.asdp.juprovider.core.protocolsync.dto;
+ 
+ import java.util.List;
+ 
+-/** ju_protocol_group + ju_protocol_group_detail (사용 중인 것만) */
++/**
++ * ju_protocol_group + ju_protocol_group_detail (사용 중인 것만).
++ * C5c: frameRule(JSON v1 원문), cmdGapMs, initRoutine(PTL_CD 순서 목록), initDelayMs 추가.
++ */
+ public record ProtocolGroupSync(
+         String ptlGrpCd,
+         String ptlGrpNm,
+@@ -10,5 +13,9 @@ public record ProtocolGroupSync(
+         int timeoutMs,
+         int retryCnt,
+         int sortOrd,
++        String frameRule,
++        int cmdGapMs,
++        List<String> initRoutine,
++        int initDelayMs,
+         List<ProtocolSync> protocols) {
+ }
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java
+index 2ca1917..1c2dd9e 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/dto/ProtocolSync.java
+@@ -2,7 +2,11 @@ package com.asdp.juprovider.core.protocolsync.dto;
+ 
+ import java.util.List;
+ 
+-/** ju_protocol + ju_protocol_detail (사용 중인 것만) */
++/**
++ * ju_protocol + ju_protocol_detail (사용 중인 것만).
++ * C5c: roles(INFO/CONTROL/DATA, 미설정이면 빈 목록), action(NONE/START/PAUSE/STOP 또는 null),
++ *      expect(응답 판정 JSON 원문 또는 null), idempotent(명시값, 미지정이면 null) 추가.
++ */
+ public record ProtocolSync(
+         String ptlCd,
+         String ptlType,
+@@ -10,5 +14,9 @@ public record ProtocolSync(
+         String ptlVal,
+         String ptlNm,
+         String ptlDesc,
++        List<String> roles,
++        String action,
++        String expect,
++        Boolean idempotent,
+         List<ProtocolPacketSync> packets) {
+ }
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java
+index bd291c2..6c4a897 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocolsync/service/ProtocolSyncService.java
+@@ -13,6 +13,7 @@ import java.util.Map;
+ import org.springframework.stereotype.Service;
+ 
+ import com.asdp.juprovider.core.protocolsync.dao.ProtocolSyncDao;
++import com.asdp.juprovider.core.protocolsync.dto.DataChannelMapSync;
+ import com.asdp.juprovider.core.protocolsync.dto.DataTagSync;
+ import com.asdp.juprovider.core.protocolsync.dto.ProtocolGroupSync;
+ import com.asdp.juprovider.core.protocolsync.dto.ProtocolPacketSync;
+@@ -24,6 +25,7 @@ import com.asdp.juprovider.core.protocolsync.dto.SyncResult;
+  *
+  * 그룹 → 프로토콜 → 패킷을 조회 순서(정렬된 SQL) 그대로 묶는다.
+  * revision 은 결과 내용의 SHA-256 이라 같은 데이터면 항상 같다.
++ * C5c: 그룹 수집 설정·프로토콜 역할 필드 추가(필드 추가만 → revision 값은 C4 와 다름), 채널 매핑(data-map) 추가.
+  */
+ @Service
+ public class ProtocolSyncService {
+@@ -52,6 +54,9 @@ public class ProtocolSyncService {
+                     str(r, "dataPosition")));
+         }
+ 
++        Map<String, String> roleNames = codeValues("PROL");
++        Map<String, String> actionNames = codeValues("PACT");
++
+         Map<String, List<ProtocolSync>> protocols = new LinkedHashMap<>();
+         for (Map<String, Object> r : nullSafe(dao.selectSyncProtocols(ptlGrpCd))) {
+             String grp = str(r, "ptlGrpCd");
+@@ -63,6 +68,10 @@ public class ProtocolSyncService {
+                     str(r, "ptlVal"),
+                     str(r, "ptlNm"),
+                     str(r, "ptlDesc"),
++                    names(split(str(r, "ptlRoles")), roleNames),
++                    name(str(r, "ptlAction"), actionNames),
++                    str(r, "expectRule"),
++                    yesNo(str(r, "idempotentYn")),
+                     List.copyOf(packets.getOrDefault(grp + "\u0000" + ptl, List.of()))));
+         }
+ 
+@@ -76,6 +85,10 @@ public class ProtocolSyncService {
+                     integer(r, "timeoutMs", 3000),
+                     integer(r, "retryCnt", 3),
+                     integer(r, "sortOrd", 0),
++                    str(r, "frameRule"),
++                    integer(r, "cmdGapMs", 0),
++                    split(str(r, "initRoutine")),
++                    integer(r, "initDelayMs", 500),
+                     List.copyOf(protocols.getOrDefault(grp, List.of()))));
+         }
+ 
+@@ -103,6 +116,76 @@ public class ProtocolSyncService {
+         return result(tags);
+     }
+ 
++    /** C5c 채널 매핑 (devCd 가 null 이면 전체). 행이 없는 장치는 Desktop 이 TAG_ID=CH<n> 임시 변환을 쓴다 */
++    public SyncResult<DataChannelMapSync> getDataMap(String devCd) {
++
++        List<DataChannelMapSync> maps = new ArrayList<>();
++        for (Map<String, Object> r : nullSafe(dao.selectSyncDataMap(devCd))) {
++            maps.add(new DataChannelMapSync(
++                    str(r, "devCd"),
++                    str(r, "channelKey"),
++                    str(r, "ptlCd"),
++                    str(r, "datGrCd"),
++                    str(r, "datCd"),
++                    integer(r, "datIdx", 0),
++                    dbl(r, "scale", 1),
++                    dbl(r, "offsetVal", 0),
++                    integer(r, "sortOrd", 0)));
++        }
++        return result(maps);
++    }
++
++    private Map<String, String> codeValues(String grpCd) {
++        Map<String, String> m = new LinkedHashMap<>();
++        for (Map<String, Object> r : nullSafe(dao.selectCodeValues(grpCd))) {
++            m.put(str(r, "comCd"), str(r, "comVal"));
++        }
++        return m;
++    }
++
++    /** 쉼표 목록 → 순서 유지 목록 (null·빈 값이면 빈 목록) */
++    static List<String> split(String text) {
++        List<String> list = new ArrayList<>();
++        if (text != null) {
++            for (String s : text.split(",")) {
++                if (!s.trim().isEmpty()) {
++                    list.add(s.trim());
++                }
++            }
++        }
++        return List.copyOf(list);
++    }
++
++    /** 코드 → COM_VAL. 코드표에 없으면 코드 그대로 */
++    private static String name(String code, Map<String, String> names) {
++        return code == null ? null : names.getOrDefault(code, code);
++    }
++
++    private static List<String> names(List<String> codes, Map<String, String> names) {
++        return codes.stream().map(c -> name(c, names)).toList();
++    }
++
++    private static Boolean yesNo(String yn) {
++        if ("YENO0001".equals(yn)) {
++            return Boolean.TRUE;
++        }
++        if ("YENO0002".equals(yn)) {
++            return Boolean.FALSE;
++        }
++        return null;
++    }
++
++    private static double dbl(Map<String, Object> r, String key, double fallback) {
++        Object v = value(r, key);
++        if (v == null) {
++            return fallback;
++        }
++        if (v instanceof Number n) {
++            return n.doubleValue();
++        }
++        return Double.parseDouble(v.toString().trim());
++    }
++
+     static <T> SyncResult<T> result(List<T> items) {
+         List<T> copy = List.copyOf(items);
+         return new SyncResult<>(revisionOf(copy), copy, List.of());
+diff --git a/juprovider.core/src/main/resources/mapper/ProtocolMapper.xml b/juprovider.core/src/main/resources/mapper/ProtocolMapper.xml
+index fc157a1..2535366 100644
+--- a/juprovider.core/src/main/resources/mapper/ProtocolMapper.xml
++++ b/juprovider.core/src/main/resources/mapper/ProtocolMapper.xml
+@@ -55,6 +55,10 @@
+                g.SORT_ORD                            AS sortOrd,
+                d.PTL_GRP_NM_KEY                      AS ptlGrpNmKey,
+                d.PTL_GRP_DESC_KEY                    AS ptlGrpDescKey,
++               g.FRAME_RULE                          AS frameRule,
++               g.CMD_GAP_MS                          AS cmdGapMs,
++               g.INIT_ROUTINE                        AS initRoutine,
++               g.INIT_DELAY_MS                       AS initDelayMs,
+                (SELECT COUNT(*) FROM ju_protocol p
+                  WHERE p.PTL_GRP_CD = g.PTL_GRP_CD
+                    AND p.USE_YN = 'YENO0001')        AS protocolCount
+@@ -70,8 +74,10 @@
+     </select>
+ 
+     <insert id="insertGroup">
+-        INSERT INTO ju_protocol_group (PTL_GRP_CD, POLLING_INTVAL, TIMEOUT_MS, RETRY_CNT, USE_YN, SORT_ORD)
+-        VALUES (#{ptlGrpCd}, #{pollingIntval}, #{timeoutMs}, #{retryCnt}, 'YENO0001', #{sortOrd})
++        INSERT INTO ju_protocol_group (PTL_GRP_CD, POLLING_INTVAL, TIMEOUT_MS, RETRY_CNT, USE_YN, SORT_ORD,
++                                       FRAME_RULE, CMD_GAP_MS, INIT_ROUTINE, INIT_DELAY_MS)
++        VALUES (#{ptlGrpCd}, #{pollingIntval}, #{timeoutMs}, #{retryCnt}, 'YENO0001', #{sortOrd},
++                #{frameRule,jdbcType=VARCHAR}, #{cmdGapMs}, #{initRoutine,jdbcType=VARCHAR}, #{initDelayMs})
+     </insert>
+ 
+     <insert id="insertGroupDetail">
+@@ -85,7 +91,11 @@
+                TIMEOUT_MS     = COALESCE(#{timeoutMs,jdbcType=INTEGER}, TIMEOUT_MS),
+                RETRY_CNT      = COALESCE(#{retryCnt,jdbcType=INTEGER}, RETRY_CNT),
+                SORT_ORD       = COALESCE(#{sortOrd,jdbcType=INTEGER}, SORT_ORD),
+-               USE_YN         = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN)
++               USE_YN         = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN),
++               FRAME_RULE     = COALESCE(#{frameRule,jdbcType=VARCHAR}, FRAME_RULE),
++               CMD_GAP_MS     = COALESCE(#{cmdGapMs,jdbcType=INTEGER}, CMD_GAP_MS),
++               INIT_ROUTINE   = COALESCE(#{initRoutine,jdbcType=VARCHAR}, INIT_ROUTINE),
++               INIT_DELAY_MS  = COALESCE(#{initDelayMs,jdbcType=INTEGER}, INIT_DELAY_MS)
+          WHERE PTL_GRP_CD = #{ptlGrpCd}
+     </update>
+ 
+@@ -187,6 +197,10 @@
+                COALESCE(md.RES_VAL, d.PTL_DESC)      AS ptlDesc,
+                d.PTL_NM_KEY                          AS ptlNmKey,
+                d.PTL_DESC_KEY                        AS ptlDescKey,
++               p.PTL_ROLES                           AS ptlRoles,
++               p.PTL_ACTION                          AS ptlAction,
++               p.EXPECT_RULE                         AS expectRule,
++               p.IDEMPOTENT_YN                       AS idempotentYn,
+                p.USE_YN                              AS useYn
+           FROM ju_protocol p
+           LEFT JOIN ju_protocol_detail d ON d.PTL_GRP_CD = p.PTL_GRP_CD AND d.PTL_CD = p.PTL_CD
+@@ -216,13 +230,28 @@
+          ORDER BY PACKET_SEQ
+     </select>
+ 
++    <!-- C5c 검사용: 그룹 초기화 루틴, 그룹 내 프로토콜 유형·사용 여부 -->
++    <select id="selectGroupInitRoutine" resultType="string">
++        SELECT INIT_ROUTINE FROM ju_protocol_group WHERE PTL_GRP_CD = #{ptlGrpCd}
++    </select>
++
++    <select id="selectProtocolStates" resultType="map">
++        SELECT PTL_CD   AS ptlCd,
++               PTL_TYPE AS ptlType,
++               USE_YN   AS useYn
++          FROM ju_protocol
++         WHERE PTL_GRP_CD = #{ptlGrpCd}
++    </select>
++
+     <select id="selectProtocolUseYn" resultType="string">
+         SELECT USE_YN FROM ju_protocol WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd}
+     </select>
+ 
+     <insert id="insertProtocol">
+-        INSERT INTO ju_protocol (PTL_GRP_CD, PTL_CD, PTL_TYPE, PTL_LEN, PTL_VAL, USE_YN)
+-        VALUES (#{ptlGrpCd}, #{ptlCd}, #{ptlType}, #{ptlLen,jdbcType=INTEGER}, #{ptlVal,jdbcType=VARCHAR}, 'YENO0001')
++        INSERT INTO ju_protocol (PTL_GRP_CD, PTL_CD, PTL_TYPE, PTL_LEN, PTL_VAL, USE_YN,
++                                 PTL_ROLES, PTL_ACTION, EXPECT_RULE, IDEMPOTENT_YN)
++        VALUES (#{ptlGrpCd}, #{ptlCd}, #{ptlType}, #{ptlLen,jdbcType=INTEGER}, #{ptlVal,jdbcType=VARCHAR}, 'YENO0001',
++                #{ptlRoles,jdbcType=VARCHAR}, #{ptlAction,jdbcType=VARCHAR}, #{expectRule,jdbcType=VARCHAR}, #{idempotentYn,jdbcType=VARCHAR})
+     </insert>
+ 
+     <insert id="insertProtocolDetail">
+@@ -235,7 +264,11 @@
+            SET PTL_TYPE = COALESCE(#{ptlType,jdbcType=VARCHAR}, PTL_TYPE),
+                PTL_LEN  = COALESCE(#{ptlLen,jdbcType=INTEGER}, PTL_LEN),
+                PTL_VAL  = COALESCE(#{ptlVal,jdbcType=VARCHAR}, PTL_VAL),
+-               USE_YN   = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN)
++               USE_YN   = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN),
++               PTL_ROLES     = COALESCE(#{ptlRoles,jdbcType=VARCHAR}, PTL_ROLES),
++               PTL_ACTION    = COALESCE(#{ptlAction,jdbcType=VARCHAR}, PTL_ACTION),
++               EXPECT_RULE   = COALESCE(#{expectRule,jdbcType=VARCHAR}, EXPECT_RULE),
++               IDEMPOTENT_YN = COALESCE(#{idempotentYn,jdbcType=VARCHAR}, IDEMPOTENT_YN)
+          WHERE PTL_GRP_CD = #{ptlGrpCd}
+            AND PTL_CD = #{ptlCd}
+     </update>
+diff --git a/juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml b/juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml
+index 447ab98..cd7d8a8 100644
+--- a/juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml
++++ b/juprovider.core/src/main/resources/mapper/ProtocolSyncMapper.xml
+@@ -11,7 +11,11 @@
+                G.POLLING_INTVAL  AS pollingIntval,
+                G.TIMEOUT_MS      AS timeoutMs,
+                G.RETRY_CNT       AS retryCnt,
+-               G.SORT_ORD        AS sortOrd
++               G.SORT_ORD        AS sortOrd,
++               G.FRAME_RULE      AS frameRule,
++               G.CMD_GAP_MS      AS cmdGapMs,
++               G.INIT_ROUTINE    AS initRoutine,
++               G.INIT_DELAY_MS   AS initDelayMs
+           FROM ju_protocol_group G
+           LEFT JOIN ju_protocol_group_detail GD
+             ON GD.PTL_GRP_CD = G.PTL_GRP_CD
+@@ -29,7 +33,11 @@
+                P.PTL_LEN     AS ptlLen,
+                P.PTL_VAL     AS ptlVal,
+                PD.PTL_NM     AS ptlNm,
+-               PD.PTL_DESC   AS ptlDesc
++               PD.PTL_DESC   AS ptlDesc,
++               P.PTL_ROLES     AS ptlRoles,
++               P.PTL_ACTION    AS ptlAction,
++               P.EXPECT_RULE   AS expectRule,
++               P.IDEMPOTENT_YN AS idempotentYn
+           FROM ju_protocol P
+           JOIN ju_protocol_group G
+             ON G.PTL_GRP_CD = P.PTL_GRP_CD
+@@ -95,4 +103,39 @@
+          ORDER BY DG.DEV_CD, DG.SORT_ORD, T.DAT_GR_CD, T.SORT_ORD, T.DAT_CD, T.DAT_IDX
+     </select>
+ 
++    <!-- C5c 공통코드 값 (PROL 역할·PACT 동작 → INFO/CONTROL/DATA, NONE/START/PAUSE/STOP) -->
++    <select id="selectCodeValues" resultType="map">
++        SELECT C.COM_CD  AS comCd,
++               C.COM_VAL AS comVal
++          FROM ju_com_code C
++         WHERE C.GRP_CD = #{grpCd}
++    </select>
++
++    <!-- C5c 채널 매핑 (migration 08 ju_data_channel_map). 매핑·태그·데이터 그룹 모두 사용 중인 것만 -->
++    <select id="selectSyncDataMap" resultType="map">
++        SELECT M.DEV_CD       AS devCd,
++               M.CHANNEL_KEY  AS channelKey,
++               M.PTL_CD       AS ptlCd,
++               M.DAT_GR_CD    AS datGrCd,
++               M.DAT_CD       AS datCd,
++               M.DAT_IDX      AS datIdx,
++               M.SCALE        AS scale,
++               M.OFFSET_VAL   AS offsetVal,
++               M.SORT_ORD     AS sortOrd
++          FROM ju_data_channel_map M
++          JOIN ju_data_tag T
++            ON T.DAT_GR_CD = M.DAT_GR_CD
++           AND T.DAT_CD = M.DAT_CD
++           AND T.DAT_IDX = M.DAT_IDX
++           AND T.USE_YN = 'YENO0001'
++          JOIN ju_data_group DG
++            ON DG.DAT_GR_CD = T.DAT_GR_CD
++           AND DG.USE_YN = 'YENO0001'
++         WHERE M.USE_YN = 'YENO0001'
++        <if test="devCd != null">
++           AND M.DEV_CD = #{devCd}
++        </if>
++         ORDER BY M.DEV_CD, M.SORT_ORD, M.CHANNEL_KEY, M.MAP_ID
++    </select>
++
+ </mapper>
+-- 
+2.43.0
+

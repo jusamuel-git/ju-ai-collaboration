@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!-- C4 프로토콜·데이터 태그 내려받기 (읽기 전용). 사용여부 YENO0001 만. -->
+<mapper namespace="com.asdp.juprovider.core.protocolsync.dao.ProtocolSyncDao">
+
+    <select id="selectSyncGroups" resultType="map">
+        SELECT G.PTL_GRP_CD      AS ptlGrpCd,
+               GD.PTL_GRP_NM     AS ptlGrpNm,
+               G.POLLING_INTVAL  AS pollingIntval,
+               G.TIMEOUT_MS      AS timeoutMs,
+               G.RETRY_CNT       AS retryCnt,
+               G.SORT_ORD        AS sortOrd,
+               G.FRAME_RULE      AS frameRule,
+               G.CMD_GAP_MS      AS cmdGapMs,
+               G.INIT_ROUTINE    AS initRoutine,
+               G.INIT_DELAY_MS   AS initDelayMs
+          FROM ju_protocol_group G
+          LEFT JOIN ju_protocol_group_detail GD
+            ON GD.PTL_GRP_CD = G.PTL_GRP_CD
+         WHERE G.USE_YN = 'YENO0001'
+        <if test="ptlGrpCd != null">
+           AND G.PTL_GRP_CD = #{ptlGrpCd}
+        </if>
+         ORDER BY G.SORT_ORD, G.PTL_GRP_CD
+    </select>
+
+    <select id="selectSyncProtocols" resultType="map">
+        SELECT P.PTL_GRP_CD  AS ptlGrpCd,
+               P.PTL_CD      AS ptlCd,
+               P.PTL_TYPE    AS ptlType,
+               P.PTL_LEN     AS ptlLen,
+               P.PTL_VAL     AS ptlVal,
+               PD.PTL_NM     AS ptlNm,
+               PD.PTL_DESC   AS ptlDesc,
+               P.PTL_ROLES     AS ptlRoles,
+               P.PTL_ACTION    AS ptlAction,
+               P.EXPECT_RULE   AS expectRule,
+               P.IDEMPOTENT_YN AS idempotentYn
+          FROM ju_protocol P
+          JOIN ju_protocol_group G
+            ON G.PTL_GRP_CD = P.PTL_GRP_CD
+           AND G.USE_YN = 'YENO0001'
+          LEFT JOIN ju_protocol_detail PD
+            ON PD.PTL_GRP_CD = P.PTL_GRP_CD
+           AND PD.PTL_CD = P.PTL_CD
+         WHERE P.USE_YN = 'YENO0001'
+        <if test="ptlGrpCd != null">
+           AND P.PTL_GRP_CD = #{ptlGrpCd}
+        </if>
+         ORDER BY P.PTL_GRP_CD, P.PTL_CD
+    </select>
+
+    <select id="selectSyncPackets" resultType="map">
+        SELECT K.PTL_GRP_CD       AS ptlGrpCd,
+               K.PTL_CD           AS ptlCd,
+               K.PACKET_SEQ       AS packetSeq,
+               K.PACKET_TYPE      AS packetType,
+               K.DIRECTION        AS direction,
+               K.PACKET_EXPR      AS packetExpr,
+               K.RESPONSE_PTL_CD  AS responsePtlCd,
+               K.PARSE_RULE       AS parseRule,
+               K.DATA_COUNT       AS dataCount,
+               K.DATA_TYPE        AS dataType,
+               K.DATA_POSITION    AS dataPosition
+          FROM ju_protocol_packet K
+          JOIN ju_protocol P
+            ON P.PTL_GRP_CD = K.PTL_GRP_CD
+           AND P.PTL_CD = K.PTL_CD
+           AND P.USE_YN = 'YENO0001'
+         WHERE K.USE_YN = 'YENO0001'
+        <if test="ptlGrpCd != null">
+           AND K.PTL_GRP_CD = #{ptlGrpCd}
+        </if>
+         ORDER BY K.PTL_GRP_CD, K.PTL_CD, K.PACKET_SEQ
+    </select>
+
+    <select id="selectSyncDataTags" resultType="map">
+        SELECT DG.DEV_CD       AS devCd,
+               T.DAT_GR_CD     AS datGrCd,
+               T.DAT_CD        AS datCd,
+               T.DAT_IDX       AS datIdx,
+               T.DAT_TYPE      AS datType,
+               T.DAT_UNIT      AS datUnit,
+               T.TAG_ID        AS tagId,
+               TD.DAT_NM       AS datNm,
+               TD.DAT_MIN      AS datMin,
+               TD.DAT_MAX      AS datMax,
+               T.SORT_ORD      AS sortOrd
+          FROM ju_data_tag T
+          JOIN ju_data_group DG
+            ON DG.DAT_GR_CD = T.DAT_GR_CD
+           AND DG.USE_YN = 'YENO0001'
+          LEFT JOIN ju_data_tag_detail TD
+            ON TD.DAT_GR_CD = T.DAT_GR_CD
+           AND TD.DAT_CD = T.DAT_CD
+           AND TD.DAT_IDX = T.DAT_IDX
+         WHERE T.USE_YN = 'YENO0001'
+        <if test="devCd != null">
+           AND DG.DEV_CD = #{devCd}
+        </if>
+         ORDER BY DG.DEV_CD, DG.SORT_ORD, T.DAT_GR_CD, T.SORT_ORD, T.DAT_CD, T.DAT_IDX
+    </select>
+
+    <!-- C5c 공통코드 값 (PROL 역할·PACT 동작 → INFO/CONTROL/DATA, NONE/START/PAUSE/STOP) -->
+    <select id="selectCodeValues" resultType="map">
+        SELECT C.COM_CD  AS comCd,
+               C.COM_VAL AS comVal
+          FROM ju_com_code C
+         WHERE C.GRP_CD = #{grpCd}
+    </select>
+
+    <!-- C5c 채널 매핑 (migration 08 ju_data_channel_map). 매핑·태그·데이터 그룹 모두 사용 중인 것만 -->
+    <select id="selectSyncDataMap" resultType="map">
+        SELECT M.DEV_CD       AS devCd,
+               M.CHANNEL_KEY  AS channelKey,
+               M.PTL_CD       AS ptlCd,
+               M.DAT_GR_CD    AS datGrCd,
+               M.DAT_CD       AS datCd,
+               M.DAT_IDX      AS datIdx,
+               M.SCALE        AS scale,
+               M.OFFSET_VAL   AS offsetVal,
+               M.SORT_ORD     AS sortOrd
+          FROM ju_data_channel_map M
+          JOIN ju_data_tag T
+            ON T.DAT_GR_CD = M.DAT_GR_CD
+           AND T.DAT_CD = M.DAT_CD
+           AND T.DAT_IDX = M.DAT_IDX
+           AND T.USE_YN = 'YENO0001'
+          JOIN ju_data_group DG
+            ON DG.DAT_GR_CD = T.DAT_GR_CD
+           AND DG.USE_YN = 'YENO0001'
+         WHERE M.USE_YN = 'YENO0001'
+        <if test="devCd != null">
+           AND M.DEV_CD = #{devCd}
+        </if>
+         ORDER BY M.DEV_CD, M.SORT_ORD, M.CHANNEL_KEY, M.MAP_ID
+    </select>
+
+</mapper>

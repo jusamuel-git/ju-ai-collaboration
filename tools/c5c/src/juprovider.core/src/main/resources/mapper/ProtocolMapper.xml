@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!--
+  Protocol Reference Implementation (결정 AC8·AC9, PR-Q1~Q5)
+  결과 Map의 키는 Action Output 계약 필드명(camelCase)과 같다.
+  useYn 조건: null → 사용 중(YENO0001)만, 'YENO0000' → 전체
+-->
+<mapper namespace="com.asdp.juprovider.core.protocol.dao.ProtocolDao">
+
+    <sql id="useYnFilter">
+        <choose>
+            <when test="useYn == null">AND ${alias}.USE_YN = 'YENO0001'</when>
+            <when test="useYn == 'YENO0000'"></when>
+            <otherwise>AND ${alias}.USE_YN = #{useYn}</otherwise>
+        </choose>
+    </sql>
+
+    <!-- ===== Group ===== -->
+
+    <select id="selectGroups" resultType="map">
+        SELECT g.PTL_GRP_CD                          AS ptlGrpCd,
+               COALESCE(ml.RES_VAL, d.PTL_GRP_NM)    AS ptlGrpNm,
+               COALESCE(md.RES_VAL, d.PTL_GRP_DESC)  AS ptlGrpDesc,
+               g.POLLING_INTVAL                      AS pollingIntval,
+               g.TIMEOUT_MS                          AS timeoutMs,
+               g.RETRY_CNT                           AS retryCnt,
+               g.USE_YN                              AS useYn,
+               g.SORT_ORD                            AS sortOrd,
+               (SELECT COUNT(*) FROM ju_protocol p
+                 WHERE p.PTL_GRP_CD = g.PTL_GRP_CD
+                   AND p.USE_YN = 'YENO0001')        AS protocolCount
+          FROM ju_protocol_group g
+          LEFT JOIN ju_protocol_group_detail d ON d.PTL_GRP_CD = g.PTL_GRP_CD
+          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_GRP_NM_KEY
+          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_GRP_DESC_KEY
+         WHERE 1 = 1
+           <include refid="useYnFilter"><property name="alias" value="g"/></include>
+           <if test="keyword != null">
+           AND (g.PTL_GRP_CD LIKE CONCAT('%', #{keyword}, '%')
+                OR COALESCE(ml.RES_VAL, d.PTL_GRP_NM) LIKE CONCAT('%', #{keyword}, '%'))
+           </if>
+         ORDER BY g.SORT_ORD, g.PTL_GRP_CD
+    </select>
+
+    <select id="selectGroup" resultType="map">
+        SELECT g.PTL_GRP_CD                          AS ptlGrpCd,
+               COALESCE(ml.RES_VAL, d.PTL_GRP_NM)    AS ptlGrpNm,
+               COALESCE(md.RES_VAL, d.PTL_GRP_DESC)  AS ptlGrpDesc,
+               g.POLLING_INTVAL                      AS pollingIntval,
+               g.TIMEOUT_MS                          AS timeoutMs,
+               g.RETRY_CNT                           AS retryCnt,
+               g.USE_YN                              AS useYn,
+               g.SORT_ORD                            AS sortOrd,
+               d.PTL_GRP_NM_KEY                      AS ptlGrpNmKey,
+               d.PTL_GRP_DESC_KEY                    AS ptlGrpDescKey,
+               g.FRAME_RULE                          AS frameRule,
+               g.CMD_GAP_MS                          AS cmdGapMs,
+               g.INIT_ROUTINE                        AS initRoutine,
+               g.INIT_DELAY_MS                       AS initDelayMs,
+               (SELECT COUNT(*) FROM ju_protocol p
+                 WHERE p.PTL_GRP_CD = g.PTL_GRP_CD
+                   AND p.USE_YN = 'YENO0001')        AS protocolCount
+          FROM ju_protocol_group g
+          LEFT JOIN ju_protocol_group_detail d ON d.PTL_GRP_CD = g.PTL_GRP_CD
+          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_GRP_NM_KEY
+          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_GRP_DESC_KEY
+         WHERE g.PTL_GRP_CD = #{ptlGrpCd}
+    </select>
+
+    <select id="selectGroupUseYn" resultType="string">
+        SELECT USE_YN FROM ju_protocol_group WHERE PTL_GRP_CD = #{ptlGrpCd}
+    </select>
+
+    <insert id="insertGroup">
+        INSERT INTO ju_protocol_group (PTL_GRP_CD, POLLING_INTVAL, TIMEOUT_MS, RETRY_CNT, USE_YN, SORT_ORD,
+                                       FRAME_RULE, CMD_GAP_MS, INIT_ROUTINE, INIT_DELAY_MS)
+        VALUES (#{ptlGrpCd}, #{pollingIntval}, #{timeoutMs}, #{retryCnt}, 'YENO0001', #{sortOrd},
+                #{frameRule,jdbcType=VARCHAR}, #{cmdGapMs}, #{initRoutine,jdbcType=VARCHAR}, #{initDelayMs})
+    </insert>
+
+    <insert id="insertGroupDetail">
+        INSERT INTO ju_protocol_group_detail (PTL_GRP_CD, PTL_GRP_NM, PTL_GRP_DESC, PTL_GRP_NM_KEY, PTL_GRP_DESC_KEY)
+        VALUES (#{ptlGrpCd}, #{ptlGrpNm}, #{ptlGrpDesc,jdbcType=VARCHAR}, #{nmKey}, #{descKey})
+    </insert>
+
+    <update id="updateGroup">
+        UPDATE ju_protocol_group
+           SET POLLING_INTVAL = COALESCE(#{pollingIntval,jdbcType=INTEGER}, POLLING_INTVAL),
+               TIMEOUT_MS     = COALESCE(#{timeoutMs,jdbcType=INTEGER}, TIMEOUT_MS),
+               RETRY_CNT      = COALESCE(#{retryCnt,jdbcType=INTEGER}, RETRY_CNT),
+               SORT_ORD       = COALESCE(#{sortOrd,jdbcType=INTEGER}, SORT_ORD),
+               USE_YN         = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN),
+               FRAME_RULE     = COALESCE(#{frameRule,jdbcType=VARCHAR}, FRAME_RULE),
+               CMD_GAP_MS     = COALESCE(#{cmdGapMs,jdbcType=INTEGER}, CMD_GAP_MS),
+               INIT_ROUTINE   = COALESCE(#{initRoutine,jdbcType=VARCHAR}, INIT_ROUTINE),
+               INIT_DELAY_MS  = COALESCE(#{initDelayMs,jdbcType=INTEGER}, INIT_DELAY_MS)
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+    </update>
+
+    <update id="updateGroupDetail">
+        UPDATE ju_protocol_group_detail
+           SET PTL_GRP_NM   = COALESCE(#{ptlGrpNm,jdbcType=VARCHAR}, PTL_GRP_NM),
+               PTL_GRP_DESC = COALESCE(#{ptlGrpDesc,jdbcType=VARCHAR}, PTL_GRP_DESC)
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+    </update>
+
+    <!-- GRP_DELETE 선검사: 이 그룹을 쓰는 사용 중 장치 -->
+    <select id="selectActiveDevicesByGroup" resultType="string">
+        SELECT DEV_CD FROM ju_device
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+           AND USE_YN = 'YENO0001'
+         ORDER BY DEV_CD
+    </select>
+
+    <!-- GRP_DELETE 선검사: 그룹의 사용 중 프로토콜을 참조하는 사용 중 실험 -->
+    <select id="selectExperimentRefsByGroup" resultType="string">
+        SELECT DISTINCT CONCAT(edg.EXP_ID, ':', p.PTL_CD)
+          FROM ju_protocol p
+          JOIN ju_experiment_data_group edg
+            ON p.PTL_CD IN (edg.START_PTL_CD, edg.PAUSE_PTL_CD, edg.STOP_PTL_CD)
+           AND edg.USE_YN = 'YENO0001'
+          JOIN ju_experiment e
+            ON e.EXP_ID = edg.EXP_ID
+           AND e.USE_YN = 'YENO0001'
+         WHERE p.PTL_GRP_CD = #{ptlGrpCd}
+           AND p.USE_YN = 'YENO0001'
+         ORDER BY 1
+    </select>
+
+    <!-- DELETE 선검사: 이 프로토콜을 참조하는 사용 중 실험 -->
+    <select id="selectExperimentRefsByProtocol" resultType="string">
+        SELECT DISTINCT CONCAT(edg.EXP_ID, ':', #{ptlCd})
+          FROM ju_experiment_data_group edg
+          JOIN ju_experiment e
+            ON e.EXP_ID = edg.EXP_ID
+           AND e.USE_YN = 'YENO0001'
+         WHERE #{ptlCd} IN (edg.START_PTL_CD, edg.PAUSE_PTL_CD, edg.STOP_PTL_CD)
+           AND edg.USE_YN = 'YENO0001'
+         ORDER BY 1
+    </select>
+
+    <!-- 논리 삭제 (Packet → Protocol → Group 순서, 같은 Transaction) -->
+    <update id="softDeletePacketsByGroup">
+        UPDATE ju_protocol_packet SET USE_YN = 'YENO0002'
+         WHERE PTL_GRP_CD = #{ptlGrpCd} AND USE_YN = 'YENO0001'
+    </update>
+
+    <update id="softDeleteProtocolsByGroup">
+        UPDATE ju_protocol SET USE_YN = 'YENO0002'
+         WHERE PTL_GRP_CD = #{ptlGrpCd} AND USE_YN = 'YENO0001'
+    </update>
+
+    <update id="softDeleteGroup">
+        UPDATE ju_protocol_group SET USE_YN = 'YENO0002'
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+    </update>
+
+    <!-- ===== Protocol ===== -->
+
+    <select id="selectProtocols" resultType="map">
+        SELECT p.PTL_GRP_CD                          AS ptlGrpCd,
+               p.PTL_CD                              AS ptlCd,
+               p.PTL_TYPE                            AS ptlType,
+               COALESCE(tl.RES_VAL, td.COM_NM)       AS ptlTypeNm,
+               p.PTL_LEN                             AS ptlLen,
+               COALESCE(ml.RES_VAL, d.PTL_NM)        AS ptlNm,
+               COALESCE(md.RES_VAL, d.PTL_DESC)      AS ptlDesc,
+               p.USE_YN                              AS useYn,
+               (SELECT COUNT(*) FROM ju_protocol_packet k
+                 WHERE k.PTL_GRP_CD = p.PTL_GRP_CD AND k.PTL_CD = p.PTL_CD
+                   AND k.USE_YN = 'YENO0001')        AS packetCount
+          FROM ju_protocol p
+          LEFT JOIN ju_protocol_detail d ON d.PTL_GRP_CD = p.PTL_GRP_CD AND d.PTL_CD = p.PTL_CD
+          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_NM_KEY
+          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_DESC_KEY
+          LEFT JOIN ju_com_code_detail td ON td.GRP_CD = 'PROT' AND td.COM_CD = p.PTL_TYPE
+          LEFT JOIN ju_multi_lang tl ON tl.LANG_CD = #{langCd} AND tl.RES_KEY = td.COM_NM_KEY
+         WHERE p.PTL_GRP_CD = #{ptlGrpCd}
+           <include refid="useYnFilter"><property name="alias" value="p"/></include>
+           <if test="keyword != null">
+           AND (p.PTL_CD LIKE CONCAT('%', #{keyword}, '%')
+                OR COALESCE(ml.RES_VAL, d.PTL_NM) LIKE CONCAT('%', #{keyword}, '%'))
+           </if>
+         ORDER BY p.PTL_CD
+    </select>
+
+    <select id="selectProtocol" resultType="map">
+        SELECT p.PTL_GRP_CD                          AS ptlGrpCd,
+               p.PTL_CD                              AS ptlCd,
+               p.PTL_TYPE                            AS ptlType,
+               COALESCE(tl.RES_VAL, td.COM_NM)       AS ptlTypeNm,
+               p.PTL_LEN                             AS ptlLen,
+               p.PTL_VAL                             AS ptlVal,
+               COALESCE(ml.RES_VAL, d.PTL_NM)        AS ptlNm,
+               COALESCE(md.RES_VAL, d.PTL_DESC)      AS ptlDesc,
+               d.PTL_NM_KEY                          AS ptlNmKey,
+               d.PTL_DESC_KEY                        AS ptlDescKey,
+               p.PTL_ROLES                           AS ptlRoles,
+               p.PTL_ACTION                          AS ptlAction,
+               p.EXPECT_RULE                         AS expectRule,
+               p.IDEMPOTENT_YN                       AS idempotentYn,
+               p.USE_YN                              AS useYn
+          FROM ju_protocol p
+          LEFT JOIN ju_protocol_detail d ON d.PTL_GRP_CD = p.PTL_GRP_CD AND d.PTL_CD = p.PTL_CD
+          LEFT JOIN ju_multi_lang ml ON ml.LANG_CD = #{langCd} AND ml.RES_KEY = d.PTL_NM_KEY
+          LEFT JOIN ju_multi_lang md ON md.LANG_CD = #{langCd} AND md.RES_KEY = d.PTL_DESC_KEY
+          LEFT JOIN ju_com_code_detail td ON td.GRP_CD = 'PROT' AND td.COM_CD = p.PTL_TYPE
+          LEFT JOIN ju_multi_lang tl ON tl.LANG_CD = #{langCd} AND tl.RES_KEY = td.COM_NM_KEY
+         WHERE p.PTL_GRP_CD = #{ptlGrpCd}
+           AND p.PTL_CD = #{ptlCd}
+    </select>
+
+    <select id="selectPackets" resultType="map">
+        SELECT PACKET_SEQ      AS packetSeq,
+               PACKET_TYPE     AS packetType,
+               DIRECTION       AS direction,
+               PACKET_EXPR     AS packetExpr,
+               RESPONSE_PTL_CD AS responsePtlCd,
+               PARSE_RULE      AS parseRule,
+               DATA_COUNT      AS dataCount,
+               DATA_TYPE       AS dataType,
+               DATA_POSITION   AS dataPosition,
+               USE_YN          AS useYn
+          FROM ju_protocol_packet
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+           AND PTL_CD = #{ptlCd}
+           AND USE_YN = 'YENO0001'
+         ORDER BY PACKET_SEQ
+    </select>
+
+    <!-- C5c 검사용: 그룹 초기화 루틴, 그룹 내 프로토콜 유형·사용 여부 -->
+    <select id="selectGroupInitRoutine" resultType="string">
+        SELECT INIT_ROUTINE FROM ju_protocol_group WHERE PTL_GRP_CD = #{ptlGrpCd}
+    </select>
+
+    <select id="selectProtocolStates" resultType="map">
+        SELECT PTL_CD   AS ptlCd,
+               PTL_TYPE AS ptlType,
+               USE_YN   AS useYn
+          FROM ju_protocol
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+    </select>
+
+    <select id="selectProtocolUseYn" resultType="string">
+        SELECT USE_YN FROM ju_protocol WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd}
+    </select>
+
+    <insert id="insertProtocol">
+        INSERT INTO ju_protocol (PTL_GRP_CD, PTL_CD, PTL_TYPE, PTL_LEN, PTL_VAL, USE_YN,
+                                 PTL_ROLES, PTL_ACTION, EXPECT_RULE, IDEMPOTENT_YN)
+        VALUES (#{ptlGrpCd}, #{ptlCd}, #{ptlType}, #{ptlLen,jdbcType=INTEGER}, #{ptlVal,jdbcType=VARCHAR}, 'YENO0001',
+                #{ptlRoles,jdbcType=VARCHAR}, #{ptlAction,jdbcType=VARCHAR}, #{expectRule,jdbcType=VARCHAR}, #{idempotentYn,jdbcType=VARCHAR})
+    </insert>
+
+    <insert id="insertProtocolDetail">
+        INSERT INTO ju_protocol_detail (PTL_GRP_CD, PTL_CD, PTL_NM, PTL_DESC, PTL_NM_KEY, PTL_DESC_KEY)
+        VALUES (#{ptlGrpCd}, #{ptlCd}, #{ptlNm}, #{ptlDesc,jdbcType=VARCHAR}, #{nmKey}, #{descKey})
+    </insert>
+
+    <update id="updateProtocol">
+        UPDATE ju_protocol
+           SET PTL_TYPE = COALESCE(#{ptlType,jdbcType=VARCHAR}, PTL_TYPE),
+               PTL_LEN  = COALESCE(#{ptlLen,jdbcType=INTEGER}, PTL_LEN),
+               PTL_VAL  = COALESCE(#{ptlVal,jdbcType=VARCHAR}, PTL_VAL),
+               USE_YN   = COALESCE(#{useYn,jdbcType=VARCHAR}, USE_YN),
+               PTL_ROLES     = COALESCE(#{ptlRoles,jdbcType=VARCHAR}, PTL_ROLES),
+               PTL_ACTION    = COALESCE(#{ptlAction,jdbcType=VARCHAR}, PTL_ACTION),
+               EXPECT_RULE   = COALESCE(#{expectRule,jdbcType=VARCHAR}, EXPECT_RULE),
+               IDEMPOTENT_YN = COALESCE(#{idempotentYn,jdbcType=VARCHAR}, IDEMPOTENT_YN)
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+           AND PTL_CD = #{ptlCd}
+    </update>
+
+    <update id="updateProtocolDetail">
+        UPDATE ju_protocol_detail
+           SET PTL_NM   = COALESCE(#{ptlNm,jdbcType=VARCHAR}, PTL_NM),
+               PTL_DESC = COALESCE(#{ptlDesc,jdbcType=VARCHAR}, PTL_DESC)
+         WHERE PTL_GRP_CD = #{ptlGrpCd}
+           AND PTL_CD = #{ptlCd}
+    </update>
+
+    <delete id="deletePackets">
+        DELETE FROM ju_protocol_packet WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd}
+    </delete>
+
+    <insert id="insertPacket">
+        INSERT INTO ju_protocol_packet
+            (PTL_GRP_CD, PTL_CD, PACKET_SEQ, PACKET_TYPE, DIRECTION, PACKET_EXPR, RESPONSE_PTL_CD,
+             PARSE_RULE, DATA_COUNT, DATA_TYPE, DATA_POSITION, USE_YN)
+        VALUES
+            (#{ptlGrpCd}, #{ptlCd}, #{packetSeq}, #{packetType,jdbcType=VARCHAR}, #{direction},
+             #{packetExpr,jdbcType=VARCHAR}, #{responsePtlCd,jdbcType=VARCHAR}, #{parseRule,jdbcType=VARCHAR},
+             #{dataCount}, #{dataType,jdbcType=VARCHAR}, #{dataPosition,jdbcType=VARCHAR}, 'YENO0001')
+    </insert>
+
+    <update id="softDeletePackets">
+        UPDATE ju_protocol_packet SET USE_YN = 'YENO0002'
+         WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd} AND USE_YN = 'YENO0001'
+    </update>
+
+    <update id="softDeleteProtocol">
+        UPDATE ju_protocol SET USE_YN = 'YENO0002'
+         WHERE PTL_GRP_CD = #{ptlGrpCd} AND PTL_CD = #{ptlCd}
+    </update>
+
+    <!-- ===== 다국어 (결정 AC9) ===== -->
+
+    <insert id="upsertMultiLang">
+        INSERT INTO ju_multi_lang (LANG_CD, RES_KEY, RES_VAL)
+        VALUES (#{langCd}, #{resKey}, #{resVal})
+        ON DUPLICATE KEY UPDATE RES_VAL = VALUES(RES_VAL)
+    </insert>
+
+</mapper>
