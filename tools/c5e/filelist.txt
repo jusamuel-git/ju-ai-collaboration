@@ -1,0 +1,4 @@
+desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java

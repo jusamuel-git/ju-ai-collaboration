@@ -1,0 +1,10 @@
+fix(collect): reject Java-only regex syntax in EXPECT_RULE (D3)
+
+Expect regex runs only on Desktop (.NET). The server now rejects syntax that compiles in Java but
+fails or means something else in .NET: possessive quantifiers, \Q..\E, \h \H \v \V \R \X \N, \x{..},
+\p{java..}, '[' and && inside a character class, inline flags d/u/U.
+Shared vectors (rule_vectors.json) extended: expect 35 (java = server accepts, dotnet = .NET compiles,
+no java=true/dotnet=false case allowed) and match 12 (documented \w/\d range differences).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch

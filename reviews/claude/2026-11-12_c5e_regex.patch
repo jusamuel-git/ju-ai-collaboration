@@ -1,0 +1,368 @@
+From 491575959bd9528b7c57d708a506d9d1e587be28 Mon Sep 17 00:00:00 2001
+From: JU <jusamuel@gmail.com>
+Date: Thu, 12 Nov 2026 21:06:34 +0900
+Subject: [PATCH] fix(collect): reject Java-only regex syntax in EXPECT_RULE
+ (D3)
+
+Expect regex runs only on Desktop (.NET). The server now rejects syntax that compiles in Java but
+fails or means something else in .NET: possessive quantifiers, \Q..\E, \h \H \v \V \R \X \N, \x{..},
+\p{java..}, '[' and && inside a character class, inline flags d/u/U.
+Shared vectors (rule_vectors.json) extended: expect 35 (java = server accepts, dotnet = .NET compiles,
+no java=true/dotnet=false case allowed) and match 12 (documented \w/\d range differences).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FuvmaMYDsqg8KmRxK7aHch
+---
+ .../RuleVectorTests.cs                        |   4 +-
+ .../TestData/rule_vectors.json                | 139 +++++++++++++++++-
+ .../core/protocol/ProtocolRulesTest.java      |  18 ++-
+ .../core/protocol/rule/ProtocolRules.java     | 103 +++++++++++++
+ 4 files changed, 257 insertions(+), 7 deletions(-)
+
+diff --git a/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs b/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+index a0887bf..4671586 100644
+--- a/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
++++ b/desktop/tests/juprovider.tests.protocol/RuleVectorTests.cs
+@@ -51,12 +51,14 @@ public class RuleVectorTests
+             string rule = v.GetProperty("rule").GetString()!;
+             bool ok = ExpectRule.TryRead(rule, out _, out string? error);
+             Assert.True(ok == v.GetProperty("dotnet").GetBoolean(), $"expect '{rule}': 기대 {v.GetProperty("dotnet").GetBoolean()}, 실제 {ok} {error}");
++            Assert.False(v.GetProperty("java").GetBoolean() && !ok, $"서버 허용·Desktop 불가: {rule}");
+             n++;
+         }
+         foreach (JsonElement v in root.GetProperty("match").EnumerateArray())
+         {
+             string regex = v.GetProperty("regex").GetString()!, input = v.GetProperty("input").GetString()!;
+-            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(input, regex, System.Text.RegularExpressions.RegexOptions.CultureInvariant) == v.GetProperty("match").GetBoolean(),
++            bool expected = v.TryGetProperty("match", out JsonElement mm) ? mm.GetBoolean() : v.GetProperty("dotnet").GetBoolean();
++            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(input, regex, System.Text.RegularExpressions.RegexOptions.CultureInvariant) == expected,
+                 $"match '{regex}' / '{input}'");
+             n++;
+         }
+diff --git a/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json b/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+index 0d75d83..b8319e4 100644
+--- a/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
++++ b/desktop/tests/juprovider.tests.protocol/TestData/rule_vectors.json
+@@ -186,7 +186,7 @@
+    "ok": false
+   }
+  ],
+- "_comment_expect": "expect: 응답 판정 규칙(EXPECT_RULE). java/dotnet = 각 쪽 통과 여부. 둘이 다른 항목은 문법 차이 기록용(note). match: 같은 regex·입력의 일치 결과가 양쪽 같아야 함.",
++ "_comment_expect": "expect: 응답 판정 규칙(EXPECT_RULE). java = 서버 저장 허용, dotnet = Desktop(.NET) 해석 가능. java=true·dotnet=false 인 항목은 없어야 한다(서버가 허용한 regex 는 Desktop 에서 항상 쓸 수 있음). match: 일치 결과, java/dotnet 이 다른 항목은 의미 차이 기록(매칭은 Desktop 만 수행).",
+  "expect": [
+   {
+    "rule": "{\"startsWith\":\"{OK\"}",
+@@ -263,17 +263,117 @@
+    "java": false,
+    "dotnet": false
+   },
++  {
++   "rule": "{\"regex\":\"(?<b>x)(?<a-b>y)\"}",
++   "java": false,
++   "dotnet": true,
++   "note": "균형 그룹: .NET 만 지원 → 서버가 저장 거부"
++  },
+   {
+    "rule": "{\"regex\":\"a++\"}",
+-   "java": true,
++   "java": false,
+    "dotnet": false,
+-   "note": "소유 수량자: Java 만 지원 → Desktop 은 경고 후 내장/없음"
++   "note": "소유 수량자: .NET 오류 → 서버도 거부 (D3)"
+   },
+   {
+-   "rule": "{\"regex\":\"(?<b>x)(?<a-b>y)\"}",
++   "rule": "{\"regex\":\"a{2}+\"}",
++   "java": false,
++   "dotnet": false,
++   "note": "소유 수량자"
++  },
++  {
++   "rule": "{\"regex\":\"\\\\Qa.b\\\\E\"}",
++   "java": false,
++   "dotnet": false,
++   "note": "\\Q..\\E: .NET 미지원"
++  },
++  {
++   "rule": "{\"regex\":\"\\\\h+\"}",
++   "java": false,
++   "dotnet": false,
++   "note": "\\h: .NET 미지원"
++  },
++  {
++   "rule": "{\"regex\":\"\\\\R\"}",
++   "java": false,
++   "dotnet": false,
++   "note": "\\R: .NET 미지원"
++  },
++  {
++   "rule": "{\"regex\":\"\\\\x{41}\"}",
++   "java": false,
++   "dotnet": false,
++   "note": "\\x{..}: .NET 미지원"
++  },
++  {
++   "rule": "{\"regex\":\"(?U)a\"}",
++   "java": false,
++   "dotnet": false,
++   "note": "플래그 U: .NET 미지원"
++  },
++  {
++   "rule": "{\"regex\":\"(?d)a\"}",
++   "java": false,
++   "dotnet": false,
++   "note": "플래그 d: .NET 미지원"
++  },
++  {
++   "rule": "{\"regex\":\"\\\\v\"}",
+    "java": false,
+    "dotnet": true,
+-   "note": "균형 그룹: .NET 만 지원 → 서버가 저장 거부"
++   "note": "\\v: Java 세로 공백 / .NET 세로 탭 → 의미 다름, 서버 거부"
++  },
++  {
++   "rule": "{\"regex\":\"[a-z&&[aeiou]]\"}",
++   "java": false,
++   "dotnet": true,
++   "note": "&&: Java 교집합 / .NET 문자 → 의미 다름, 서버 거부"
++  },
++  {
++   "rule": "{\"regex\":\"[a[b]]\"}",
++   "java": false,
++   "dotnet": true,
++   "note": "클래스 안 '[': Java 합집합 / .NET 문자 → 의미 다름, 서버 거부"
++  },
++  {
++   "rule": "{\"regex\":\"a+?b\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"(?i:ok)\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"(?>a+)b\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"(?<=a)b\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"[\\\\[\\\\]{}]\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"^\\\\{OK\\\\}\\\\Z\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"x{2,3}?y\"}",
++   "java": true,
++   "dotnet": true
++  },
++  {
++   "rule": "{\"regex\":\"\\\\p{Lu}\"}",
++   "java": true,
++   "dotnet": true
+   }
+  ],
+  "match": [
+@@ -311,6 +411,35 @@
+    "regex": "^\\p{L}+$",
+    "input": "측정",
+    "match": true
++  },
++  {
++   "regex": "^[{]OK[}]",
++   "input": "{OK}",
++   "match": true
++  },
++  {
++   "regex": "\\bOK\\b",
++   "input": "{OK}",
++   "match": true
++  },
++  {
++   "regex": "^\\w+$",
++   "input": "ABC_12",
++   "match": true
++  },
++  {
++   "regex": "^\\w+$",
++   "input": "측정",
++   "java": false,
++   "dotnet": true,
++   "note": "\\w 범위: Java ASCII / .NET 유니코드. 장치 응답은 ASCII 라 GTEC 영향 없음"
++  },
++  {
++   "regex": "^\\d+$",
++   "input": "٣",
++   "java": false,
++   "dotnet": true,
++   "note": "\\d 범위: Java ASCII / .NET 유니코드 숫자"
+   }
+  ]
+ }
+diff --git a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+index 477fb8d..cfd6660 100644
+--- a/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
++++ b/juprovider.backend/src/test/java/com/asdp/juprovider/core/protocol/ProtocolRulesTest.java
+@@ -71,16 +71,32 @@ class ProtocolRulesTest {
+                 ok = false;
+             }
+             assertEquals(v.get("java").asBoolean(), ok, rule);
++            // 서버가 허용하는 regex 는 Desktop(.NET)에서도 해석 가능해야 한다 (D3)
++            assertFalse(v.get("java").asBoolean() && !v.get("dotnet").asBoolean(), "서버 허용·Desktop 불가: " + rule);
+             n++;
+         }
+         for (JsonNode v : root.get("match")) {
+             boolean m = java.util.regex.Pattern.compile(v.get("regex").asText()).matcher(v.get("input").asText()).find();
+-            assertEquals(v.get("match").asBoolean(), m, v.get("regex").asText() + " / " + v.get("input").asText());
++            boolean expected = v.has("match") ? v.get("match").asBoolean() : v.get("java").asBoolean();
++            assertEquals(expected, m, v.get("regex").asText() + " / " + v.get("input").asText());
+             n++;
+         }
+         assertTrue(n >= 20, "벡터 수 " + n);
+     }
+ 
++    /** D3: Java 에서만 되거나 의미가 다른 문법은 저장 거부, 공통 문법은 허용 */
++    @Test
++    void javaOnlyRegexRejected() {
++        for (String bad : new String[] { "a*+", "a?+", "a{1,2}+", "\\Qx\\E", "\\H", "\\V", "\\X", "\\N{LATIN SMALL LETTER A}",
++                "\\p{javaLowerCase}", "[ab&&b]", "[a[b]]", "(?u)a", "(?iU:a)" }) {
++            assertThrows(ProtocolRules.RuleException.class,
++                    () -> ProtocolRules.validateExpectRule("{\"regex\":\"" + bad.replace("\\", "\\\\") + "\"}"), bad);
++        }
++        for (String ok : new String[] { "^[{][A-Za-z]", "a+?", "a*?b", "(?i)ok", "(?s:.)", "[\\[\\]]", "\\p{L}", "[^}]+", "x{3}", "(?<n>a)\\k<n>" }) {
++            assertDoesNotThrow(() -> ProtocolRules.validateExpectRule("{\"regex\":\"" + ok.replace("\\", "\\\\") + "\"}"), ok);
++        }
++    }
++
+     @Test
+     void gtecVerifiedValuesPass() {
+         assertDoesNotThrow(() -> ProtocolRules.validateFrameRule("{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}"));
+diff --git a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java
+index dbbc0ed..7cab4bf 100644
+--- a/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java
++++ b/juprovider.core/src/main/java/com/asdp/juprovider/core/protocol/rule/ProtocolRules.java
+@@ -270,7 +270,110 @@ public final class ProtocolRules {
+             } catch (PatternSyntaxException ex) {
+                 throw new RuleException("regex 오류: " + ex.getDescription());
+             }
++            String javaOnly = javaOnlyRegexSyntax(v);
++            if (javaOnly != null) {
++                throw new RuleException("Desktop(.NET)에서 쓸 수 없거나 의미가 다른 regex 문법입니다: " + javaOnly);
++            }
++        }
++    }
++
++    /**
++     * C5e 준비(D3): 응답 판정 regex 는 Desktop(.NET)에서만 실행된다. Java 에서는 컴파일되지만 .NET 에서 오류이거나 의미가 다른 문법을 막는다.
++     * (.NET 전용 문법은 Java 컴파일에서 이미 오류) — 공통 벡터 rule_vectors.json expect 의 java/dotnet 값으로 양쪽 확인.
++     * 막는 것: 소유 수량자(*+ ++ ?+ {n}+), \Q..\E, \h \H \v \V \R \X \N \x{..} \p{java..},
++     *          문자 클래스 안의 '['(Java 합집합 / .NET 차집합·문자)와 &&(Java 교집합), 인라인 플래그 d·u·U.
++     *
++     * @return 문제 문법 설명, 없으면 null
++     */
++    static String javaOnlyRegexSyntax(String s) {
++        int n = s.length();
++        boolean inClass = false;
++        boolean prevQuantifier = false;
++        for (int i = 0; i < n; i++) {
++            char c = s.charAt(i);
++            if (c == '\\') {
++                if (i + 1 >= n) {
++                    return null;
++                }
++                char d = s.charAt(i + 1);
++                if ("QEhHvVRXN".indexOf(d) >= 0) {
++                    return "\\" + d;
++                }
++                if (d == 'x' && i + 2 < n && s.charAt(i + 2) == '{') {
++                    return "\\x{..}";
++                }
++                if ((d == 'p' || d == 'P') && i + 2 < n && s.charAt(i + 2) == '{') {
++                    int close = s.indexOf('}', i + 3);
++                    if (s.startsWith("java", i + 3)) {
++                        return "\\" + d + "{java..}";
++                    }
++                    i = close < 0 ? n : close;
++                } else {
++                    i++;
++                }
++                prevQuantifier = false;
++                continue;
++            }
++            if (inClass) {
++                if (c == '[') {
++                    return "문자 클래스 안의 '[' (\\[ 로 쓰세요)";
++                }
++                if (c == '&' && i + 1 < n && s.charAt(i + 1) == '&') {
++                    return "문자 클래스 안의 &&";
++                }
++                if (c == ']') {
++                    inClass = false;
++                }
++                continue;
++            }
++            switch (c) {
++                case '[' -> {
++                    inClass = true;
++                    if (i + 1 < n && s.charAt(i + 1) == '^') {
++                        i++;
++                    }
++                    if (i + 1 < n && s.charAt(i + 1) == ']') {
++                        i++;
++                    }
++                    prevQuantifier = false;
++                }
++                case '(' -> {
++                    if (i + 1 < n && s.charAt(i + 1) == '?') {
++                        int j = i + 2;
++                        while (j < n && "idmsuxU-".indexOf(s.charAt(j)) >= 0) {
++                            j++;
++                        }
++                        String flags = s.substring(i + 2, j);
++                        if (!flags.isEmpty() && j < n && (s.charAt(j) == ')' || s.charAt(j) == ':')
++                                && (flags.indexOf('d') >= 0 || flags.indexOf('u') >= 0 || flags.indexOf('U') >= 0)) {
++                            return "인라인 플래그 (?" + flags + ")";
++                        }
++                        i++;
++                    }
++                    prevQuantifier = false;
++                }
++                case '*', '+', '?' -> {
++                    if (prevQuantifier && c == '+') {
++                        return "소유 수량자 '" + s.charAt(i - 1) + "+'";
++                    }
++                    prevQuantifier = !(prevQuantifier && c == '?');
++                }
++                case '{' -> {
++                    int close = s.indexOf('}', i + 1);
++                    if (close > i && s.substring(i + 1, close).matches("[0-9]+(,[0-9]*)?")) {
++                        if (close + 1 < n && s.charAt(close + 1) == '+') {
++                            return "소유 수량자 '" + s.substring(i, close + 1) + "+'";
++                        }
++                        i = close;
++                        prevQuantifier = true;
++                    } else {
++                        prevQuantifier = false;
++                    }
++                }
++                default -> prevQuantifier = false;
++            }
+         }
++        return null;
+     }
+ 
+     // ===== 공통 =====
+-- 
+2.36.1.windows.1
+

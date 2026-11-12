@@ -1,0 +1,445 @@
+{
+ "_comment": "C5c 서버(Java ProtocolRules)·Desktop(C# RuleReader/ProtocolExpression) 공통 판정 벡터. ok=true 면 양쪽 모두 통과, false 면 양쪽 모두 오류.",
+ "frame": [
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"{\",\"end\":\"[CR][LF]\",\"maxLen\":512}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"STXETX\",\"escape\":\"[DLE]\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"FIXED\",\"len\":8,\"checksum\":{\"type\":\"SUM8\",\"from\":1,\"to\":6}}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"lenfield\",\"offset\":2,\"size\":2,\"endian\":\"LE\",\"adjust\":-1,\"includesHeader\":true}",
+   "ok": true
+  },
+  {
+   "rule": "{\"kind\":\"DELIM\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":2,\"kind\":\"DELIM\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"SLIP\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"end\":\"[XX]\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"start\":\"\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"maxLen\":0}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"maxLen\":1.5}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"STXETX\",\"stx\":\"AB\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"FIXED\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"LENFIELD\",\"offset\":0,\"size\":3}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",\"checksum\":{\"type\":\"CRC32\"}}",
+   "ok": false
+  },
+  {
+   "rule": "[1,2]",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"DELIM\",}",
+   "ok": false
+  },
+  {
+   "rule": "not json",
+   "ok": false
+  }
+ ],
+ "parse": [
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{}\",\"sep\":\"SPACE\",\"count\":3}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"INFO\",\"trim\":\"{}\",\"fields\":[\"CH1\",\"CH2\",\"CH3\",\"CH4\"],\"absent\":\"000\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"map\":\"samples\",\"sep\":\"comma\"}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"u16\",\"endian\":\"BE\",\"scale\":0.1}]}",
+   "ok": true
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"trim\":\"{\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"count\":-1}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"sep\":\"PIPE\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"map\":\"ROWS\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"INFO\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"INFO\",\"fields\":[\"CH1\",\"CH1\"]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"U24\"}]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"BINARY\",\"fields\":[{\"key\":\"a\",\"offset\":0,\"type\":\"U8\"},{\"key\":\"a\",\"offset\":1,\"type\":\"U8\"}]}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"CSV\"}",
+   "ok": false
+  },
+  {
+   "rule": "{\"v\":1,\"kind\":\"TEXT\",\"count\":\"3\"}",
+   "ok": false
+  }
+ ],
+ "expression": [
+  {
+   "expr": "S{10,1}[CR][LF]",
+   "ok": true
+  },
+  {
+   "expr": "[STX]ABC[00][ETX]",
+   "ok": true
+  },
+  {
+   "expr": "[cr][lf]",
+   "ok": true
+  },
+  {
+   "expr": "[ 0d ]",
+   "ok": true
+  },
+  {
+   "expr": "",
+   "ok": true
+  },
+  {
+   "expr": "[CR",
+   "ok": false
+  },
+  {
+   "expr": "[XYZ]",
+   "ok": false
+  },
+  {
+   "expr": "[0G]",
+   "ok": false
+  },
+  {
+   "expr": "가",
+   "ok": false
+  },
+  {
+   "expr": "[123]",
+   "ok": false
+  }
+ ],
+ "_comment_expect": "expect: 응답 판정 규칙(EXPECT_RULE). java = 서버 저장 허용, dotnet = Desktop(.NET) 해석 가능. java=true·dotnet=false 인 항목은 없어야 한다(서버가 허용한 regex 는 Desktop 에서 항상 쓸 수 있음). match: 일치 결과, java/dotnet 이 다른 항목은 의미 차이 기록(매칭은 Desktop 만 수행).",
+ "expect": [
+  {
+   "rule": "{\"startsWith\":\"{OK\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^[{][A-Za-z]\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^\\\\{\\\\d{3}\\\\}$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"(?i)^ok\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^\\\\p{L}+$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^(?<v>[0-9]+)$\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"[\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"(\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"a{2,1}\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"\\\\\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"contains\":\"a\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"startsWith\":\"a\",\"regex\":\"b\"}",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "not json",
+   "java": false,
+   "dotnet": false
+  },
+  {
+   "rule": "{\"regex\":\"(?<b>x)(?<a-b>y)\"}",
+   "java": false,
+   "dotnet": true,
+   "note": "균형 그룹: .NET 만 지원 → 서버가 저장 거부"
+  },
+  {
+   "rule": "{\"regex\":\"a++\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "소유 수량자: .NET 오류 → 서버도 거부 (D3)"
+  },
+  {
+   "rule": "{\"regex\":\"a{2}+\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "소유 수량자"
+  },
+  {
+   "rule": "{\"regex\":\"\\\\Qa.b\\\\E\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "\\Q..\\E: .NET 미지원"
+  },
+  {
+   "rule": "{\"regex\":\"\\\\h+\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "\\h: .NET 미지원"
+  },
+  {
+   "rule": "{\"regex\":\"\\\\R\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "\\R: .NET 미지원"
+  },
+  {
+   "rule": "{\"regex\":\"\\\\x{41}\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "\\x{..}: .NET 미지원"
+  },
+  {
+   "rule": "{\"regex\":\"(?U)a\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "플래그 U: .NET 미지원"
+  },
+  {
+   "rule": "{\"regex\":\"(?d)a\"}",
+   "java": false,
+   "dotnet": false,
+   "note": "플래그 d: .NET 미지원"
+  },
+  {
+   "rule": "{\"regex\":\"\\\\v\"}",
+   "java": false,
+   "dotnet": true,
+   "note": "\\v: Java 세로 공백 / .NET 세로 탭 → 의미 다름, 서버 거부"
+  },
+  {
+   "rule": "{\"regex\":\"[a-z&&[aeiou]]\"}",
+   "java": false,
+   "dotnet": true,
+   "note": "&&: Java 교집합 / .NET 문자 → 의미 다름, 서버 거부"
+  },
+  {
+   "rule": "{\"regex\":\"[a[b]]\"}",
+   "java": false,
+   "dotnet": true,
+   "note": "클래스 안 '[': Java 합집합 / .NET 문자 → 의미 다름, 서버 거부"
+  },
+  {
+   "rule": "{\"regex\":\"a+?b\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"(?i:ok)\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"(?>a+)b\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"(?<=a)b\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"[\\\\[\\\\]{}]\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"^\\\\{OK\\\\}\\\\Z\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"x{2,3}?y\"}",
+   "java": true,
+   "dotnet": true
+  },
+  {
+   "rule": "{\"regex\":\"\\\\p{Lu}\"}",
+   "java": true,
+   "dotnet": true
+  }
+ ],
+ "match": [
+  {
+   "regex": "^[{][A-Za-z]",
+   "input": "{Science Cube Lite II Memory}",
+   "match": true
+  },
+  {
+   "regex": "^[{][A-Za-z]",
+   "input": "{008,000,000,000}",
+   "match": false
+  },
+  {
+   "regex": "^[{][0-9]{3},[0-9]{3},[0-9]{3},[0-9]{3}[}]$",
+   "input": "{008,000,000,000}",
+   "match": true
+  },
+  {
+   "regex": "^\\{\\d{3}",
+   "input": "{12a",
+   "match": false
+  },
+  {
+   "regex": "(?i)^ok",
+   "input": "OK",
+   "match": true
+  },
+  {
+   "regex": "end$",
+   "input": "x end\n",
+   "match": true
+  },
+  {
+   "regex": "^\\p{L}+$",
+   "input": "측정",
+   "match": true
+  },
+  {
+   "regex": "^[{]OK[}]",
+   "input": "{OK}",
+   "match": true
+  },
+  {
+   "regex": "\\bOK\\b",
+   "input": "{OK}",
+   "match": true
+  },
+  {
+   "regex": "^\\w+$",
+   "input": "ABC_12",
+   "match": true
+  },
+  {
+   "regex": "^\\w+$",
+   "input": "측정",
+   "java": false,
+   "dotnet": true,
+   "note": "\\w 범위: Java ASCII / .NET 유니코드. 장치 응답은 ASCII 라 GTEC 영향 없음"
+  },
+  {
+   "regex": "^\\d+$",
+   "input": "٣",
+   "java": false,
+   "dotnet": true,
+   "note": "\\d 범위: Java ASCII / .NET 유니코드 숫자"
+  }
+ ]
+}

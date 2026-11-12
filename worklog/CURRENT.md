@@ -9,7 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
-| 사용자 | **결정 대기 D1~D6** [목록](../reviews/claude/2026-11-11_pending_decisions.md) — C5e 실DB 08, 배포 순서, Java 전용 regex 차단, 내장 GTEC 설정 제거, feature 브랜치 push |
+| 사용자 | **C5e 준비 PASS (11/12 21:10)** [결과](../reviews/claude/2026-11-12_c5e_prep_result.md) · [계획](../reviews/claude/2026-11-12_c5e_plan.md) — D1~D5 decisions 기록, regex 보완 `4915759`(서버 62·Desktop 189), collect-c5b/c5c/c5d **origin push**(main 그대로), 실DB 사전 점검 PASS·백업/복원/down 리허설 PASS, 실DB 무변경. **결정 대기: C5e 실행 승인, 06 함께 적용(Q1), 적용 시각(Q2)** |
 | 사용자 | **C5d PASS (11/11 21:45)** [결과](../reviews/claude/2026-11-11_c5d_result.md) — PC-B `feature/collect-c5d` @ `33a6494` 로컬 commit(push 없음). Desktop 서버 설정 우선(서버→내장→기본, 출처·경고 기록) + data-map 매핑(CH<n> 호환 유지). 빌드 5종·서버 61/61·Desktop 189/189(가상 GTEC 전체 주기 포함)·실서버 59/59·**실장비 COM3 22/22 (서버 값만, 분리·재연결 포함)**. 실제 DB 무변경. 결정 요청: Java 전용 regex 저장 차단 여부, 내장 GTEC 설정 제거(C5-Q7). 다음: C5e(실제 DB 08) 승인 대기 |
 | 사용자 | **C5c PASS (11/11 21:25)** [결과](../reviews/claude/2026-11-11_c5c_result.md) — PC-B `feature/collect-c5c` @ `6e744be` 로컬 commit(push 없음), 빌드 5종·서버 57/57·Desktop 176/176·실서버+C5c API 59/59, 실제 DB 무변경. Smart App Control 해제 후 재실행. 확인 요청 6건(§4). 다음: C5d 승인 대기 (GTEC COM3 연결 필요) |
 | 사용자 | **C5b PASS 52/52 (11/02 22:25)** [결과](../reviews/claude/2026-11-02_c5b_result.md) — `feature/collect-c5b` @ `c8474c6` 로컬 commit(push 없음), migration 08 up/down/재실행·보존·논리삭제·제약조건 테스트 DB 사본에서 검증, 실제 DB 무변경, 빌드 5종·실서버 43/43 PASS. 확인 요청: 설계 차이 5건(§4). 다음: C5c 승인 대기 |
@@ -48,6 +48,7 @@
 - 2026-11-02 21:36 PC-B 전환: 브랜치 복원·빌드·회귀 PASS, 환경 차이 4건(도구 설치) 사용자 조치 대기
 - 2026-11-02 21:22 PC-B 전환 1단계 점검: 브랜치·커밋 누락 없음, PC-B 로컬 변경 juprovider 40·juproject 36(보존 필요), vcpkg 없음·autocrlf 미설정 → [보고](../reviews/claude/2026-11-02_pcb_switch_check.md), 2단계 승인 대기
 - 2026-11-02 12:12 PC-A 포맷 대비: juprovider feature 브랜치 9개 push(9/9 확인, origin/main 불변), 미커밋·stash 없음
+- 2026-11-12 21:10 C5e 준비: regex `4915759`, c5b/c5c/c5d push, 사전 점검·리허설 PASS
 - 2026-11-11 21:45 C5d `33a6494` 로컬 commit, Desktop 189·서버 61·실서버 59·실장비 22 PASS
 - 2026-11-11 21:25 C5c `6e744be` 로컬 commit, 59/59·176/176 PASS (SAC 해제 후)
 - 2026-11-02 22:25 C5b `c8474c6` migration 08 (테스트 DB만), 52/52 PASS
