@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자 | **C5e 실제 DB 06→08 적용 완료 (11/12 21:30)** [결과](../reviews/claude/2026-11-12_c5e_result.md) — 사전 점검 6/6·백업·복원 확인·적용(65/145 ms)·사후 V-1~V-4 PASS, 실DB = 백업+06+08 기준과 동일. Tomcat(10/25 WAR 그대로) 기동, health·화면·장치 sync 정상, W-2 로그인 실패 400은 구버전 배포본 동작(DB 무관). 보고: 배포본이 sync/devices를 Client Key 없이 허용. **다음 승인 대기: C5c 서버 배포(D2)·main 병합** |
 | 사용자 | **C5e 준비 PASS (11/12 21:10)** [결과](../reviews/claude/2026-11-12_c5e_prep_result.md) · [계획](../reviews/claude/2026-11-12_c5e_plan.md) — D1~D5 decisions 기록, regex 보완 `4915759`(서버 62·Desktop 189), collect-c5b/c5c/c5d **origin push**(main 그대로), 실DB 사전 점검 PASS·백업/복원/down 리허설 PASS, 실DB 무변경. **결정 대기: C5e 실행 승인, 06 함께 적용(Q1), 적용 시각(Q2)** |
 | 사용자 | **C5d PASS (11/11 21:45)** [결과](../reviews/claude/2026-11-11_c5d_result.md) — PC-B `feature/collect-c5d` @ `33a6494` 로컬 commit(push 없음). Desktop 서버 설정 우선(서버→내장→기본, 출처·경고 기록) + data-map 매핑(CH<n> 호환 유지). 빌드 5종·서버 61/61·Desktop 189/189(가상 GTEC 전체 주기 포함)·실서버 59/59·**실장비 COM3 22/22 (서버 값만, 분리·재연결 포함)**. 실제 DB 무변경. 결정 요청: Java 전용 regex 저장 차단 여부, 내장 GTEC 설정 제거(C5-Q7). 다음: C5e(실제 DB 08) 승인 대기 |
 | 사용자 | **C5c PASS (11/11 21:25)** [결과](../reviews/claude/2026-11-11_c5c_result.md) — PC-B `feature/collect-c5c` @ `6e744be` 로컬 commit(push 없음), 빌드 5종·서버 57/57·Desktop 176/176·실서버+C5c API 59/59, 실제 DB 무변경. Smart App Control 해제 후 재실행. 확인 요청 6건(§4). 다음: C5d 승인 대기 (GTEC COM3 연결 필요) |
