@@ -45,3 +45,16 @@
 - **복구 방법**: 체크리스트 5절을 따른다.
   - 백업 WAR 2곳: 위 백업 폴더, `tomcat\backup`
   - 06·08이 적용된 DB에서 구 WAR가 동작하는 것은 리허설로 확인했다.
+
+## 4. 11/15 Jenkins 배포 확인
+
+- 11/15 아침 8081이 꺼져 있었다. 11/14 22:20 이후 Tomcat 로그가 없다. 수동 기동 창이 닫힌 것으로 추정한다.
+- 빌드 #2(08:33): **FAIL**. Pipeline 시작 단계에서 `Tool type "jdk" does not have an install of "JDK21"` 오류가 났다.
+  - Tomcat·WAR·DB는 건드리지 않았다.
+  - 도구 화면에는 `JDK21 = C:\MyData\MyTool\jdk\jdk-21.0.1`이 보였다. 이 화면을 다시 저장하자 해소되었다. 저장 전에 왜 인식되지 않았는지는 미확인.
+- 빌드 #3(08:35): **SUCCESS**
+  - rev `4915759`(origin/main), `JU_TOMCAT_HOME` 인식, 서버 테스트 62/0 실패
+  - 이전 WAR 백업: `tomcat\backup\juprovider-20261115-083639.war`
+  - 배포 → 기동 → health `UP` (2회차 시도)
+- 홈페이지: `http://localhost:8081/juprovider/` 정상 로드 (제목 "ASDP | JuProvider", 로그인 버튼, 브라우저 콘솔 오류 0)
+- 이제 Tomcat은 Jenkins 서비스가 띄운 것이라, 사용자 창을 닫아도 중지되지 않는다.

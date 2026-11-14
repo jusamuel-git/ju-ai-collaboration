@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자 | **Jenkins 배포 정상화 (11/15 08:37)** — #3 SUCCESS(`4915759`, 테스트 62, health UP), 8081 홈페이지 로드 확인. #2는 JDK21 도구 미인식으로 실패 → 도구 설정 재저장 후 해소 [결과 4절](../reviews/claude/2026-11-14_c5c_deploy_result.md). 남은 일: Desktop Client 등록(승인 필요), 관리자 화면 확인 |
 | 사용자 | **Jenkins `JU_TOMCAT_HOME` 설정 완료 (11/15 08:30)** — 전역 속성에 `C:\MyData\MyTool\tomcat\apache-tomcat-10.1.52` 저장·재확인. 남은 일: Desktop Client 등록(C5d 전, 승인 필요), 관리자 화면 확인 |
 | 사용자 | **C5c 서버 배포 완료 (11/14 22:20)** [결과](../reviews/claude/2026-11-14_c5c_deploy_result.md) — main `fce5048`→`4915759` ff push, 8081 = c5d WAR(`EC80C07D…`), health UP·인증 401 경계·로그 오류 0·실DB 무변경. Jenkins 로그인 불가로 수동 배포(리허설 방식), 백업 `backup\c5c_deploy_20261114_220358`. **남은 일**: Jenkins `JU_TOMCAT_HOME` 설정(사용자 로그인 필요), Desktop Client 등록(C5d 전, 승인 필요), 관리자 화면 확인 |
 | 사용자 | **C5c 서버 배포 사전 검증 조건부 PASS (11/14 19:53)** [결과](../reviews/claude/2026-11-14_c5c_deploy_precheck.md) · [체크리스트](../reviews/claude/2026-11-14_c5c_deploy_checklist.md) — 후보 `feature/collect-c5d`@`4915759`(C5c+D3, main ff 가능), 실DB 06·08 확인(해시 C5e 직후와 같음), 빌드 5종·서버 62·Desktop 189·실서버 회귀 59/59, 별도 Tomcat 배포→복구 리허설 PASS. 실WAR·main·실DB 무변경. **선행 조치**: Jenkins `JU_TOMCAT_HOME` 없음(이대로면 빌드 실패), 실DB Client 0건(배포 후 등록 필요), **8081 11/12부터 중지**(C5e 창 종료 추정). 결정 대기: 배포 대상 c5d, Jenkins 설정, 8081 재기동 시점 |
