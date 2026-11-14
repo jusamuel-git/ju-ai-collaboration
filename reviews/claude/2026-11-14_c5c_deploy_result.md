@@ -36,9 +36,7 @@
 
 ## 3. 남은 일
 
-- **Jenkins**
-  - 사용자가 로그인한 뒤 `JU_TOMCAT_HOME`(`C:\MyData\MyTool\tomcat\apache-tomcat-10.1.52`)을 추가해야 한다.
-  - 그다음 빌드부터는 Jenkins로 배포할 수 있다 (같은 main `4915759`라 다시 빌드할 필요는 없음).
+- **Jenkins**: ~~`JU_TOMCAT_HOME` 미설정~~ → **11/15 08:30 설정 완료** (Jenkins 관리 > System > Global properties, 저장 후 다시 열어 값 확인). 다음 빌드부터 Jenkins 배포 가능. 같은 main `4915759`라 다시 빌드할 필요는 없음.
 - **Desktop Client 등록 (체크리스트 4절)**
   - 실제 DB에 Client가 0건이라, 지금은 Desktop sync가 401이다.
   - C5d 배포 전에 관리자 API로 등록·키 발급이 필요하다 (사용자 승인 필요).
