@@ -87,7 +87,7 @@
 | C5-A1 | C5c 확인 요청 6건 승인 (ChatGPT 검토 조건대로): Action 계약 v1 유지 + 선택 필드 추가 / 역할 없는 프로토콜은 연계 검사 안 함 / 변경 없는 `ptlVal`·같은 순번 `packetExpr`·`parseRule`은 형식 검사 생략 (그 외 필드는 매번 검사) / INIT_ROUTINE 참조 보호(삭제 409, RX_STREAM 변경 400) / C5c 서버는 08 적용 DB 필요 / regex 차이는 공통 벡터로 관리 | 11/11 |
 | C5-A2 | Desktop 수집 계획 우선순위 = **서버 → 내장(또는 지정) 설정 → 기본값**, 출처(`Sources`)·누락 경고 기록. 채널 매핑은 data-map 우선, 행이 없으면 `TAG_ID=CH<n>` 임시 호환 | 11/11 |
 | D1 | **C5e 실제 DB 적용**: 11/12 21:27 최종 승인, 06 함께 적용(Q1·G4). **11/12 21:30 06 → 08 실제 DB 적용 완료** (백업 `c5e_20261112_213009`, 사후 검증 PASS) [결과](../reviews/claude/2026-11-12_c5e_result.md) | 11/12 |
-| D2 | 배포 순서 = C5e(실제 DB 08) → C5c 서버 → C5d Desktop. 서버 배포·main 병합은 별도 승인 | 11/12 |
+| D2 | 배포 순서 = C5e(실제 DB 08) → C5c 서버 → C5d Desktop. 서버 배포·main 병합은 별도 승인. **11/14 C5c 서버 배포 완료**: main=`4915759`(c5d, D3 포함), 8081 수동 배포 [결과](../reviews/claude/2026-11-14_c5c_deploy_result.md) | 11/12 |
 | D3 | 응답 판정 regex는 Desktop(.NET)에서만 실행 → 서버 저장 검사에서 **Java 전용·의미가 다른 문법 거부** (공통 벡터 `rule_vectors.json`: 서버 허용 = .NET 해석 가능 보장) | 11/12 |
 | D4 | Desktop 내장 GTEC 설정은 **당분간 유지** (서버 값 없을 때만 쓰는 대체값). C5e 실DB 적용과 실장비 재확인 후 제거 여부 결정 (C5-Q7) | 11/12 |
 | D5 | 제품 `feature/collect-c5b`·`c5c`·`c5d` 원격 push 허용 (**main 제외**) | 11/12 |

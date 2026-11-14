@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자 | **C5c 서버 배포 완료 (11/14 22:20)** [결과](../reviews/claude/2026-11-14_c5c_deploy_result.md) — main `fce5048`→`4915759` ff push, 8081 = c5d WAR(`EC80C07D…`), health UP·인증 401 경계·로그 오류 0·실DB 무변경. Jenkins 로그인 불가로 수동 배포(리허설 방식), 백업 `backup\c5c_deploy_20261114_220358`. **남은 일**: Jenkins `JU_TOMCAT_HOME` 설정(사용자 로그인 필요), Desktop Client 등록(C5d 전, 승인 필요), 관리자 화면 확인 |
 | 사용자 | **C5c 서버 배포 사전 검증 조건부 PASS (11/14 19:53)** [결과](../reviews/claude/2026-11-14_c5c_deploy_precheck.md) · [체크리스트](../reviews/claude/2026-11-14_c5c_deploy_checklist.md) — 후보 `feature/collect-c5d`@`4915759`(C5c+D3, main ff 가능), 실DB 06·08 확인(해시 C5e 직후와 같음), 빌드 5종·서버 62·Desktop 189·실서버 회귀 59/59, 별도 Tomcat 배포→복구 리허설 PASS. 실WAR·main·실DB 무변경. **선행 조치**: Jenkins `JU_TOMCAT_HOME` 없음(이대로면 빌드 실패), 실DB Client 0건(배포 후 등록 필요), **8081 11/12부터 중지**(C5e 창 종료 추정). 결정 대기: 배포 대상 c5d, Jenkins 설정, 8081 재기동 시점 |
 | 사용자 | **C5e 실제 DB 06→08 적용 완료 (11/12 21:30)** [결과](../reviews/claude/2026-11-12_c5e_result.md) — 사전 점검 6/6·백업·복원 확인·적용(65/145 ms)·사후 V-1~V-4 PASS, 실DB = 백업+06+08 기준과 동일. Tomcat(10/25 WAR 그대로) 기동, health·화면·장치 sync 정상, W-2 로그인 실패 400은 구버전 배포본 동작(DB 무관). 보고: 배포본이 sync/devices를 Client Key 없이 허용. **다음 승인 대기: C5c 서버 배포(D2)·main 병합** |
 | 사용자 | **C5e 준비 PASS (11/12 21:10)** [결과](../reviews/claude/2026-11-12_c5e_prep_result.md) · [계획](../reviews/claude/2026-11-12_c5e_plan.md) — D1~D5 decisions 기록, regex 보완 `4915759`(서버 62·Desktop 189), collect-c5b/c5c/c5d **origin push**(main 그대로), 실DB 사전 점검 PASS·백업/복원/down 리허설 PASS, 실DB 무변경. **결정 대기: C5e 실행 승인, 06 함께 적용(Q1), 적용 시각(Q2)** |
