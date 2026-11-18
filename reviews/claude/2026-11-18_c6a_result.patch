@@ -1,0 +1,1386 @@
+diff --git a/desktop/juprovider.terminal/Program.cs b/desktop/juprovider.terminal/Program.cs
+index 016cd46..0511fe7 100644
+--- a/desktop/juprovider.terminal/Program.cs
++++ b/desktop/juprovider.terminal/Program.cs
+@@ -1,4 +1,4 @@
+-using juprovider.terminal;
++﻿using juprovider.terminal;
+ using JuProvider.Lib.Ipc.Messages;
+ using JuProvider.Lib.Ipc.Pipe;
+ using System.Diagnostics;
+@@ -12,6 +12,7 @@ internal static class Program
+ {
+     private static readonly DeviceRuntimeManager _deviceRuntimeManager = new();
+     private static IpcPipeServer? _ipcServer;
++    private static TerminalMessageRouter? _router;
+ 
+     [STAThread]
+     static void Main()
+@@ -55,8 +56,14 @@ internal static class Program
+                 );
+             };
+ 
++        _router =
++            new TerminalMessageRouter(
++                _deviceRuntimeManager,
++                SendToClientAsync
++            );
++
+         _ipcServer.MessageReceived +=
+-            OnMessageReceivedAsync;
++            _router.HandleAsync;
+ 
+         _ipcServer.Start();
+ 
+@@ -67,249 +74,22 @@ internal static class Program
+         Debug.WriteLine(
+             "[IPC] Waiting for Client..."
+         );
+-
+-        _deviceRuntimeManager.DataReceived += OnDeviceDataReceived;
+-    }
+-
+-    private static void OnDeviceDataReceived(
+-        string devCd,
+-        string data
+-    )
+-    {
+-        _ = SendDeviceDataAsync(
+-            devCd,
+-            data
+-        );
+-    }
+-
+-    private static async Task SendDeviceDataAsync(
+-        string devCd,
+-        string data
+-    )
+-    {
+-        if (_ipcServer == null ||
+-            !_ipcServer.IsConnected)
+-        {
+-            return;
+-        }
+-
+-        try
+-        {
+-            DeviceDataMessage payload =
+-                new()
+-                {
+-                    DevCd = devCd,
+-                    ReceiveDt = DateTime.Now,
+-                    Data = data
+-                };
+-
+-            IpcMessage message =
+-                IpcMessage.Create(
+-                    IpcMessageTypes.DataReceived,
+-                    payload
+-                );
+-
+-            await _ipcServer.SendAsync(
+-                message
+-            );
+-
+-            Debug.WriteLine(
+-                $"[DATA SEND] {devCd} / {data}"
+-            );
+-        }
+-        catch (Exception ex)
+-        {
+-            Debug.WriteLine(
+-                $"[DATA SEND ERROR] {devCd} / {ex.Message}"
+-            );
+-        }
+-    }
+-
+-    private static async Task OnMessageReceivedAsync(
+-        IpcMessage message
+-    )
+-    {
+-        Debug.WriteLine(
+-            $"[IPC RECEIVE] {message.MessageType}"
+-        );
+-
+-        switch (message.MessageType)
+-        {
+-            case IpcMessageTypes.DeviceSync:
+-                await HandleDeviceSyncAsync(message);
+-                break;
+-
+-            case IpcMessageTypes.DeviceConnect:
+-                await HandleDeviceConnectAsync(message);
+-                break;
+-
+-            case IpcMessageTypes.DeviceDisconnect:
+-                await HandleDeviceDisconnectAsync(message);
+-                break;
+-        }
+     }
+ 
+-    private static Task HandleDeviceSyncAsync(
++    /// <summary>Client 가 연결되어 있을 때만 보낸다 (기존 동작과 같음). 메시지 처리는 TerminalMessageRouter (C6a)</summary>
++    private static Task SendToClientAsync(
+         IpcMessage message
+     )
+-    {
+-        DeviceSyncMessage? payload =
+-            message.GetPayload<DeviceSyncMessage>();
+-
+-        if (payload == null)
+-        {
+-            return Task.CompletedTask;
+-        }
+-
+-        _deviceRuntimeManager.SyncDevices(
+-            payload.Devices
+-        );
+-
+-        Debug.WriteLine(
+-            $"[DEVICE SYNC] Count = {payload.Devices.Count}"
+-        );
+-
+-        foreach (var device in payload.Devices)
+-        {
+-            Debug.WriteLine(
+-                $"[DEVICE] {device.DevCd} / " +
+-                $"{device.DevNm} / " +
+-                $"{device.DevType} / " +
+-                $"{device.DevComm}"
+-            );
+-        }
+-
+-        return Task.CompletedTask;
+-    }
+-
+-    private static async Task HandleDeviceConnectAsync(
+-        IpcMessage message
+-    )
+-    {
+-        DeviceConnectMessage? payload =
+-            message.GetPayload<DeviceConnectMessage>();
+-
+-        if (payload == null ||
+-            string.IsNullOrWhiteSpace(payload.DevCd))
+-        {
+-            return;
+-        }
+-
+-        string devCd =
+-            payload.DevCd.Trim().ToUpperInvariant();
+-
+-        try
+-        {
+-            await SendDeviceStatusAsync(
+-                devCd,
+-                DeviceRuntimeStatus.Connecting
+-            );
+-
+-            bool connected =
+-                await _deviceRuntimeManager.ConnectAsync(
+-                    devCd
+-                );
+-
+-            await SendDeviceStatusAsync(
+-                devCd,
+-                connected
+-                    ? DeviceRuntimeStatus.Connected
+-                    : DeviceRuntimeStatus.Error
+-            );
+-        }
+-        catch (Exception ex)
+-        {
+-            Debug.WriteLine(
+-                $"[DEVICE CONNECT ERROR] {devCd} / {ex.Message}"
+-            );
+-
+-            await SendDeviceStatusAsync(
+-                devCd,
+-                DeviceRuntimeStatus.Error,
+-                ex.Message
+-            );
+-        }
+-    }
+-
+-    private static async Task HandleDeviceDisconnectAsync(
+-        IpcMessage message
+-    )
+-    {
+-        DeviceDisconnectMessage? payload =
+-            message.GetPayload<DeviceDisconnectMessage>();
+-
+-        if (payload == null ||
+-            string.IsNullOrWhiteSpace(payload.DevCd))
+-        {
+-            return;
+-        }
+-
+-        string devCd =
+-            payload.DevCd.Trim().ToUpperInvariant();
+-
+-        try
+-        {
+-            await SendDeviceStatusAsync(
+-                devCd,
+-                DeviceRuntimeStatus.Disconnecting
+-            );
+-
+-            await _deviceRuntimeManager.DisconnectAsync(
+-                devCd
+-            );
+-
+-            await SendDeviceStatusAsync(
+-                devCd,
+-                DeviceRuntimeStatus.Disconnected
+-            );
+-        }
+-        catch (Exception ex)
+-        {
+-            Debug.WriteLine(
+-                $"[DEVICE DISCONNECT ERROR] {devCd} / {ex.Message}"
+-            );
+-
+-            await SendDeviceStatusAsync(
+-                devCd,
+-                DeviceRuntimeStatus.Error,
+-                ex.Message
+-            );
+-        }
+-    }
+-
+-    private static async Task SendDeviceStatusAsync(
+-        string devCd,
+-        string status,
+-        string? statusMessage = null
+-    )
+     {
+         if (_ipcServer == null ||
+             !_ipcServer.IsConnected)
+         {
+-            return;
++            return Task.CompletedTask;
+         }
+ 
+-        DeviceStatusMessage payload =
+-            new()
+-            {
+-                DevCd = devCd,
+-                Status = status,
+-                Message = statusMessage
+-            };
+-
+-        IpcMessage message =
+-            IpcMessage.Create(
+-                IpcMessageTypes.DeviceStatus,
+-                payload
+-            );
+-
+-        await _ipcServer.SendAsync(
++        return _ipcServer.SendAsync(
+             message
+         );
+-
+-        Debug.WriteLine(
+-            $"[DEVICE STATUS] {devCd} / {status}"
+-        );
+     }
+ 
+     private static void OnApplicationExit(
+diff --git a/desktop/juprovider.terminal/Runtime/CollectionIpcMapper.cs b/desktop/juprovider.terminal/Runtime/CollectionIpcMapper.cs
+new file mode 100644
+index 0000000..abb5f1e
+--- /dev/null
++++ b/desktop/juprovider.terminal/Runtime/CollectionIpcMapper.cs
+@@ -0,0 +1,61 @@
++using JuProvider.Lib.Ipc.Messages;
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Runtime;
++using JuProvider.Lib.Protocol.Sync;
++
++namespace JuProvider.Terminal.Runtime;
++
++/// <summary>C6a: 수집 엔진 결과 → IPC 메시지 (lib.ipc 는 lib.protocol 을 참조하지 않으므로 Terminal 에서 변환)</summary>
++public static class CollectionIpcMapper
++{
++    public static DataValueItem ToItem(LogicalValue v) => new()
++    {
++        ChannelKey = v.Channel.ChannelKey,
++        SampleIndex = v.SampleIndex,
++        DataKey = v.Data?.Key,
++        DatGrCd = v.Data?.DatGrCd,
++        DatCd = v.Data?.DatCd,
++        DatIdx = v.Data?.DatIdx,
++        Value = v.Value,
++        Text = v.Text,
++        Unit = v.Unit,
++        Quality = v.Quality.ToString(),
++        ReceivedAt = v.ReceivedAt
++    };
++
++    public static DeviceRuntimeStateMessage State(
++        string devCd,
++        string evt,
++        CollectionRuntime? runtime,
++        DevicePlanSyncMessage? input,
++        CollectionPlan? plan,
++        string? connectionSource,
++        bool includeWarnings,
++        string? message = null)
++    {
++        plan ??= runtime?.Plan;
++        DeviceRuntimeStateMessage m = new()
++        {
++            DevCd = devCd,
++            Event = evt,
++            Session = runtime?.State.ToString(),
++            Link = runtime?.LastLink?.ToString(),
++            Measuring = runtime?.Measuring ?? false,
++            PtlGrpCd = plan?.PtlGrpCd ?? input?.PtlGrpCd,
++            PlanSource = input?.Source,
++            PlanRevision = input?.Revision,
++            ConnectionSource = connectionSource,
++            InitOk = runtime?.LastInit?.AllOk,
++            Message = message
++        };
++        if (runtime?.LastInit is { } init)
++            m.InitSteps = init.Steps.Select(s => $"{s.Key}:{s.Value.Status}").ToList();
++        if (plan is not null)
++        {
++            m.TotalItems = plan.Sources.Count;
++            m.ServerItems = plan.Sources.Count(s => s.Value == PlanSource.Server);
++            if (includeWarnings) m.Warnings = plan.Warnings.ToList();
++        }
++        return m;
++    }
++}
+diff --git a/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs b/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs
+index 302af83..3928c35 100644
+--- a/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs
++++ b/desktop/juprovider.terminal/Runtime/DeviceRuntimeManager.cs
+@@ -2,6 +2,11 @@
+ using System.Diagnostics;
+ 
+ using JuProvider.Lib.Device.Models;
++using JuProvider.Lib.Ipc.Messages;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Runtime;
++using JuProvider.Lib.Protocol.Sync;
++using JuProvider.Lib.Protocol.Transport;
+ 
+ namespace JuProvider.Terminal.Runtime;
+ 
+@@ -12,6 +17,25 @@ public sealed class DeviceRuntimeManager
+ 
+     public event Action<string, string>? DataReceived;
+ 
++    /// <summary>C6a: 수집 계획으로 연결한 장치의 논리 Data 값</summary>
++    public event Action<DataValuesMessage>? ValuesReceived;
++
++    /// <summary>C6a: 수집 런타임 상태 (계획 적용·세션·연결·초기화 루틴·오류)</summary>
++    public event Action<DeviceRuntimeStateMessage>? RuntimeStateChanged;
++
++    /// <summary>재연결 간격 (null 이면 LinkSupervisor 기본). 테스트에서 줄인다</summary>
++    public ReconnectPolicy? ReconnectPolicy { get; set; }
++
++    // C6a: 장치별 수집 계획 입력(Client 가 서버에서 받은 원문)과 실행 중인 수집 엔진
++    private readonly ConcurrentDictionary<string, DevicePlanSyncMessage>
++        _plans = new(StringComparer.OrdinalIgnoreCase);
++
++    private readonly ConcurrentDictionary<string, CollectionRuntime>
++        _collections = new(StringComparer.OrdinalIgnoreCase);
++
++    private readonly ConcurrentDictionary<string, string>
++        _connectionSources = new(StringComparer.OrdinalIgnoreCase);
++
+     private readonly ConcurrentDictionary<string, VirtualDeviceRuntime>
+         _virtualDevices = new(StringComparer.OrdinalIgnoreCase);
+ 
+@@ -98,6 +122,9 @@ public sealed class DeviceRuntimeManager
+                     out _
+                 );
+ 
++                _plans.TryRemove(devCd, out _);
++                _ = StopCollectionAsync(devCd);
++
+                 Debug.WriteLine(
+                     $"[RUNTIME] Removed: {devCd}"
+                 );
+@@ -162,9 +189,17 @@ public sealed class DeviceRuntimeManager
+         }
+ 
+         /*
+-         * 현재 단계에서는 Virtual Device만 구현.
+-         * Serial/Network는 이후 같은 위치에 추가한다.
++         * C6a: 수집 계획(DEVICE_PLAN_SYNC)을 받은 장치는 수집 엔진(CollectionRuntime)으로 연결한다.
++         * 계획이 없는 가상 장치는 기존 VirtualDeviceRuntime 그대로 (회귀 방지).
+          */
++        if (_plans.ContainsKey(deviceCode))
++        {
++            return await ConnectCollectionAsync(
++                device,
++                cancellationToken
++            );
++        }
++
+         if (device.DevType == DeviceTypeVirtual)
+         {
+             if (!_virtualDevices.TryGetValue(
+@@ -183,7 +218,7 @@ public sealed class DeviceRuntimeManager
+         }
+ 
+         throw new NotSupportedException(
+-            $"Device type is not implemented: {device.DevType}"
++            $"Device type is not implemented: {device.DevType} (수집 계획 없음: DEVICE_PLAN_SYNC 먼저)"
+         );
+     }
+ 
+@@ -195,6 +230,8 @@ public sealed class DeviceRuntimeManager
+         string deviceCode =
+             devCd.Trim().ToUpperInvariant();
+ 
++        await StopCollectionAsync(deviceCode);
++
+         if (_virtualDevices.TryGetValue(
+             deviceCode,
+             out VirtualDeviceRuntime? runtime
+@@ -205,4 +242,133 @@ public sealed class DeviceRuntimeManager
+             );
+         }
+     }
++
++    // ------------------------------------------------------------------ C6a 수집 엔진
++
++    /// <summary>
++    /// 수집 계획 입력 저장. 계획을 한 번 만들어 형식·경고를 확인하고 RUNTIME_STATE(PLAN 또는 ERROR)로 알린다.
++    /// 이미 연결 중이면 다음 연결 때 적용된다.
++    /// </summary>
++    public bool ApplyPlan(DevicePlanSyncMessage input)
++    {
++        string devCd = input.DevCd.Trim().ToUpperInvariant();
++        input.DevCd = devCd;
++        try
++        {
++            CollectionPlan plan = CollectionPlanReader.Build(devCd, input.GroupJson, input.DataTagsJson, input.DataMapJson);
++            _plans[devCd] = input;
++            bool connected = _collections.ContainsKey(devCd);
++            RaiseState(CollectionIpcMapper.State(devCd, "PLAN", _collections.GetValueOrDefault(devCd), input, plan,
++                _connectionSources.GetValueOrDefault(devCd), includeWarnings: true,
++                connected ? "연결 중: 다음 연결 때 적용" : null));
++            Debug.WriteLine($"[PLAN] {devCd} {plan.PtlGrpCd} 프로토콜 {plan.Protocols.Count}, 경고 {plan.Warnings.Count}");
++            return true;
++        }
++        catch (Exception ex) when (ex is FormatException or ArgumentException)
++        {
++            RaiseState(new DeviceRuntimeStateMessage { DevCd = devCd, Event = "ERROR", PtlGrpCd = input.PtlGrpCd, Message = "수집 계획 오류: " + ex.Message });
++            return false;
++        }
++    }
++
++    public bool HasPlan(string devCd) => _plans.ContainsKey(devCd.Trim().ToUpperInvariant());
++
++    public CollectionRuntime? GetCollection(string devCd) =>
++        _collections.GetValueOrDefault(devCd.Trim().ToUpperInvariant());
++
++    private async Task<bool> ConnectCollectionAsync(DeviceSyncModel device, CancellationToken cancellationToken)
++    {
++        string devCd = device.DevCd;
++        if (_collections.ContainsKey(devCd)) return true;
++
++        DevicePlanSyncMessage input = _plans[devCd];
++        CollectionPlan plan = CollectionPlanReader.Build(devCd, input.GroupJson, input.DataTagsJson, input.DataMapJson);
++        (string json, string source) = ConnectionResolver.Resolve(device.DevType, input.ConnectionJson, device.DevConfig);
++        ITransport transport = TransportFactory.FromLocalConfig(json);
++
++        CollectionRuntime runtime = new(plan, transport, ReconnectPolicy);
++        if (!_collections.TryAdd(devCd, runtime))
++        {
++            await runtime.DisposeAsync();
++            return true;
++        }
++        _connectionSources[devCd] = source;
++
++        runtime.Values += (_, e) => ValuesReceived?.Invoke(new DataValuesMessage
++        {
++            DevCd = devCd,
++            PtlCd = e.PtlCd,
++            Values = e.Values.Select(CollectionIpcMapper.ToItem).ToList()
++        });
++        runtime.StateChanged += (_, _) => RaiseRuntime(devCd, "SESSION");
++        runtime.LinkChanged += (_, e) => { if (e.Kind != LinkEventKind.Reconnecting) RaiseRuntime(devCd, "LINK", e.Error?.Message); };
++        runtime.InitCompleted += (_, _) => RaiseRuntime(devCd, "INIT");
++        runtime.Warning += (_, w) => Debug.WriteLine($"[COLLECT WARN] {w}");
++
++        Debug.WriteLine($"[COLLECT] {devCd} 연결 시작 ({transport.Name}, 설정 출처 {source})");
++        await runtime.StartAsync(cancellationToken);
++        return true;
++    }
++
++    /// <summary>실험 동작 (START·STOP·PAUSE). 수집 엔진으로 연결된 장치만</summary>
++    public async Task<DeviceActionResultMessage> ExecuteActionAsync(DeviceActionMessage request, CancellationToken cancellationToken = default)
++    {
++        string devCd = request.DevCd.Trim().ToUpperInvariant();
++        DeviceActionResultMessage result = new() { DevCd = devCd, Action = request.Action, PtlCd = request.PtlCd };
++
++        if (!_collections.TryGetValue(devCd, out CollectionRuntime? runtime))
++        {
++            result.Status = "Rejected";
++            result.Message = "수집 엔진으로 연결되지 않은 장치입니다.";
++            return result;
++        }
++        if (!Enum.TryParse(request.Action?.Trim(), ignoreCase: true, out CommandAction action) || action == CommandAction.None)
++        {
++            result.Status = "Rejected";
++            result.Message = $"알 수 없는 동작: {request.Action}";
++            return result;
++        }
++
++        var (ptlCd, r) = await runtime.ExecuteActionAsync(action, request.PtlCd, cancellationToken);
++        result.PtlCd = ptlCd;
++        result.Ok = r.Ok;
++        result.Status = r.Status.ToString();
++        result.Message = r.Reason;
++        RaiseRuntime(devCd, "SESSION");
++        return result;
++    }
++
++    private async Task StopCollectionAsync(string devCd)
++    {
++        if (!_collections.TryRemove(devCd, out CollectionRuntime? runtime)) return;
++        try
++        {
++            await runtime.StopAsync();
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"[COLLECT STOP ERROR] {devCd} / {ex.Message}");
++        }
++        RaiseState(CollectionIpcMapper.State(devCd, "STOPPED", runtime, _plans.GetValueOrDefault(devCd), null,
++            _connectionSources.GetValueOrDefault(devCd), includeWarnings: false));
++    }
++
++    private void RaiseRuntime(string devCd, string evt, string? message = null)
++    {
++        if (!_collections.TryGetValue(devCd, out CollectionRuntime? runtime)) return;
++        RaiseState(CollectionIpcMapper.State(devCd, evt, runtime, _plans.GetValueOrDefault(devCd), null,
++            _connectionSources.GetValueOrDefault(devCd), includeWarnings: false, message));
++    }
++
++    private void RaiseState(DeviceRuntimeStateMessage state)
++    {
++        try
++        {
++            RuntimeStateChanged?.Invoke(state);
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"[RUNTIME STATE ERROR] {ex.Message}");
++        }
++    }
+ }
+\ No newline at end of file
+diff --git a/desktop/juprovider.terminal/Runtime/TerminalMessageRouter.cs b/desktop/juprovider.terminal/Runtime/TerminalMessageRouter.cs
+new file mode 100644
+index 0000000..782bb36
+--- /dev/null
++++ b/desktop/juprovider.terminal/Runtime/TerminalMessageRouter.cs
+@@ -0,0 +1,127 @@
++using System.Diagnostics;
++using JuProvider.Lib.Ipc.Messages;
++
++namespace JuProvider.Terminal.Runtime;
++
++/// <summary>
++/// Client ↔ Terminal IPC 처리 (Program 에서 분리, C6a).
++/// 수신 메시지는 받은 순서대로 처리하고, 송신은 한 번에 하나씩 보낸다 (파이프 동시 쓰기 방지).
++/// </summary>
++public sealed class TerminalMessageRouter
++{
++    private readonly DeviceRuntimeManager _manager;
++    private readonly Func<IpcMessage, Task> _send;
++    private readonly SemaphoreSlim _sendLock = new(1, 1);
++
++    public TerminalMessageRouter(DeviceRuntimeManager manager, Func<IpcMessage, Task> send)
++    {
++        _manager = manager;
++        _send = send;
++        _manager.DataReceived += (devCd, data) => _ = SendAsync(IpcMessageTypes.DataReceived,
++            new DeviceDataMessage { DevCd = devCd, ReceiveDt = DateTime.Now, Data = data });
++        _manager.ValuesReceived += m => _ = SendAsync(IpcMessageTypes.DataValues, m);
++        _manager.RuntimeStateChanged += m => _ = SendAsync(IpcMessageTypes.DeviceRuntimeState, m);
++    }
++
++    public async Task HandleAsync(IpcMessage message)
++    {
++        Debug.WriteLine($"[IPC RECEIVE] {message.MessageType}");
++        switch (message.MessageType)
++        {
++            case IpcMessageTypes.DeviceSync:
++                HandleDeviceSync(message);
++                break;
++            case IpcMessageTypes.DevicePlanSync:
++                HandlePlanSync(message);
++                break;
++            case IpcMessageTypes.DeviceConnect:
++                await HandleDeviceConnectAsync(message);
++                break;
++            case IpcMessageTypes.DeviceDisconnect:
++                await HandleDeviceDisconnectAsync(message);
++                break;
++            case IpcMessageTypes.DeviceAction:
++                await HandleDeviceActionAsync(message);
++                break;
++        }
++    }
++
++    private void HandleDeviceSync(IpcMessage message)
++    {
++        DeviceSyncMessage? payload = message.GetPayload<DeviceSyncMessage>();
++        if (payload == null) return;
++        _manager.SyncDevices(payload.Devices);
++        Debug.WriteLine($"[DEVICE SYNC] Count = {payload.Devices.Count}");
++    }
++
++    private void HandlePlanSync(IpcMessage message)
++    {
++        DevicePlanSyncMessage? payload = message.GetPayload<DevicePlanSyncMessage>();
++        if (payload == null || string.IsNullOrWhiteSpace(payload.DevCd)) return;
++        _manager.ApplyPlan(payload); // 결과는 DEVICE_RUNTIME_STATE(PLAN/ERROR)로 알린다
++    }
++
++    private async Task HandleDeviceConnectAsync(IpcMessage message)
++    {
++        DeviceConnectMessage? payload = message.GetPayload<DeviceConnectMessage>();
++        if (payload == null || string.IsNullOrWhiteSpace(payload.DevCd)) return;
++        string devCd = payload.DevCd.Trim().ToUpperInvariant();
++        try
++        {
++            await SendStatusAsync(devCd, DeviceRuntimeStatus.Connecting);
++            bool connected = await _manager.ConnectAsync(devCd);
++            await SendStatusAsync(devCd, connected ? DeviceRuntimeStatus.Connected : DeviceRuntimeStatus.Error);
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"[DEVICE CONNECT ERROR] {devCd} / {ex.Message}");
++            await SendStatusAsync(devCd, DeviceRuntimeStatus.Error, ex.Message);
++        }
++    }
++
++    private async Task HandleDeviceDisconnectAsync(IpcMessage message)
++    {
++        DeviceDisconnectMessage? payload = message.GetPayload<DeviceDisconnectMessage>();
++        if (payload == null || string.IsNullOrWhiteSpace(payload.DevCd)) return;
++        string devCd = payload.DevCd.Trim().ToUpperInvariant();
++        try
++        {
++            await SendStatusAsync(devCd, DeviceRuntimeStatus.Disconnecting);
++            await _manager.DisconnectAsync(devCd);
++            await SendStatusAsync(devCd, DeviceRuntimeStatus.Disconnected);
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"[DEVICE DISCONNECT ERROR] {devCd} / {ex.Message}");
++            await SendStatusAsync(devCd, DeviceRuntimeStatus.Error, ex.Message);
++        }
++    }
++
++    private async Task HandleDeviceActionAsync(IpcMessage message)
++    {
++        DeviceActionMessage? payload = message.GetPayload<DeviceActionMessage>();
++        if (payload == null || string.IsNullOrWhiteSpace(payload.DevCd)) return;
++        DeviceActionResultMessage result = await _manager.ExecuteActionAsync(payload);
++        await SendAsync(IpcMessageTypes.DeviceActionResult, result);
++    }
++
++    private Task SendStatusAsync(string devCd, string status, string? statusMessage = null) =>
++        SendAsync(IpcMessageTypes.DeviceStatus, new DeviceStatusMessage { DevCd = devCd, Status = status, Message = statusMessage });
++
++    private async Task SendAsync<T>(string type, T payload)
++    {
++        await _sendLock.WaitAsync();
++        try
++        {
++            await _send(IpcMessage.Create(type, payload));
++        }
++        catch (Exception ex)
++        {
++            Debug.WriteLine($"[IPC SEND ERROR] {type} / {ex.Message}");
++        }
++        finally
++        {
++            _sendLock.Release();
++        }
++    }
++}
+diff --git a/desktop/lib/juprovider.lib.ipc/Messages/CollectionIpcMessages.cs b/desktop/lib/juprovider.lib.ipc/Messages/CollectionIpcMessages.cs
+new file mode 100644
+index 0000000..23d2a34
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.ipc/Messages/CollectionIpcMessages.cs
+@@ -0,0 +1,139 @@
++namespace JuProvider.Lib.Ipc.Messages;
++
++/*
++ * C6a 수집 IPC. 원칙: 인증·서버 통신은 Client, 수집은 Terminal.
++ * Terminal 은 Client Key 를 받지 않는다. Client 가 서버에서 받은 응답 원문(JSON)만 넘긴다.
++ * 측정값 서버 업로드는 C7 (여기서는 Client 로 보내기까지).
++ */
++
++/// <summary>
++/// Client -> Terminal: 장치 1개 수집 계획 입력.
++/// 다음 DEVICE_CONNECT 때 적용된다 (이미 연결 중이면 연결을 다시 맺을 때 적용).
++/// </summary>
++public sealed class DevicePlanSyncMessage
++{
++    public string DevCd { get; set; } = string.Empty;
++
++    public string PtlGrpCd { get; set; } = string.Empty;
++
++    /// <summary>"server"(방금 받음) 또는 "cache"(오프라인, 마지막으로 받은 값)</summary>
++    public string Source { get; set; } = "server";
++
++    public string? Revision { get; set; }
++
++    /// <summary>GET /api/core/sync/protocols/{ptlGrpCd} 응답 원문</summary>
++    public string GroupJson { get; set; } = string.Empty;
++
++    /// <summary>GET /api/core/sync/data-tags?devCd= 응답 원문</summary>
++    public string? DataTagsJson { get; set; }
++
++    /// <summary>GET /api/core/sync/data-map?devCd= 응답 원문</summary>
++    public string? DataMapJson { get; set; }
++
++    /// <summary>PC별 연결 설정 (로컬 덮어쓰기, 예: COM 번호). 없으면 장치 DEV_CONFIG</summary>
++    public string? ConnectionJson { get; set; }
++}
++
++/// <summary>Client -> Terminal: 실험 동작 (START·STOP·PAUSE). PtlCd 를 주면 그 프로토콜을 실행</summary>
++public sealed class DeviceActionMessage
++{
++    public string DevCd { get; set; } = string.Empty;
++
++    public string Action { get; set; } = string.Empty;
++
++    public string? PtlCd { get; set; }
++}
++
++/// <summary>Terminal -> Client: 동작 결과</summary>
++public sealed class DeviceActionResultMessage
++{
++    public string DevCd { get; set; } = string.Empty;
++
++    public string Action { get; set; } = string.Empty;
++
++    public string? PtlCd { get; set; }
++
++    public bool Ok { get; set; }
++
++    /// <summary>Completed · Timeout · Cancelled · LinkDown · Rejected …</summary>
++    public string Status { get; set; } = string.Empty;
++
++    public string? Message { get; set; }
++}
++
++/// <summary>Terminal -> Client: 수신 값 (data-map 기준 논리 Data)</summary>
++public sealed class DataValuesMessage
++{
++    public string DevCd { get; set; } = string.Empty;
++
++    public string PtlCd { get; set; } = string.Empty;
++
++    public List<DataValueItem> Values { get; set; } = [];
++}
++
++public sealed class DataValueItem
++{
++    public string ChannelKey { get; set; } = string.Empty;
++
++    public int SampleIndex { get; set; }
++
++    /// <summary>DAT_GR_CD/DAT_CD/DAT_IDX. 매핑 없는 채널이면 null</summary>
++    public string? DataKey { get; set; }
++
++    public string? DatGrCd { get; set; }
++
++    public string? DatCd { get; set; }
++
++    public int? DatIdx { get; set; }
++
++    public double? Value { get; set; }
++
++    public string? Text { get; set; }
++
++    public string? Unit { get; set; }
++
++    /// <summary>Good · Range · ParseErr · Stale · Unmapped</summary>
++    public string Quality { get; set; } = string.Empty;
++
++    public DateTimeOffset ReceivedAt { get; set; }
++}
++
++/// <summary>Terminal -> Client: 수집 런타임 상태 (세션·연결·초기화 루틴·계획 출처/경고)</summary>
++public sealed class DeviceRuntimeStateMessage
++{
++    public string DevCd { get; set; } = string.Empty;
++
++    /// <summary>PLAN · SESSION · LINK · INIT · STOPPED · ERROR (무엇 때문에 보냈는지)</summary>
++    public string Event { get; set; } = string.Empty;
++
++    /// <summary>Created · Initializing · Ready · Degraded · Suspended · Stopped</summary>
++    public string? Session { get; set; }
++
++    /// <summary>마지막 연결 이벤트: Connected · Faulted · Reconnecting · Recovered · Stopped</summary>
++    public string? Link { get; set; }
++
++    public bool Measuring { get; set; }
++
++    public string? PtlGrpCd { get; set; }
++
++    public string? PlanSource { get; set; }
++
++    public string? PlanRevision { get; set; }
++
++    /// <summary>연결 설정 출처: local · server</summary>
++    public string? ConnectionSource { get; set; }
++
++    public bool? InitOk { get; set; }
++
++    /// <summary>"GTEC0301:Completed" 형식</summary>
++    public List<string> InitSteps { get; set; } = [];
++
++    /// <summary>계획 항목 중 서버 값 개수 / 전체 (CollectionPlan.Sources)</summary>
++    public int ServerItems { get; set; }
++
++    public int TotalItems { get; set; }
++
++    public List<string> Warnings { get; set; } = [];
++
++    public string? Message { get; set; }
++}
+diff --git a/desktop/lib/juprovider.lib.ipc/Messages/IpcMessageTypes.cs b/desktop/lib/juprovider.lib.ipc/Messages/IpcMessageTypes.cs
+index 35e6c1e..5fa5a0f 100644
+--- a/desktop/lib/juprovider.lib.ipc/Messages/IpcMessageTypes.cs
++++ b/desktop/lib/juprovider.lib.ipc/Messages/IpcMessageTypes.cs
+@@ -17,6 +17,14 @@ public static class IpcMessageTypes
+     public const string DeviceStatusRequest =
+         "DEVICE_STATUS_REQUEST";
+ 
++    /// <summary>C6a: 수집 계획 입력 (DevicePlanSyncMessage)</summary>
++    public const string DevicePlanSync =
++        "DEVICE_PLAN_SYNC";
++
++    /// <summary>C6a: 실험 동작 (DeviceActionMessage)</summary>
++    public const string DeviceAction =
++        "DEVICE_ACTION";
++
+     /*
+      * Terminal -> Client
+      */
+@@ -26,6 +34,18 @@ public static class IpcMessageTypes
+     public const string DataReceived =
+         "DATA_RECEIVED";
+ 
++    /// <summary>C6a: 동작 결과 (DeviceActionResultMessage)</summary>
++    public const string DeviceActionResult =
++        "DEVICE_ACTION_RESULT";
++
++    /// <summary>C6a: 논리 Data 값 (DataValuesMessage)</summary>
++    public const string DataValues =
++        "DATA_VALUES";
++
++    /// <summary>C6a: 수집 런타임 상태 (DeviceRuntimeStateMessage)</summary>
++    public const string DeviceRuntimeState =
++        "DEVICE_RUNTIME_STATE";
++
+     public const string Error =
+         "ERROR";
+ }
+\ No newline at end of file
+diff --git a/desktop/lib/juprovider.lib.protocol/Runtime/CollectionRuntime.cs b/desktop/lib/juprovider.lib.protocol/Runtime/CollectionRuntime.cs
+new file mode 100644
+index 0000000..a5db139
+--- /dev/null
++++ b/desktop/lib/juprovider.lib.protocol/Runtime/CollectionRuntime.cs
+@@ -0,0 +1,188 @@
++using System.Text.Json;
++using System.Text.Json.Nodes;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Scheduling;
++using JuProvider.Lib.Protocol.Session;
++using JuProvider.Lib.Protocol.Sync;
++using JuProvider.Lib.Protocol.Transport;
++
++namespace JuProvider.Lib.Protocol.Runtime;
++
++/// <summary>
++/// C6a: 서버 내려받기 응답 원문(JSON) → CollectionPlan.
++/// Client 가 받은 응답을 그대로 Terminal 로 넘기므로 Terminal 은 서버·Client Key 를 모른다.
++/// 우선순위는 C5d 그대로 (서버 → 내장 → 기본, <see cref="CollectionPlanBuilder"/>).
++/// </summary>
++public static class CollectionPlanReader
++{
++    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
++
++    /// <param name="groupJson">GET /api/core/sync/protocols/{grp} 응답</param>
++    /// <param name="dataTagsJson">GET /api/core/sync/data-tags?devCd= 응답 (없으면 태그 없음)</param>
++    /// <param name="dataMapJson">GET /api/core/sync/data-map?devCd= 응답 (없으면 TAG_ID=CH&lt;n&gt; 임시 변환)</param>
++    /// <param name="profile">null 이면 내장 수집 설정을 대체값으로 쓴다</param>
++    public static CollectionPlan Build(string devCd, string groupJson, string? dataTagsJson, string? dataMapJson, CollectionProfile? profile = null)
++    {
++        ArgumentException.ThrowIfNullOrEmpty(devCd);
++        if (string.IsNullOrWhiteSpace(groupJson)) throw new FormatException("프로토콜 그룹 응답이 없습니다.");
++
++        ProtocolGroupSync group = Read<ProtocolGroupSync>(groupJson, "프로토콜 그룹").FirstOrDefault()
++            ?? throw new FormatException("프로토콜 그룹 응답에 항목이 없습니다.");
++        IReadOnlyList<DataTagSync> tags = string.IsNullOrWhiteSpace(dataTagsJson) ? [] : Read<DataTagSync>(dataTagsJson, "데이터 태그");
++        IReadOnlyList<DataChannelMapSync>? map = string.IsNullOrWhiteSpace(dataMapJson) ? null : Read<DataChannelMapSync>(dataMapJson, "data-map");
++        return CollectionPlanBuilder.Build(devCd, group, tags, profile, map);
++    }
++
++    private static IReadOnlyList<T> Read<T>(string json, string what)
++    {
++        try
++        {
++            return JsonSerializer.Deserialize<SyncResult<T>>(json, Web)?.Items ?? [];
++        }
++        catch (JsonException ex)
++        {
++            throw new FormatException($"{what} 응답 형식 오류: {ex.Message}", ex);
++        }
++    }
++}
++
++/// <summary>
++/// 장치 연결 설정 결정 (C6 결정 2): <b>로컬 덮어쓰기(PC별) → 서버 DEV_CONFIG</b>.
++/// COM 번호처럼 PC마다 다른 값은 로컬에서 덮어쓴다. 결과는 <see cref="TransportFactory.FromLocalConfig"/> 형식.
++/// transport 키가 없으면 장치유형(DEVI)으로 채운다: DEVI0000 VIRTUAL · DEVI0001 SERIAL · DEVI0002/0003 TCP.
++/// </summary>
++public static class ConnectionResolver
++{
++    public const string SourceLocal = "local";
++    public const string SourceServer = "server";
++
++    public static (string Json, string Source) Resolve(string? devType, string? localJson, string? devConfig)
++    {
++        if (!string.IsNullOrWhiteSpace(localJson)) return (Normalize(localJson, devType), SourceLocal);
++        if (!string.IsNullOrWhiteSpace(devConfig) && devConfig.TrimStart().StartsWith('{')) return (Normalize(devConfig, devType), SourceServer);
++        throw new TransportConfigException("연결 설정이 없습니다 (로컬 덮어쓰기·장치 DEV_CONFIG 모두 없음).");
++    }
++
++    private static string Normalize(string json, string? devType)
++    {
++        JsonObject obj;
++        try
++        {
++            obj = JsonNode.Parse(json) as JsonObject ?? throw new TransportConfigException("연결 설정은 JSON 객체입니다.");
++        }
++        catch (JsonException ex)
++        {
++            throw new TransportConfigException("연결 설정 JSON 형식 오류: " + ex.Message);
++        }
++        if (!obj.ContainsKey("transport"))
++        {
++            string kind = devType switch
++            {
++                "DEVI0000" => "VIRTUAL",
++                "DEVI0001" => "SERIAL",
++                "DEVI0002" or "DEVI0003" => "TCP",
++                _ => throw new TransportConfigException($"transport 가 없고 장치유형({devType ?? "-"})으로 정할 수 없습니다.")
++            };
++            obj["transport"] = kind;
++        }
++        return obj.ToJsonString();
++    }
++}
++
++/// <summary>
++/// C6a Terminal 수집 엔진 1개 장치분: CollectionPlan + LinkSupervisor(재연결) + DeviceSession(초기화 루틴·명령·수신·매핑).
++/// C5d 실장비 검증(COM3) 도구와 같은 조합을 제품 코드로 옮긴 것. 측정값 업로드는 하지 않는다(C7).
++/// </summary>
++public sealed class CollectionRuntime : IAsyncDisposable
++{
++    private readonly LinkSupervisor _link;
++    private readonly DeviceSession _session;
++    private int _stopped;
++
++    public CollectionRuntime(CollectionPlan plan, ITransport transport, ReconnectPolicy? policy = null)
++    {
++        Plan = plan ?? throw new ArgumentNullException(nameof(plan));
++        Transport = transport ?? throw new ArgumentNullException(nameof(transport));
++        _link = new LinkSupervisor(transport, policy);
++        _session = plan.CreateSession(transport);
++        _link.Event += (_, e) => { LastLink = e.Kind; LinkChanged?.Invoke(this, e); };
++        _session.Values += (_, e) => Values?.Invoke(this, e);
++        _session.Warning += (_, w) => Warning?.Invoke(this, w);
++        _session.StateChanged += (_, s) => StateChanged?.Invoke(this, s);
++        _session.InitCompleted += (_, r) =>
++        {
++            // 초기화 루틴(장치 기준 STOP 먼저)이 돌았으면 장치는 측정 중이 아니다
++            Measuring = false;
++            LastInit = r;
++            InitCompleted?.Invoke(this, r);
++        };
++    }
++
++    public CollectionPlan Plan { get; }
++
++    public ITransport Transport { get; }
++
++    public string DevCd => Plan.DevCd;
++
++    public DeviceSessionState State => _session.State;
++
++    public LinkEventKind? LastLink { get; private set; }
++
++    public InitRoutineResult? LastInit { get; private set; }
++
++    /// <summary>START 성공 후 true, STOP·PAUSE 성공 또는 초기화 루틴 뒤 false</summary>
++    public bool Measuring { get; private set; }
++
++    public event EventHandler<ValuesEventArgs>? Values;
++    public event EventHandler<DeviceSessionState>? StateChanged;
++    public event EventHandler<InitRoutineResult>? InitCompleted;
++    public event EventHandler<LinkEvent>? LinkChanged;
++    public event EventHandler<string>? Warning;
++
++    /// <summary>연결 시작. 첫 연결이 실패해도 예외 없이 재연결을 이어간다 (상태는 이벤트로)</summary>
++    public async Task StartAsync(CancellationToken cancellationToken = default)
++    {
++        await _link.StartAsync(cancellationToken).ConfigureAwait(false);
++        await _session.StartAsync().ConfigureAwait(false);
++    }
++
++    /// <summary>
++    /// 실험 동작 실행. ptlCd 를 주지 않으면 계획에서 해당 동작(START/STOP/PAUSE)이 지정된 프로토콜을 쓴다 (서버 PTL_ACTION → 내장).
++    /// </summary>
++    public async Task<(string? PtlCd, CommandResult Result)> ExecuteActionAsync(
++        CommandAction action, string? ptlCd = null, CancellationToken cancellationToken = default)
++    {
++        string? cd = string.IsNullOrWhiteSpace(ptlCd)
++            ? Plan.Protocols.FirstOrDefault(p => p.Action == action)?.PtlCd
++            : Plan.Protocols.FirstOrDefault(p => string.Equals(p.PtlCd, ptlCd.Trim(), StringComparison.OrdinalIgnoreCase))?.PtlCd;
++        if (cd is null)
++        {
++            string why = string.IsNullOrWhiteSpace(ptlCd) ? $"{action} 동작 프로토콜이 계획에 없습니다." : $"계획에 없는 프로토콜: {ptlCd}";
++            return (null, new CommandResult(CommandStatus.Rejected, null, 0, why));
++        }
++
++        CommandResult result = await _session.ExecuteAsync(cd, cancellationToken).ConfigureAwait(false);
++        if (result.Ok)
++        {
++            if (action == CommandAction.Start) Measuring = true;
++            else if (action is CommandAction.Stop or CommandAction.Pause) Measuring = false;
++        }
++        return (cd, result);
++    }
++
++    /// <summary>측정 중이면 STOP 을 먼저 보내고(최대 3초) 세션·연결을 닫는다</summary>
++    public async Task StopAsync()
++    {
++        if (Interlocked.Exchange(ref _stopped, 1) == 1) return;
++        if (Measuring && Transport.State == TransportState.Open)
++        {
++            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
++            try { await ExecuteActionAsync(CommandAction.Stop, null, cts.Token).ConfigureAwait(false); }
++            catch { /* 종료 중 STOP 실패는 무시 (재연결 시 초기화 루틴이 STOP 을 먼저 보낸다) */ }
++        }
++        await _session.StopAsync().ConfigureAwait(false);
++        await _link.DisposeAsync().ConfigureAwait(false);
++    }
++
++    public ValueTask DisposeAsync() => new(StopAsync());
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/C6aTerminalTests.cs b/desktop/tests/juprovider.tests.protocol/C6aTerminalTests.cs
+new file mode 100644
+index 0000000..3b5bed6
+--- /dev/null
++++ b/desktop/tests/juprovider.tests.protocol/C6aTerminalTests.cs
+@@ -0,0 +1,275 @@
++using System.Collections.Concurrent;
++using System.Text.Json;
++using JuProvider.Lib.Device.Models;
++using JuProvider.Lib.Ipc.Messages;
++using JuProvider.Lib.Ipc.Pipe;
++using JuProvider.Lib.Protocol.Mapping;
++using JuProvider.Lib.Protocol.Model;
++using JuProvider.Lib.Protocol.Runtime;
++using JuProvider.Lib.Protocol.Scheduling;
++using JuProvider.Lib.Protocol.Session;
++using JuProvider.Lib.Protocol.Sync;
++using JuProvider.Lib.Protocol.Transport;
++using JuProvider.Terminal.Runtime;
++
++namespace JuProvider.Tests.Protocol;
++
++/// <summary>
++/// C6a Terminal 수집 엔진: CollectionPlan + LinkSupervisor + DeviceSession, IPC(DevicePlanSync·DeviceAction·DataValues),
++/// 가상 GTEC(내장 ProfileSimulator, 서버 값만) 전체 수집·중지·재연결 E2E, 기존 가상 장치 회귀.
++/// </summary>
++public class C6aTerminalTests
++{
++    private const string Dev = "SDEV_GTEC01";
++    private const string VirtualConn = """{"transport":"VIRTUAL","profile":"GTEC_SCIENCE_CUBE"}""";
++    private static readonly string[] MappedKeys = ["DG_GTEC01/GTEC-DATA-01/1", "DG_GTEC01/GTEC-DATA-02/2", "DG_GTEC01/GTEC-DATA-03/3"];
++    private static readonly ReconnectPolicy FastPolicy = new([TimeSpan.FromMilliseconds(100)], TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(400));
++
++    /// <summary>서버 응답(C5c 형태) 그대로. 초기화 대기만 줄인다</summary>
++    private static string GroupJson() => ServerPlanTests.ServerProtocolsJson.Replace("\"initDelayMs\": 500", "\"initDelayMs\": 50");
++
++    private static DevicePlanSyncMessage PlanInput(string? connection = VirtualConn) => new()
++    {
++        DevCd = Dev, PtlGrpCd = "GTEC", Source = "server", Revision = "r2",
++        GroupJson = GroupJson(), DataTagsJson = CollectionTests.TagsJson, DataMapJson = ServerPlanTests.DataMapJson,
++        ConnectionJson = connection
++    };
++
++    private static DeviceSyncModel SerialDevice() => new()
++    {
++        DevCd = Dev, DevType = "DEVI0001", DevComm = "DEVC0003", PtlGrpCd = "GTEC", DevCh = 4, DevDatCnt = 4, UseYn = "YENO0001", DevNm = "GTEC"
++    };
++
++    private static DeviceSyncModel LegacyVirtual() => new()
++    {
++        DevCd = "VDEV_LEGACY01", DevType = "DEVI0000", DevComm = "DEVC0000", DevCh = 3, DevDatCnt = 3, UseYn = "YENO0001", DevNm = "가상"
++    };
++
++    // ---------- 계획·연결 설정 ----------
++
++    [Fact] // 서버 응답 원문 → 계획: 서버 값 우선 (C5d 와 같음)
++    public void PlanReader_Builds_Server_First_Plan_From_Raw_Responses()
++    {
++        CollectionPlan plan = CollectionPlanReader.Build(Dev, GroupJson(), CollectionTests.TagsJson, ServerPlanTests.DataMapJson, CollectionProfile.Empty("GTEC"));
++        Assert.Equal("GTEC", plan.PtlGrpCd);
++        Assert.Equal(new[] { "GTEC0301", "GTEC0001", "GTEC0002", "GTEC0100" }, plan.Session.InitRoutine);
++        Assert.Equal(200, plan.Scheduler.InterCommandGapMs);
++        Assert.Equal(4, plan.MapEntries.Count);
++        Assert.All(new[] { "frame", "cmdGapMs", "initRoutine", "map" }, k => Assert.Equal(PlanSource.Server, plan.Sources[k]));
++        Assert.Throws<FormatException>(() => CollectionPlanReader.Build(Dev, "{\"revision\":\"x\",\"items\":[]}", null, null));
++        Assert.Throws<FormatException>(() => CollectionPlanReader.Build(Dev, "not json", null, null));
++    }
++
++    [Fact] // 로컬 덮어쓰기 → DEV_CONFIG, transport 없으면 장치유형으로
++    public void ConnectionResolver_Local_Overrides_Server_And_Fills_Transport()
++    {
++        var (json, src) = ConnectionResolver.Resolve("DEVI0001", """{"portName":"COM3","baudRate":115200}""", """{"portName":"COM6"}""");
++        Assert.Equal(ConnectionResolver.SourceLocal, src);
++        Assert.Contains("\"transport\":\"SERIAL\"", json);
++        Assert.Contains("COM3", json);
++        (json, src) = ConnectionResolver.Resolve("DEVI0001", null, """{"serialPort":"COM6","baudRate":115200}""");
++        Assert.Equal(ConnectionResolver.SourceServer, src);
++        Assert.IsType<SerialTransport>(TransportFactory.FromLocalConfig(json));
++        Assert.Throws<TransportConfigException>(() => ConnectionResolver.Resolve("DEVI0001", null, null));
++        Assert.Throws<TransportConfigException>(() => ConnectionResolver.Resolve("DEVI9999", "{}", null));
++    }
++
++    [Fact] // IPC 메시지 직렬화 왕복 (키는 메시지에 없다)
++    public void Ipc_Messages_Round_Trip()
++    {
++        var plan = IpcMessage.Create(IpcMessageTypes.DevicePlanSync, PlanInput()).GetPayload<DevicePlanSyncMessage>()!;
++        Assert.Equal(Dev, plan.DevCd);
++        Assert.Equal(GroupJson(), plan.GroupJson);
++        Assert.DoesNotContain("clientKey", JsonSerializer.Serialize(plan), StringComparison.OrdinalIgnoreCase);
++        var act = IpcMessage.Create(IpcMessageTypes.DeviceAction, new DeviceActionMessage { DevCd = Dev, Action = "START" }).GetPayload<DeviceActionMessage>()!;
++        Assert.Equal("START", act.Action);
++        var t0 = DateTimeOffset.Now;
++        var vals = IpcMessage.Create(IpcMessageTypes.DataValues, new DataValuesMessage
++        {
++            DevCd = Dev, PtlCd = "GTEC0400",
++            Values = [new DataValueItem { ChannelKey = "1", DataKey = MappedKeys[0], DatGrCd = "DG_GTEC01", DatCd = "GTEC-DATA-01", DatIdx = 1, Value = 1.5, Quality = "Good", ReceivedAt = t0 }]
++        }).GetPayload<DataValuesMessage>()!;
++        Assert.Equal(1.5, vals.Values.Single().Value);
++        Assert.Equal(t0, vals.Values.Single().ReceivedAt);
++    }
++
++    // ---------- 수집 엔진 단독 ----------
++
++    [Fact] // 가상 GTEC(내장 시뮬레이터) + 서버 값: 초기화 → START → 수집·매핑 → STOP → 분리 → 자동 재연결·루틴 재실행 → 수집 → STOP
++    public async Task CollectionRuntime_Virtual_Gtec_Full_Cycle_With_Reconnect()
++    {
++        CollectionPlan plan = CollectionPlanReader.Build(Dev, GroupJson(), CollectionTests.TagsJson, ServerPlanTests.DataMapJson);
++        var transport = (VirtualTransport)TransportFactory.FromLocalConfig(VirtualConn);
++        await using var rt = new CollectionRuntime(plan, transport, FastPolicy);
++        var values = new ConcurrentQueue<LogicalValue>();
++        var inits = new ConcurrentQueue<InitRoutineResult>();
++        var links = new ConcurrentQueue<LinkEventKind>();
++        rt.Values += (_, e) => { foreach (var v in e.Values) values.Enqueue(v); };
++        rt.InitCompleted += (_, r) => inits.Enqueue(r);
++        rt.LinkChanged += (_, e) => links.Enqueue(e.Kind);
++
++        await rt.StartAsync();
++        Assert.True(await Wait.UntilAsync(() => inits.Count == 1, 5000), "초기화 루틴");
++        Assert.True(inits.Single().AllOk, string.Join(",", inits.Single().Steps.Select(s => $"{s.Key}:{s.Value.Status}")));
++        Assert.Equal(DeviceSessionState.Ready, rt.State);
++
++        var (startCd, start) = await rt.ExecuteActionAsync(CommandAction.Start);
++        Assert.Equal("GTEC0300", startCd);
++        Assert.True(start.Ok);
++        Assert.True(rt.Measuring);
++        Assert.True(await Wait.UntilAsync(() => values.Count >= 9, 3000), $"values {values.Count}");
++        Assert.Equal(MappedKeys, values.Select(v => v.Data!.Key).Distinct().OrderBy(x => x, StringComparer.Ordinal));
++        Assert.All(values, v => Assert.Equal(DataQuality.Good, v.Quality));
++
++        var (stopCd, stop) = await rt.ExecuteActionAsync(CommandAction.Stop);
++        Assert.Equal("GTEC0301", stopCd);
++        Assert.True(stop.Ok);
++        Assert.False(rt.Measuring);
++        await Task.Delay(300);
++        int n = values.Count;
++        await Task.Delay(400);
++        Assert.Equal(n, values.Count);
++
++        // 측정 중 분리 → 감독자가 다시 열고 세션이 루틴(STOP 먼저)을 다시 돈다
++        Assert.True((await rt.ExecuteActionAsync(CommandAction.Start)).Result.Ok);
++        Assert.True(await Wait.UntilAsync(() => values.Count > n, 3000));
++        transport.ForceDisconnect();
++        Assert.True(await Wait.UntilAsync(() => inits.Count == 2, 8000), "재연결 후 루틴 재실행");
++        Assert.True(inits.Last().AllOk);
++        Assert.False(rt.Measuring);
++        Assert.Contains(LinkEventKind.Faulted, links);
++        Assert.Contains(LinkEventKind.Recovered, links);
++
++        while (values.TryDequeue(out _)) { }
++        Assert.True((await rt.ExecuteActionAsync(CommandAction.Start)).Result.Ok);
++        Assert.True(await Wait.UntilAsync(() => values.Count >= 6, 3000), "재연결 후 데이터");
++        Assert.True((await rt.ExecuteActionAsync(CommandAction.Stop)).Result.Ok);
++
++        var (none, rej) = await rt.ExecuteActionAsync(CommandAction.Pause);
++        Assert.Null(none);
++        Assert.Equal(CommandStatus.Rejected, rej.Status);
++    }
++
++    // ---------- Terminal 런타임 관리자 ----------
++
++    [Fact] // 계획 → 연결 → START → 값(IPC 형식, data-map TAG) → STOP → 해제. 상태·경고 전달
++    public async Task Manager_Plan_Connect_Action_Values_Disconnect()
++    {
++        var mgr = new DeviceRuntimeManager { ReconnectPolicy = FastPolicy };
++        var values = new ConcurrentQueue<DataValuesMessage>();
++        var states = new ConcurrentQueue<DeviceRuntimeStateMessage>();
++        mgr.ValuesReceived += values.Enqueue;
++        mgr.RuntimeStateChanged += states.Enqueue;
++
++        mgr.SyncDevices([SerialDevice()]);
++        await Assert.ThrowsAsync<NotSupportedException>(() => mgr.ConnectAsync(Dev)); // 계획 전: 기존처럼 미지원
++
++        Assert.False(mgr.ApplyPlan(new DevicePlanSyncMessage { DevCd = Dev, PtlGrpCd = "GTEC", GroupJson = "x" }));
++        Assert.Contains(states, s => s.Event == "ERROR" && s.Message!.Contains("수집 계획 오류"));
++        Assert.True(mgr.ApplyPlan(PlanInput()));
++        DeviceRuntimeStateMessage planState = states.Last(s => s.Event == "PLAN");
++        Assert.True(planState.ServerItems > 0 && planState.ServerItems <= planState.TotalItems, $"{planState.ServerItems}/{planState.TotalItems}");
++        Assert.NotEmpty(planState.Warnings); // GTEC0101·0401 역할 없음 등
++
++        Assert.True(await mgr.ConnectAsync(Dev));
++        Assert.True(await Wait.UntilAsync(() => states.Any(s => s.Event == "INIT" && s.InitOk == true), 5000));
++        Assert.Equal("local", states.Last(s => s.Event == "INIT").ConnectionSource);
++
++        DeviceActionResultMessage r = await mgr.ExecuteActionAsync(new DeviceActionMessage { DevCd = Dev, Action = "start" });
++        Assert.True(r.Ok, r.Message);
++        Assert.Equal("GTEC0300", r.PtlCd);
++        Assert.True(await Wait.UntilAsync(() => values.Sum(v => v.Values.Count) >= 9, 3000));
++        Assert.All(values, m => Assert.Equal("GTEC0400", m.PtlCd));
++        Assert.Equal(MappedKeys, values.SelectMany(m => m.Values).Select(v => v.DataKey!).Distinct().OrderBy(x => x, StringComparer.Ordinal));
++        Assert.All(values.SelectMany(m => m.Values), v => Assert.Equal("Good", v.Quality));
++
++        Assert.True((await mgr.ExecuteActionAsync(new DeviceActionMessage { DevCd = Dev, Action = "STOP" })).Ok);
++        Assert.False((await mgr.ExecuteActionAsync(new DeviceActionMessage { DevCd = Dev, Action = "JUMP" })).Ok);
++        Assert.False((await mgr.ExecuteActionAsync(new DeviceActionMessage { DevCd = "NONE", Action = "START" })).Ok);
++
++        await mgr.DisconnectAsync(Dev);
++        Assert.Null(mgr.GetCollection(Dev));
++        Assert.Contains(states, s => s.Event == "STOPPED");
++    }
++
++    [Fact] // 측정 중 해제하면 STOP 을 먼저 보낸다 (장비가 측정 상태로 남지 않게)
++    public async Task Manager_Disconnect_While_Measuring_Sends_Stop()
++    {
++        var mgr = new DeviceRuntimeManager { ReconnectPolicy = FastPolicy };
++        mgr.SyncDevices([SerialDevice()]);
++        Assert.True(mgr.ApplyPlan(PlanInput()));
++        Assert.True(await mgr.ConnectAsync(Dev));
++        CollectionRuntime rt = mgr.GetCollection(Dev)!;
++        Assert.True(await Wait.UntilAsync(() => rt.LastInit?.AllOk == true, 5000));
++        Assert.True((await mgr.ExecuteActionAsync(new DeviceActionMessage { DevCd = Dev, Action = "START" })).Ok);
++        Assert.True(rt.Measuring);
++        await mgr.DisconnectAsync(Dev);
++        Assert.False(rt.Measuring);
++        Assert.Equal(DeviceSessionState.Stopped, rt.State);
++    }
++
++    [Fact] // 회귀: 계획 없는 가상 장치는 기존 VirtualDeviceRuntime (DATA_RECEIVED 문자열)
++    public async Task Manager_Legacy_Virtual_Device_Unchanged()
++    {
++        var mgr = new DeviceRuntimeManager();
++        var data = new ConcurrentQueue<string>();
++        mgr.DataReceived += (_, d) => data.Enqueue(d);
++        mgr.SyncDevices([LegacyVirtual(), SerialDevice()]);
++        Assert.True(await mgr.ConnectAsync("VDEV_LEGACY01"));
++        Assert.True(await Wait.UntilAsync(() => !data.IsEmpty, 3000));
++        Assert.Matches(@"^\{\d+\.\d{2},\d+\.\d{2},\d+\.\d{2}\}$", data.First());
++        Assert.Null(mgr.GetCollection("VDEV_LEGACY01"));
++        await mgr.DisconnectAsync("VDEV_LEGACY01");
++        mgr.SyncDevices([SerialDevice()]); // 빠진 장치 제거
++        Assert.Null(mgr.GetDevice("VDEV_LEGACY01"));
++    }
++
++    // ---------- 실제 Named Pipe 로 Client ↔ Terminal ----------
++
++    [Fact] // Client(IpcPipeClient) → Terminal(라우터) 전체: 장치·계획 동기화 → 연결 → START → DATA_VALUES → STOP → 해제
++    public async Task Pipe_E2E_Client_To_Terminal_Collection()
++    {
++        string pipe = "juprovider-c6a-test-" + Guid.NewGuid().ToString("N");
++        var mgr = new DeviceRuntimeManager { ReconnectPolicy = FastPolicy };
++        await using var server = new IpcPipeServer(pipe);
++        var router = new TerminalMessageRouter(mgr, m => server.IsConnected ? server.SendAsync(m) : Task.CompletedTask);
++        server.MessageReceived += router.HandleAsync;
++        server.Start();
++
++        await using var client = new IpcPipeClient(pipe);
++        var got = new ConcurrentQueue<IpcMessage>();
++        client.MessageReceived += m => { got.Enqueue(m); return Task.CompletedTask; };
++        Assert.True(await client.ConnectAsync(5000));
++        Assert.True(await Wait.UntilAsync(() => server.IsConnected, 3000));
++
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DeviceSync, new DeviceSyncMessage { Devices = [SerialDevice(), LegacyVirtual()] }));
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DevicePlanSync, PlanInput()));
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DeviceConnect, new DeviceConnectMessage { DevCd = Dev }));
++
++        T? Find<T>(string type, Func<T, bool> pred) where T : class =>
++            got.Where(m => m.MessageType == type).Select(m => m.GetPayload<T>()).FirstOrDefault(p => p is not null && pred(p));
++
++        Assert.True(await Wait.UntilAsync(() => Find<DeviceRuntimeStateMessage>(IpcMessageTypes.DeviceRuntimeState, s => s.Event == "INIT" && s.InitOk == true) != null, 8000), "INIT");
++        Assert.NotNull(Find<DeviceStatusMessage>(IpcMessageTypes.DeviceStatus, s => s.DevCd == Dev && s.Status == DeviceRuntimeStatus.Connected));
++        Assert.NotNull(Find<DeviceRuntimeStateMessage>(IpcMessageTypes.DeviceRuntimeState, s => s.Event == "PLAN" && s.Warnings.Count > 0));
++
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DeviceAction, new DeviceActionMessage { DevCd = Dev, Action = "START" }));
++        Assert.True(await Wait.UntilAsync(() => got.Count(m => m.MessageType == IpcMessageTypes.DataValues) >= 3, 5000), "DATA_VALUES");
++        Assert.NotNull(Find<DeviceActionResultMessage>(IpcMessageTypes.DeviceActionResult, r => r.Action == "START" && r.Ok && r.PtlCd == "GTEC0300"));
++        var keys = got.Where(m => m.MessageType == IpcMessageTypes.DataValues)
++            .SelectMany(m => m.GetPayload<DataValuesMessage>()!.Values).Select(v => v.DataKey).Distinct().OrderBy(x => x, StringComparer.Ordinal);
++        Assert.Equal(MappedKeys, keys);
++
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DeviceAction, new DeviceActionMessage { DevCd = Dev, Action = "STOP" }));
++        Assert.True(await Wait.UntilAsync(() => Find<DeviceActionResultMessage>(IpcMessageTypes.DeviceActionResult, r => r.Action == "STOP" && r.Ok) != null, 3000));
++
++        // 기존 가상 장치도 같은 파이프로 그대로 (DATA_RECEIVED)
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DeviceConnect, new DeviceConnectMessage { DevCd = "VDEV_LEGACY01" }));
++        Assert.True(await Wait.UntilAsync(() => got.Any(m => m.MessageType == IpcMessageTypes.DataReceived), 4000), "DATA_RECEIVED");
++
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DeviceDisconnect, new DeviceDisconnectMessage { DevCd = Dev }));
++        await client.SendAsync(IpcMessage.Create(IpcMessageTypes.DeviceDisconnect, new DeviceDisconnectMessage { DevCd = "VDEV_LEGACY01" }));
++        Assert.True(await Wait.UntilAsync(() => Find<DeviceStatusMessage>(IpcMessageTypes.DeviceStatus, s => s.DevCd == Dev && s.Status == DeviceRuntimeStatus.Disconnected) != null, 5000));
++        Assert.Null(mgr.GetCollection(Dev));
++    }
++}
+diff --git a/desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj b/desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj
+index ac36188..78497ad 100644
+--- a/desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj
++++ b/desktop/tests/juprovider.tests.protocol/juprovider.tests.protocol.csproj
+@@ -17,6 +17,9 @@
+ 
+   <ItemGroup>
+     <ProjectReference Include="..\..\lib\juprovider.lib.protocol\juprovider.lib.protocol.csproj" />
++    <!-- C6a: Terminal 수집 엔진·IPC 라우터 E2E -->
++    <ProjectReference Include="..\..\lib\juprovider.lib.ipc\juprovider.lib.ipc.csproj" />
++    <ProjectReference Include="..\..\juprovider.terminal\juprovider.terminal.csproj" />
+   </ItemGroup>
+ 
+   <ItemGroup>
