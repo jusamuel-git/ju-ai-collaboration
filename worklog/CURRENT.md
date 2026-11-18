@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자 | **11/18 상태 조사** [결과](../reviews/claude/2026-11-18_status_result.md) — 8081: 11/15 08:51 셧다운 명령·11/17 22:30 콘솔 종료로 중지 → 11/18 21:02 기존 WAR 재기동(숨김 실행), health 200. admin: PC-B에서 비밀번호 변경 이력 없음(초기 비밀번호, 실패 4회, 잠금 없음) → **로그인 불가로 Client 등록·GTEC 화면 미완료**. 결정 대기: 복구 A(초기 비밀번호로 웹 로그인→변경) 또는 B(DB 해시 임시 재설정, 승인 필요), Tomcat 서비스 등록 |
 | 사용자 | **Jenkins 배포 정상화 (11/15 08:37)** — #3 SUCCESS(`4915759`, 테스트 62, health UP), 8081 홈페이지 로드 확인. #2는 JDK21 도구 미인식으로 실패 → 도구 설정 재저장 후 해소 [결과 4절](../reviews/claude/2026-11-14_c5c_deploy_result.md). 남은 일: Desktop Client 등록(승인 필요), 관리자 화면 확인 |
 | 사용자 | **Jenkins `JU_TOMCAT_HOME` 설정 완료 (11/15 08:30)** — 전역 속성에 `C:\MyData\MyTool\tomcat\apache-tomcat-10.1.52` 저장·재확인. 남은 일: Desktop Client 등록(C5d 전, 승인 필요), 관리자 화면 확인 |
 | 사용자 | **C5c 서버 배포 완료 (11/14 22:20)** [결과](../reviews/claude/2026-11-14_c5c_deploy_result.md) — main `fce5048`→`4915759` ff push, 8081 = c5d WAR(`EC80C07D…`), health UP·인증 401 경계·로그 오류 0·실DB 무변경. Jenkins 로그인 불가로 수동 배포(리허설 방식), 백업 `backup\c5c_deploy_20261114_220358`. **남은 일**: Jenkins `JU_TOMCAT_HOME` 설정(사용자 로그인 필요), Desktop Client 등록(C5d 전, 승인 필요), 관리자 화면 확인 |
