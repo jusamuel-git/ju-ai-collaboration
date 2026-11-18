@@ -26,7 +26,7 @@
 | 확인 | 서버 설정 우선 적용 | PASS. 계획 출처가 frame·cmdGapMs·initDelayMs·각 프로토콜 tx/roles/action/pattern 모두 `server`. 내장 설정 미사용 |
 | 확인 | 채널별 TAG_ID 매핑 | PASS. `CH1~3 → DG_GTEC01/GTEC-DATA-01~03` (예: CH1 = 59.25). data-map 4행 사용, `CH<n>` 임시 변환 미사용 |
 
-- 실장비 OK 22건
+- 실장비 OK 24건
 - 경고 0건, 처리 안 된 프레임 0건, 초기화 루틴 2회
 - 제품 저장소 변경 없음 (`package-lock.json`은 기존 npm 변경)
 
