@@ -92,9 +92,22 @@ Check 'A-1' '관리자 로그인' (($r.code -eq 200) -and [bool]$script:tok) ("H
 if (-not $script:tok) { Done 'C5D-CONNECT-STOPPED'; exit 1 }
 Info 'A-2' '비밀번호 변경 필요' ([string]$r.json.data.passwordChangeRequired)
 if ($r.json.data.passwordChangeRequired -eq $true) {
-    Check 'A-2b' '비밀번호 변경 필요 상태 → 관리자 API 사용 불가' $false '웹 화면에서 비밀번호를 먼저 변경한 뒤 다시 실행'
-    Done 'C5D-CONNECT-STOPPED'; exit 1
+    Log '  비밀번호 변경이 필요합니다 (임시 비밀번호 상태). 새 비밀번호를 이 창에서 정합니다 (8자 이상, 화면에 표시되지 않음).'
+    $n1 = Read-Host '  새 비밀번호' -AsSecureString; $n2 = Read-Host '  새 비밀번호 한 번 더' -AsSecureString
+    function Plain($s) { $b2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b2) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b2) } }
+    $q1 = Plain $n1; $q2 = Plain $n2; $cur = Plain $sp
+    if ($q1 -ne $q2 -or $q1.Length -lt 8) { $q1 = $null; $q2 = $null; $cur = $null; Check 'A-2b' '새 비밀번호 입력' $false '두 입력이 다르거나 8자 미만'; Done 'C5D-CONNECT-STOPPED'; exit 1 }
+    $pc = Http 'POST' '/api/auth/password' (Bearer) ((@{ currentPassword = $cur; newPassword = $q1 } | ConvertTo-Json -Compress))
+    Check 'A-2b' '비밀번호 변경 (POST /api/auth/password, 제품 기능)' ($pc.code -eq 200) ("HTTP " + $pc.code + $(if ($pc.code -ne 200 -and $pc.json.message) { ' ' + $pc.json.message } else { '' }))
+    if ($pc.code -eq 200) {
+        $r = Http 'POST' '/api/auth/login' $null ((@{ loginId = $lid; password = $q1 } | ConvertTo-Json -Compress))
+        $script:tok = $r.json.data.accessToken
+        Check 'A-2c' '새 비밀번호로 다시 로그인 (변경 필요 해제)' (($r.code -eq 200) -and ($r.json.data.passwordChangeRequired -ne $true)) ("HTTP " + $r.code)
+    }
+    $q1 = $null; $q2 = $null; $cur = $null; $n1 = $null; $n2 = $null
+    if ($script:fail -gt 0) { Done 'C5D-CONNECT-STOPPED'; exit 1 }
 }
+$sp = $null
 $me = Http 'GET' '/api/auth/me' (Bearer) ''
 Info 'A-3' '/api/auth/me' ("HTTP " + $me.code + ", 권한 " + $me.json.data.authType)
 
