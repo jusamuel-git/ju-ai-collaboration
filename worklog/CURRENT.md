@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자 | **C6b Client 계획 동기화 PASS (11/23 19:45)** [결과](../reviews/claude/2026-11-23_c6b_result.md) — C6a `2fe4dca` commit·push(`feature/c6a-terminal`), C6b `f915996` push(`feature/c6b-client`, 4파일 +753). 서버 수집 설정·data-map → DEVICE_PLAN_SYNC, 오프라인 캐시, PC별 connections.json, 파이프 E2E. 빌드 5종 PASS, 서버 62, Desktop 203/203. main·DB·WAR·Tomcat 무변경. 결정 대기: C6c(UI·TEMP TEST 정리), COM3 connections.json 작성 후 실장비 앱 검증 |
 | 사용자 | **C6a Terminal 수집 엔진 PASS (11/18 22:06)** [결과](../reviews/claude/2026-11-18_c6a_result.md) — PC-B `feature/c6a-terminal`(기준 4915759, commit 없음), 9파일 +995/−236. 빌드 5종 PASS, 서버 62, Desktop 197/197(C6a 신규 8: 가상 GTEC 전체 주기·자동 재연결, 실제 파이프 E2E, 기존 가상 장치 회귀). Client·로그인 경로 무변경. 결정 대기: C6b(Client 계획 동기화·캐시) 진행 |
 | 사용자 | **C6 조사·설계 (11/18)** [설계](../reviews/claude/2026-11-18_c6_design.md) — ① Desktop 수집 연결: Client(서버·키)→IPC→Terminal(Plan·Session) 3단계 C6a~c ② Tomcat 서비스: 설정 파일 방식 리허설 V-1~5 PASS, Jenkinsfile Stop/Start 서비스 분기 선행 필요, **setenv.bat 비밀 노출(Authenticated Users 수정 권한) 발견** ③ GTEC 10개 보완안(역할 정정·중복/미정의 사용안함, PROT 다국어 이름 오류) ④ 관리자 화면: 수집 설정·역할 필드 없음(API만), 저장 시 기존 값 유지. 실제 전환·DB 변경·코드 구현 없음, 결정 6건 대기 |
 | 사용자 | **C5d Desktop 최종 실장비 검증 PASS (11/18 21:28)** [결과](../reviews/claude/2026-11-18_c5d_final_result.md) — admin 임시 재설정→최종 변경, Client `PCB-DESKTOP-01` 등록·키 발급(키는 client.json만), 키 인증 200/401/403, GTEC 서버설정·data-map 4채널 수신, 서버값 계획 16/16, COM3 INIT→START→수집(150 Good)→STOP→분리·재연결→자동 초기화→수집 재개 PASS(경고 0). 남은 결정: Desktop 앱에 CollectionPlan 수집 연결, Tomcat 서비스 등록, 역할 없는 GTEC 프로토콜 보완 |
