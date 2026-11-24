@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자 | **C6 안정화 PASS (11/24 22:07)** [결과](../reviews/claude/2026-11-24_c6_stabilize_result.md) — `feature/c6-stabilize` @ `f2e6d91`(← 69433f9) push. 백업 정책(정상 마이그레이션 후 30일·10개, 최신 1개 유지, incident·.keep·기타 보호), LEGACY 이력·상태(자동 삭제 없음, 정리 절차는 설계만), Client 오류 안내 7종 코드 구분. 빌드 5종 PASS, 서버 62, Desktop 223/223. 앱: 기존·신규·v0 업그레이드(정리 12→10, LEGACY verified)·상위 버전·파일 잠금 확인. 다음: 검토 후 C6d 조사·설계 |
 | 사용자 | **로컬 DB 마이그레이션 PASS (11/24 21:19)** [결과](../reviews/claude/2026-11-24_local_db_migration_result.md) — `feature/local-db-migration` @ `69433f9`(← 4409ade) push. 테이블별 DROP 재생성 제거, SCHEMA_VERSION 순차 마이그레이션(v0→v1 기준: 생성·컬럼 추가·키 다른 표는 _LEGACY_ 보존), 마이그레이션 전 백업·실패 시 복구, 상위 버전·경로 없음·구조 불일치는 오류(데이터 보존). 빌드 5종 PASS, 서버 62, Desktop 217/217. 앱: 기존 v1·신규·v0 복사본 마이그레이션·상위 버전 거부 확인. C6c 잔여 실장비는 사용자 결정으로 미검증 유지. 다음: C6d 검토 |
 | 사용자 | **로컬 DB 표준 템플릿 PASS (11/24 21:05)** [결과](../reviews/claude/2026-11-24_local_db_template_result.md) — `feature/local-db-template` @ `4409ade`(← 01d1775) push. 코드로 생성한 스키마 전용 template.accdb(4테이블, 데이터 없음, SCHEMA_VERSION=1)를 `desktop/resources`에 Git 관리, 빌드 시 app\config 복사. 사용자 DB 덮어쓰기 없음(기존 설치 2행 유지·생성 시각 불변), 신규 설치·재실행 확인. 빌드 5종 PASS, 서버 62, Desktop 212/212. 검증 스크립트 해시 함수 오류는 사후 확인으로 보완. 다음: C6d 검토 |
 | 사용자 | **C6c 실장비 부분 PASS (11/24 20:51)** [결과](../reviews/claude/2026-11-23_c6c_result.md) — `01d1775`. 앱에서 로그인·계획 전달·COM3 연결(conn=local)·INIT·START·수집(CH1~3 Good, TAG_ID 매핑)·STOP·해제 PASS. **미검증**: CH4 값 없음, 케이블 분리·자동 복구·재수집, 앱 가상 장치·오프라인 캐시. 서버 DEV_CONFIG 변경 안 함. 다음: template.accdb 표준화(별도 브랜치) |
