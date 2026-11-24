@@ -9,6 +9,7 @@
 ## 대기 중
 | 담당 | 내용 |
 |---|---|
+| 사용자 | **로컬 DB 표준 템플릿 PASS (11/24 21:05)** [결과](../reviews/claude/2026-11-24_local_db_template_result.md) — `feature/local-db-template` @ `4409ade`(← 01d1775) push. 코드로 생성한 스키마 전용 template.accdb(4테이블, 데이터 없음, SCHEMA_VERSION=1)를 `desktop/resources`에 Git 관리, 빌드 시 app\config 복사. 사용자 DB 덮어쓰기 없음(기존 설치 2행 유지·생성 시각 불변), 신규 설치·재실행 확인. 빌드 5종 PASS, 서버 62, Desktop 212/212. 검증 스크립트 해시 함수 오류는 사후 확인으로 보완. 다음: C6d 검토 |
 | 사용자 | **C6c 실장비 부분 PASS (11/24 20:51)** [결과](../reviews/claude/2026-11-23_c6c_result.md) — `01d1775`. 앱에서 로그인·계획 전달·COM3 연결(conn=local)·INIT·START·수집(CH1~3 Good, TAG_ID 매핑)·STOP·해제 PASS. **미검증**: CH4 값 없음, 케이블 분리·자동 복구·재수집, 앱 가상 장치·오프라인 캐시. 서버 DEV_CONFIG 변경 안 함. 다음: template.accdb 표준화(별도 브랜치) |
 | 사용자 | **C6b Client 계획 동기화 PASS (11/23 19:45)** [결과](../reviews/claude/2026-11-23_c6b_result.md) — C6a `2fe4dca` commit·push(`feature/c6a-terminal`), C6b `f915996` push(`feature/c6b-client`, 4파일 +753). 서버 수집 설정·data-map → DEVICE_PLAN_SYNC, 오프라인 캐시, PC별 connections.json, 파이프 E2E. 빌드 5종 PASS, 서버 62, Desktop 203/203. main·DB·WAR·Tomcat 무변경. 결정 대기: C6c(UI·TEMP TEST 정리), COM3 connections.json 작성 후 실장비 앱 검증 |
 | 사용자 | **C6a Terminal 수집 엔진 PASS (11/18 22:06)** [결과](../reviews/claude/2026-11-18_c6a_result.md) — PC-B `feature/c6a-terminal`(기준 4915759, commit 없음), 9파일 +995/−236. 빌드 5종 PASS, 서버 62, Desktop 197/197(C6a 신규 8: 가상 GTEC 전체 주기·자동 재연결, 실제 파이프 E2E, 기존 가상 장치 회귀). Client·로그인 경로 무변경. 결정 대기: C6b(Client 계획 동기화·캐시) 진행 |
